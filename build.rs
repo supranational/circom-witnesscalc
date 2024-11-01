@@ -29,5 +29,7 @@ fn main() -> Result<()> {
     let empty_array: &[&Path] = &[];
     prost_build::compile_protos(&["protos/messages.proto"], empty_array)?;
 
+    // println!("cargo:rustc-link-arg=-Wl,-soname,libcircom_witnesscalc.so");
+
     Ok(())
 }
