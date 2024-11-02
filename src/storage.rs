@@ -184,14 +184,18 @@ pub fn serialize_witnesscalc_graph<T: Write>(
 
 fn read_message_length<R: Read>(rw: &mut WriteBackReader<R>) -> std::io::Result<usize> {
     let mut buf = [0u8; MAX_VARINT_LENGTH];
-    rw.read(&mut buf)?;
+    let n = rw.read(&mut buf)?;
+    if n == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof, "Unexpected EOF"));
+    }
 
     let n = prost::decode_length_delimiter(buf.as_ref())?;
 
     let lnln = prost::length_delimiter_len(n);
 
-    if lnln < buf.len() {
-        rw.write(&buf[lnln..])?;
+    if lnln < n {
+        rw.write(&buf[lnln..n])?;
     }
 
     Ok(n)
