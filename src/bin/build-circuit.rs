@@ -174,7 +174,7 @@ fn operator_argument_instruction_n(
                         LocationRule::Mapped { ref signal_code, ref indexes } => {
                             calc_mapped_signal_idx(
                                 subcomponents, subcomponent_idx, io_map,
-                                signal_code.clone(), indexes, nodes, vars,
+                                *signal_code, indexes, nodes, vars,
                                 component_signal_start, signal_node_idx,
                                 print_debug, call_stack)
                         }
@@ -228,8 +228,7 @@ fn operator_argument_instruction_n(
                                 result.push(idx);
                             },
                             Some(Var::Value(ref v)) => {
-                                result.push(
-                                    nodes.push(Node::Constant(v.clone())).0);
+                                result.push(nodes.push(Node::Constant(*v)).0);
                             }
                             None => { panic!("variable is not set: {}, {:?}",
                                              load_bucket.line, call_stack); }
@@ -311,7 +310,7 @@ fn operator_argument_instruction(
                         LocationRule::Mapped { ref signal_code, ref indexes } => {
                             calc_mapped_signal_idx(
                                 subcomponents, subcomponent_idx, io_map,
-                                signal_code.clone(), indexes, nodes, vars,
+                                *signal_code, indexes, nodes, vars,
                                 component_signal_start, signal_node_idx,
                                 print_debug, call_stack)
                         }
@@ -345,7 +344,7 @@ fn operator_argument_instruction(
                             match vars[var_idx] {
                                 Some(Var::Node(idx)) => idx,
                                 Some(Var::Value(ref v)) => {
-                                    nodes.push(Node::Constant(v.clone())).0
+                                    nodes.push(Node::Constant(*v)).0
                                 }
                                 None => { panic!("variable is not set"); }
                             }
@@ -441,14 +440,14 @@ fn node_from_compute_bucket(
             &compute_bucket.stack[1], nodes, signal_node_idx, vars,
             component_signal_start, subcomponents, io_map, print_debug,
             call_stack);
-        return Node::Op(op.clone(), arg1, arg2);
+        return Node::Op(*op, arg1, arg2);
     }
     if let Some(op) = UNO_OPERATORS_MAP.get(&compute_bucket.op) {
         let arg1 = operator_argument_instruction(
             &compute_bucket.stack[0], nodes, signal_node_idx, vars,
             component_signal_start, subcomponents, io_map, print_debug,
             call_stack);
-        return Node::UnoOp(op.clone(), arg1);
+        return Node::UnoOp(*op, arg1);
     }
     panic!(
         "not implemented: this operator is not supported to be converted to Node: {}",
@@ -891,7 +890,7 @@ fn store_function_return_results_into_subsignal(
                     }
                     Some(Var::Value(v)) => {
                         src_node_idxs.push(
-                            nodes.push(Node::Constant(v.clone())).0);
+                            nodes.push(Node::Constant(v)).0);
                     }
                     None => {
                         panic!("variable at index {} is not set", i);
@@ -904,10 +903,10 @@ fn store_function_return_results_into_subsignal(
             assert_eq!(final_data.context.size, 1);
             match v {
                 Var::Node(node_idx) => {
-                    src_node_idxs.push(node_idx.clone());
+                    src_node_idxs.push(*node_idx);
                 }
                 Var::Value(v) => {
-                    src_node_idxs.push(nodes.push(Node::Constant(v.clone())).0);
+                    src_node_idxs.push(nodes.push(Node::Constant(*v)).0);
                 }
             }
         }

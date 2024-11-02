@@ -52,7 +52,7 @@ impl From<&crate::graph::Node> for crate::proto::node::Node {
         match node {
             crate::graph::Node::Input(i) => {
                 crate::proto::node::Node::Input (crate::proto::InputNode {
-                    idx: i.clone() as u32
+                    idx: *i as u32
                 })
             }
             crate::graph::Node::Constant(_) => {
@@ -63,25 +63,25 @@ impl From<&crate::graph::Node> for crate::proto::node::Node {
                 crate::proto::node::Node::UnoOp(
                     crate::proto::UnoOpNode {
                         op: op as i32,
-                        a_idx: a.clone() as u32 })
+                        a_idx: *a as u32 })
             }
             crate::graph::Node::Op(op, a, b) => {
                 crate::proto::node::Node::DuoOp(
                     crate::proto::DuoOpNode {
                         op: crate::proto::DuoOp::from(op) as i32,
-                        a_idx: a.clone() as u32,
-                        b_idx: b.clone() as u32 })
+                        a_idx: *a as u32,
+                        b_idx: *b as u32 })
             }
             crate::graph::Node::TresOp(op, a, b, c) => {
                 crate::proto::node::Node::TresOp(
                     crate::proto::TresOpNode {
                         op: crate::proto::TresOp::from(op) as i32,
-                        a_idx: a.clone() as u32,
-                        b_idx: b.clone() as u32,
-                        c_idx: c.clone() as u32 })
+                        a_idx: *a as u32,
+                        b_idx: *b as u32,
+                        c_idx: *c as u32 })
             }
             crate::graph::Node::MontConstant(c) => {
-                let bi = Into::<num_bigint::BigUint>::into(c.clone());
+                let bi = Into::<num_bigint::BigUint>::into(*c);
                 let i = crate::proto::BigUInt { value_le: bi.to_bytes_le() };
                 crate::proto::node::Node::Constant(
                     crate::proto::ConstantNode { value: Some(i) })
@@ -184,21 +184,21 @@ pub fn serialize_witnesscalc_graph<T: Write>(
 
 fn read_message_length<R: Read>(rw: &mut WriteBackReader<R>) -> std::io::Result<usize> {
     let mut buf = [0u8; MAX_VARINT_LENGTH];
-    let n = rw.read(&mut buf)?;
-    if n == 0 {
+    let bytes_read = rw.read(&mut buf)?;
+    if bytes_read == 0 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof, "Unexpected EOF"));
     }
 
-    let n = prost::decode_length_delimiter(buf.as_ref())?;
+    let len_delimiter = prost::decode_length_delimiter(buf.as_ref())?;
 
-    let lnln = prost::length_delimiter_len(n);
+    let lnln = prost::length_delimiter_len(len_delimiter);
 
-    if lnln < n {
-        rw.write(&buf[lnln..n])?;
+    if lnln < bytes_read {
+        rw.write_all(&buf[lnln..bytes_read])?;
     }
 
-    Ok(n)
+    Ok(len_delimiter)
 }
 
 fn read_message<R: Read, M: Message + std::default::Default>(rw: &mut WriteBackReader<R>) -> std::io::Result<M> {
