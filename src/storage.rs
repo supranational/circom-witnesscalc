@@ -311,6 +311,7 @@ mod tests {
     use std::collections::HashMap;
     use crate::graph::{Operation, TresOperation, UnoOperation};
     use core::str::FromStr;
+    use byteorder::ByteOrder;
     use super::*;
 
     #[test]

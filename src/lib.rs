@@ -192,6 +192,48 @@ impl From<ParseError> for Error {
     }
 }
 
+fn calc_len(vs: &Vec<serde_json::Value>) -> usize {
+    let mut len = vs.len();
+
+    for v in vs {
+        if let serde_json::Value::Array(arr) = v {
+            len += calc_len(arr)-1;
+        }
+    }
+
+    len
+}
+
+fn flatten_array(
+    key: &str, vs: &Vec<serde_json::Value>) -> Result<Vec<U256>, Error> {
+
+    let mut vals: Vec<U256> = Vec::with_capacity(calc_len(vs));
+
+    for v in vs {
+        match v {
+            serde_json::Value::String(s) => {
+                vals.push(U256::from_str_radix(s.as_str(),10)?);
+            }
+            serde_json::Value::Number(n) => {
+                vals.push(U256::from(
+                    n.as_u64()
+                        .ok_or(Error::InputsUnmarshal(format!(
+                            "signal value is not a positive integer: {}",
+                            key).to_string()))?));
+            }
+            serde_json::Value::Array(arr) => {
+                vals.extend_from_slice(flatten_array(key, arr)?.as_slice());
+            }
+            _ => {
+                return Err(Error::InputsUnmarshal(
+                    format!("inputs must be a string: {}", key).to_string()));
+            }
+        };
+
+    }
+    Ok(vals)
+}
+
 pub fn deserialize_inputs(inputs_data: &[u8]) -> Result<HashMap<String, Vec<U256>>, Error> {
     let v: serde_json::Value = serde_json::from_slice(inputs_data).unwrap();
 
@@ -216,24 +258,7 @@ pub fn deserialize_inputs(inputs_data: &[u8]) -> Result<HashMap<String, Vec<U256
                 inputs.insert(k.clone(), vec![i]);
             }
             serde_json::Value::Array(ss) => {
-                let mut vals: Vec<U256> = Vec::with_capacity(ss.len());
-                for v in &ss {
-                    let i = match v {
-                        serde_json::Value::String(s) => {
-                            U256::from_str_radix(s.as_str(),10)?
-                        }
-                        serde_json::Value::Number(n) => {
-                            if !n.is_u64() {
-                                return Err(Error::InputsUnmarshal("signal value is not a positive integer".to_string()));
-                            }
-                            U256::from(n.as_u64().unwrap())
-                        }
-                        _ => {
-                            return Err(Error::InputsUnmarshal(format!("inputs must be a string: {}", k).to_string()));
-                        }
-                    };
-                    vals.push(i);
-                }
+                let vals: Vec<U256> = flatten_array(k.as_str(), &ss)?;
                 inputs.insert(k.clone(), vals);
             }
             _ => {
@@ -252,6 +277,7 @@ mod tests {
     use prost::Message;
     use ruint::aliases::U256;
     use ruint::{uint};
+    use crate::flatten_array;
     use crate::proto::InputNode;
 
     #[test]
@@ -286,6 +312,29 @@ mod tests {
         };
         let v = i.encode_to_vec();
         println!("{:?}", v.len());
+    }
+
+    #[test]
+    fn test_flatten_array() {
+        let data = r#"["123", "456", 100500, [1, 2]]"#;
+        let v = serde_json::from_str(data).unwrap();
+        let res = flatten_array("key1", &v).unwrap();
+
+        let want = vec![uint!(123_U256), uint!(456_U256), uint!(100500_U256), uint!(1_U256), uint!(2_U256)];
+        assert_eq!(want, res);
+    }
+
+    #[test]
+    fn test_calc_len() {
+        let data = r#"["123", "456", 100500]"#;
+        let v = serde_json::from_str(data).unwrap();
+        let l = super::calc_len(&v);
+        assert_eq!(l, 3);
+
+        let data = r#"["123", ["456", true], 100500]"#;
+        let v = serde_json::from_str(data).unwrap();
+        let l = super::calc_len(&v);
+        assert_eq!(l, 4);
     }
 
 }
