@@ -32,7 +32,7 @@ fn prepare_status(status: *mut gw_status_t, code: GW_ERROR_CODE, error_msg: &str
             (*status).code = code;
             (*status).error_msg = libc::malloc(bs.len()+1) as *mut c_char;
             libc::memcpy((*status).error_msg as *mut c_void, bs.as_ptr() as *mut c_void, bs.len());
-            *((*status).error_msg.offset(bs.len() as isize)) = 0;
+            *((*status).error_msg.add(bs.len())) = 0;
         }
     }
 }
@@ -95,7 +95,7 @@ pub unsafe extern "C" fn gw_calc_witness(
 
     unsafe {
         *wtns_len = witness_data.len();
-        *wtns_data = libc::malloc(witness_data.len()) as *mut c_void;
+        *wtns_data = libc::malloc(witness_data.len());
         if (*wtns_data).is_null() {
             prepare_status(status, GW_ERROR_CODE_ERROR, "Failed to allocate memory for wtns_data");
             return 1;
@@ -105,14 +105,12 @@ pub unsafe extern "C" fn gw_calc_witness(
 
     prepare_status(status, GW_ERROR_CODE_ERROR, "test error");
 
-    println!("OK");
-
-    return 0;
+    0
 }
 
 // create a wtns file bytes from witness (array of field elements)
 pub fn wtns_from_witness(witness: Vec<U256>) -> Vec<u8> {
-    let vec_witness: Vec<FieldElement<32>> = witness.iter().map(|a| u256_to_field_element(a)).collect();
+    let vec_witness: Vec<FieldElement<32>> = witness.iter().map(u256_to_field_element).collect();
     let mut buf = Vec::new();
     let mut wtns_f = wtns_file::WtnsFile::from_vec(vec_witness, u256_to_field_element(&M));
     wtns_f.version = 2;
@@ -135,7 +133,7 @@ pub fn calc_witness(inputs: &str, graph_data: &[u8]) -> Result<Vec<U256>, Error>
     Ok(graph::evaluate(&nodes, inputs_buffer.as_slice(), &signals))
 }
 
-fn get_inputs_size(nodes: &Vec<Node>) -> usize {
+fn get_inputs_size(nodes: &[Node]) -> usize {
     let mut start = false;
     let mut max_index = 0usize;
     for &node in nodes.iter() {
@@ -153,7 +151,7 @@ fn get_inputs_size(nodes: &Vec<Node>) -> usize {
 
 fn populate_inputs(
     input_list: &HashMap<String, Vec<U256>>, inputs_info: &InputSignalsInfo,
-    input_buffer: &mut Vec<U256>) {
+    input_buffer: &mut [U256]) {
     for (key, value) in input_list {
         let (offset, len) = inputs_info[key];
         if len != value.len() {
@@ -162,7 +160,7 @@ fn populate_inputs(
         println!("input {}, offset {}, len {}", key, offset, len);
 
         for (i, v) in value.iter().enumerate() {
-            input_buffer[offset + i] = v.clone();
+            input_buffer[offset + i] = *v;
         }
     }
 }

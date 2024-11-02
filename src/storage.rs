@@ -264,7 +264,7 @@ impl <R: Read> WriteBackReader<R> {
 
 impl<R: Read> Read for WriteBackReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if buf.len() == 0 {
+        if buf.is_empty() {
             return Ok(0)
         }
 
