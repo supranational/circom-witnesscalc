@@ -1590,7 +1590,7 @@ fn load_n(
                         component_signal_start, signal_idx, i);
                     result.push(Var::Node(signal_node));
                 }
-                return result;
+                result
             }
             LocationRule::Mapped { .. } => {
                 panic!("mapped signals expect only on address type SubcmpSignal");
@@ -1654,7 +1654,7 @@ fn load_n(
                     component_signal_start, signal_idx, i);
                 result.push(Var::Node(signal_node));
             }
-            return result;
+            result
         }
         AddressType::Variable => {
             let location = if let LocationRule::Indexed { location, template_header } = &load_bucket.src {
@@ -2022,7 +2022,7 @@ fn init_input_signals(
         }
     }
 
-    return (inputs_info, signal_values);
+    (inputs_info, signal_values)
 }
 
 fn run_template(
@@ -2218,6 +2218,8 @@ fn main() {
     println!("functions len: {}", circuit.functions.len());
     println!("main header: {}", circuit.c_producer.main_header);
 
+    // The node indexes for each signal. For example in
+    // signal_node_idx[3] stored the node index for signal 3.
     let mut signal_node_idx: Vec<usize> =
         vec![usize::MAX; circuit.c_producer.total_number_of_signals];
 
