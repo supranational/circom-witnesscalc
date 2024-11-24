@@ -65,20 +65,21 @@ impl VM<'_, '_> {
 #[derive(Debug)]
 enum OpCode {
     NoOp = 0,
-    StoreSelfSignal8 = 1,
-    GetConstant8 = 2, // pushes the value of a constant to the stack. Address of the constant is u64 little endian
-    Push8 = 3, // pushes the value of the following 4 bytes as a little endian u64 to the stack
-    GetVariable4 = 4,
-    GetVariable = 5,
-    SetVariable4 = 6,
-    SetVariable = 7,
-    JumpIfFalse = 8, // Jump to the offset i32 if the value on the top of the stack is false
-    Jump = 9, // Jump to the offset i32
-    OpMul = 10,
-    OpAdd = 11,
-    OpLt = 12,
-    GetSelfSignal4 = 13, // next following 4 bytes is the signal index as le u32
-    GetSelfSignal = 14, // the address of the signal is a value on the stack
+    GetConstant8     =  1, // pushes the value of a constant to the stack. Address of the constant is u64 little endian
+    Push8            =  2, // pushes the value of the following 4 bytes as a little endian u64 to the stack
+    GetVariable4     =  3,
+    GetVariable      =  4,
+    SetVariable4     =  5,
+    SetVariable      =  6,
+    GetSelfSignal4   =  7, // next following 4 bytes is the signal index as le u32
+    GetSelfSignal    =  8, // the address of the signal is a value on the stack
+    StoreSelfSignal4 =  9,
+    StoreSelfSignal  = 10,
+    JumpIfFalse      = 11, // Jump to the offset i32 if the value on the top of the stack is false
+    Jump             = 12, // Jump to the offset i32
+    OpMul            = 13,
+    OpAdd            = 14,
+    OpLt             = 15,
 }
 
 fn assert_u64_value(inst: &InstructionPointer) -> u64 {
@@ -478,15 +479,50 @@ fn execute(component: &mut Component, constants: &Vec<Fr>, signals: &mut [Option
             OpCode::NoOp => {
                 // do nothing
             }
-            OpCode::StoreSelfSignal8 => {
-                let sig_idx = read_usize(&vm.component.template.code, ip);
-                ip += size_of::<usize>();
+            OpCode::StoreSelfSignal4 => {
+                let sig_offset = read_u32(&vm.component.template.code, ip);
+                ip += size_of::<u32>();
 
-                if let Some(_) = vm.signals[vm.component.signals_start + sig_idx] {
+                let sig_offset = usize::try_from(sig_offset)
+                    .expect("Signal index is too large");
+
+                let (sig_idx, overflowed) = vm.component.signals_start
+                    .overflowing_add(sig_offset);
+
+                if overflowed || sig_idx >= vm.signals.len() {
+                    panic!(
+                        "Signal index is too large: [{} + {}] = {}",
+                        vm.component.signals_start, sig_offset, sig_idx);
+                }
+
+                if vm.signals[sig_idx].is_some() {
                     panic!("Signal already set");
                 }
 
-                vm.signals[vm.component.signals_start + sig_idx] = Some(vm.stack.pop().unwrap());
+                vm.signals[sig_idx] = Some(vm.stack.pop().unwrap());
+            }
+            OpCode::StoreSelfSignal => {
+                let cmp_signal_offset = vm.stack.pop().unwrap();
+                let cmp_signal_offset = bigint_to_u64(
+                    cmp_signal_offset.into_bigint())
+                    .expect("Signal index is too large");
+                let cmp_signal_offset = usize::try_from(cmp_signal_offset)
+                    .expect("Signal index is too large");
+
+                let (sig_idx, overflowed) = vm.component.signals_start
+                    .overflowing_add(cmp_signal_offset);
+
+                if overflowed || sig_idx >= vm.signals.len() {
+                    panic!(
+                        "Signal index is too large: [{} + {}] = {}",
+                        vm.component.signals_start, cmp_signal_offset, sig_idx);
+                }
+
+                if vm.signals[sig_idx].is_some() {
+                    panic!("Signal already set");
+                }
+
+                vm.signals[sig_idx] = Some(vm.stack.pop().unwrap());
             }
             OpCode::GetConstant8 => {
                 let const_idx = read_usize(&vm.component.template.code, ip);
@@ -693,13 +729,23 @@ fn statement(inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[Fr], li
                         panic!("Signal destination should be of Indexed type");
                     };
 
-                    code.push(OpCode::StoreSelfSignal8 as u8);
-                    line_numbers.push(store_bucket.line);
+                    let sig_idx = u32_or_expression(
+                        location, constants, Some(Fr::from(u32::MAX)))
+                        .unwrap();
 
-                    let sig_idx = assert_u64_value(location);
-                    assert_64();
-                    code.extend_from_slice(sig_idx.to_le_bytes().as_ref());
-                    for _ in 0..8 { line_numbers.push(usize::MAX); }
+                    match sig_idx {
+                        U32OrExpression::U32(sig_idx) => {
+                            code.push(OpCode::StoreSelfSignal4 as u8);
+                            line_numbers.push(store_bucket.line);
+                            code.extend_from_slice(sig_idx.to_le_bytes().as_ref());
+                            for _ in 0..4 { line_numbers.push(usize::MAX); }
+                        }
+                        U32OrExpression::Expression => {
+                            expression(location, code, constants, line_numbers);
+                            code.push(OpCode::StoreSelfSignal as u8);
+                            line_numbers.push(store_bucket.line);
+                        }
+                    }
                 }
 
                 AddressType::SubcmpSignal { .. } => {
@@ -1010,11 +1056,14 @@ fn disassemble_instruction(code: &[u8], line_numbers: &[usize], ip: usize) -> us
         OpCode::NoOp => {
             println!("NoOp")
         }
-        OpCode::StoreSelfSignal8 => {
-            let sig_idx = read_usize(&code, ip);
-            ip += size_of::<usize>();
+        OpCode::StoreSelfSignal4 => {
+            let sig_idx = read_u32(&code, ip);
+            ip += size_of::<u32>();
 
             println!("StoreSelfSignal8 [{}]", sig_idx);
+        }
+        OpCode::StoreSelfSignal => {
+            println!("StoreSelfSignal");
         }
         OpCode::GetConstant8 => {
             let const_idx = read_usize(&code, ip);
@@ -1089,7 +1138,7 @@ mod tests {
 
     #[test]
     fn test_parse_args() {
-        let o = OpCode::StoreSelfSignal8;
+        let o = OpCode::StoreSelfSignal4;
         println!("OK: {:?}", o);
         let i = o as u8;
         println!("OK: {:?}", i);
@@ -1109,7 +1158,7 @@ mod tests {
         let val: u64 = assert_u64_value(&inst);
         assert_eq!(val, 42);
     }
-    
+
     #[test]
     #[should_panic(expected = "assertion failed: matches!(value.parse_as, ValueType::U32)")]
     fn test_assert_u32_not_u32() {
