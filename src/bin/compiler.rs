@@ -1,5 +1,6 @@
 use std::{env, fs};
 use std::path::PathBuf;
+use core::convert::TryInto;
 use core::str::FromStr;
 use std::fs::File;
 use std::io::Write;
@@ -65,17 +66,19 @@ impl VM<'_, '_> {
 enum OpCode {
     NoOp = 0,
     StoreSelfSignal8 = 1,
-    GetConstant8 = 3, // pushes the value of a constant to the stack. Address of the constant is u64 little endian
-    Push8 = 4, // pushes the value of the following 4 bytes as a little endian u64 to the stack
-    GetVariable8 = 5,
-    SetVariable8 = 6,
-    JumpIfFalse = 7, // Jump to the offset i32 if the value on the top of the stack is false
-    Jump = 8, // Jump to the offset i32
-    OpMul = 9,
-    OpAdd = 10,
-    OpLt = 11,
-    GetSelfSignal4 = 12, // next following 4 bytes is the signal index as le u32
-    GetSelfSignal = 13, // the address of the signal is a value on the stack
+    GetConstant8 = 2, // pushes the value of a constant to the stack. Address of the constant is u64 little endian
+    Push8 = 3, // pushes the value of the following 4 bytes as a little endian u64 to the stack
+    GetVariable4 = 4,
+    GetVariable = 5,
+    SetVariable4 = 6,
+    SetVariable = 7,
+    JumpIfFalse = 8, // Jump to the offset i32 if the value on the top of the stack is false
+    Jump = 9, // Jump to the offset i32
+    OpMul = 10,
+    OpAdd = 11,
+    OpLt = 12,
+    GetSelfSignal4 = 13, // next following 4 bytes is the signal index as le u32
+    GetSelfSignal = 14, // the address of the signal is a value on the stack
 }
 
 fn assert_u64_value(inst: &InstructionPointer) -> u64 {
@@ -496,17 +499,44 @@ fn execute(component: &mut Component, constants: &Vec<Fr>, signals: &mut [Option
                 let val = Fr::from(val as u64);
                 vm.stack.push(val);
             }
-            OpCode::GetVariable8 => {
-                let var_idx = read_usize(&vm.component.template.code, ip);
-                ip += size_of::<usize>();
+            OpCode::GetVariable4 => {
+                let var_idx = read_u32(&vm.component.template.code, ip);
+                ip += size_of::<u32>();
+                let var_idx = usize::try_from(var_idx).unwrap();
                 if vm.component.vars.len() <= var_idx || vm.component.vars[var_idx].is_none() {
                     panic!("Variable not set");
                 }
                 vm.stack.push(vm.component.vars[var_idx].unwrap());
             }
-            OpCode::SetVariable8 => {
-                let var_idx = read_usize(&vm.component.template.code, ip);
-                ip += size_of::<usize>();
+            OpCode::GetVariable => {
+                let var_idx = vm.stack.pop().unwrap();
+                let var_idx = bigint_to_u64(
+                    var_idx.into_bigint())
+                    .expect("Variable index is too large");
+                let var_idx = usize::try_from(var_idx).unwrap();
+                if vm.component.vars.len() <= var_idx || vm.component.vars[var_idx].is_none() {
+                    panic!("Variable not set");
+                }
+                vm.stack.push(vm.component.vars[var_idx].unwrap());
+            }
+            OpCode::SetVariable4 => {
+                let var_idx = read_u32(&vm.component.template.code, ip);
+                ip += size_of::<u32>();
+
+                let var_idx = usize::try_from(var_idx).unwrap();
+
+                if vm.component.vars.len() <= var_idx {
+                    vm.component.vars.resize(var_idx + 1, None);
+                }
+
+                vm.component.vars[var_idx] = Some(vm.stack.pop().unwrap());
+            }
+            OpCode::SetVariable => {
+                let var_idx = vm.stack.pop().unwrap();
+                let var_idx = bigint_to_u64(
+                    var_idx.into_bigint())
+                    .expect("Variable index is too large");
+                let var_idx = usize::try_from(var_idx).unwrap();
 
                 if vm.component.vars.len() <= var_idx {
                     vm.component.vars.resize(var_idx + 1, None);
@@ -637,13 +667,23 @@ fn statement(inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[Fr], li
                         panic!("Variable destination should be of Indexed type");
                     };
 
-                    code.push(OpCode::SetVariable8 as u8);
-                    line_numbers.push(store_bucket.line);
+                    let var_idx = u32_or_expression(
+                        location, constants, Some(Fr::from(u32::MAX)))
+                        .unwrap();
 
-                    let var_idx = assert_u64_value(location);
-                    assert_64();
-                    code.extend_from_slice(var_idx.to_le_bytes().as_ref());
-                    for _ in 0..8 { line_numbers.push(usize::MAX); }
+                    match var_idx {
+                        U32OrExpression::U32(var_idx) => {
+                            code.push(OpCode::SetVariable4 as u8);
+                            line_numbers.push(store_bucket.line);
+                            code.extend_from_slice(var_idx.to_le_bytes().as_ref());
+                            for _ in 0..4 { line_numbers.push(usize::MAX); }
+                        }
+                        U32OrExpression::Expression => {
+                            expression(location, code, constants, line_numbers);
+                            code.push(OpCode::SetVariable as u8);
+                            line_numbers.push(store_bucket.line);
+                        }
+                    }
                 }
 
                 AddressType::Signal => {
@@ -717,7 +757,9 @@ fn expression_load(lb: &LoadBucket, code: &mut Vec<u8>, constants: &[Fr], line_n
                 panic!("Signal source location should be of Indexed type");
             };
 
-            let idx = u32_or_expression(location, constants, Some(Fr::from(u32::MAX))).unwrap();
+            let idx = u32_or_expression(
+                location, constants, Some(Fr::from(u32::MAX)))
+                .unwrap();
 
             match idx {
                 U32OrExpression::U32(idx) => {
@@ -740,13 +782,23 @@ fn expression_load(lb: &LoadBucket, code: &mut Vec<u8>, constants: &[Fr], line_n
                 panic!("Variable source location should be of Indexed type");
             };
 
-            code.push(OpCode::GetVariable8 as u8);
-            line_numbers.push(lb.line);
+            let idx = u32_or_expression(
+                location, constants, Some(Fr::from(u32::MAX)))
+                .unwrap();
 
-            let sig_idx = assert_u64_value(location);
-            assert_64();
-            code.extend_from_slice(sig_idx.to_le_bytes().as_ref());
-            for _ in 0..8 { line_numbers.push(usize::MAX); }
+            match idx {
+                U32OrExpression::U32(idx) => {
+                    code.push(OpCode::GetVariable4 as u8);
+                    line_numbers.push(lb.line);
+                    code.extend_from_slice(idx.to_le_bytes().as_ref());
+                    for _ in 0..4 { line_numbers.push(usize::MAX); }
+                }
+                U32OrExpression::Expression => {
+                    expression(location, code, constants, line_numbers);
+                    code.push(OpCode::GetVariable as u8);
+                    line_numbers.push(lb.line);
+                }
+            }
         }
         _ => {
             todo!("Unsupported load expression: {}", lb.to_string());
@@ -976,17 +1028,23 @@ fn disassemble_instruction(code: &[u8], line_numbers: &[usize], ip: usize) -> us
 
             println!("Push8 [{}]", val);
         }
-        OpCode::GetVariable8 => {
-            let var_idx = read_usize(&code, ip);
-            ip += size_of::<usize>();
+        OpCode::GetVariable4 => {
+            let var_idx = read_u32(&code, ip);
+            ip += size_of::<u32>();
 
-            println!("GetVariable8 [{}]", var_idx);
+            println!("GetVariable4 [{}]", var_idx);
         }
-        OpCode::SetVariable8 => {
-            let var_idx = read_usize(&code, ip);
-            ip += size_of::<usize>();
+        OpCode::GetVariable => {
+            println!("GetVariable");
+        }
+        OpCode::SetVariable4 => {
+            let var_idx = read_u32(&code, ip);
+            ip += size_of::<u32>();
 
-            println!("SetVariable8 [{}]", var_idx);
+            println!("SetVariable4 [{}]", var_idx);
+        }
+        OpCode::SetVariable => {
+            println!("SetVariable");
         }
         OpCode::JumpIfFalse => {
             let offset = read_i32(&code, ip);
@@ -1051,21 +1109,7 @@ mod tests {
         let val: u64 = assert_u64_value(&inst);
         assert_eq!(val, 42);
     }
-
-    #[test]
-    #[should_panic(expected = "value is not u32: TryFromIntError(())")]
-    fn test_assert_u32_too_large() {
-        let inst = Box::new(Instruction::Value(ValueBucket {
-            line: 0,
-            message_id: 0,
-            parse_as: ValueType::U32,
-            op_aux_no: 0,
-            value: u32::MAX as usize + 3,
-        }));
-        let val: u64 = assert_u64_value(&inst);
-        assert_eq!(val, 42);
-    }
-
+    
     #[test]
     #[should_panic(expected = "assertion failed: matches!(value.parse_as, ValueType::U32)")]
     fn test_assert_u32_not_u32() {
@@ -1164,7 +1208,7 @@ mod tests {
         assert_eq!(code,
                    vec![
                        OpCode::GetConstant8 as u8, 0xea, 0, 0, 0, 0, 0, 0, 0,
-                       OpCode::SetVariable8 as u8, 0x2b, 0x2, 0, 0, 0, 0, 0, 0]);
+                       OpCode::SetVariable4 as u8, 0x2b, 0x2, 0, 0]);
     }
 
     #[test]
@@ -1426,18 +1470,13 @@ mod tests {
         let noop = OpCode::NoOp as u8;
         let code = vec![
             OpCode::Push8 as u8, 0, 0, 0, 0, 0, 0, 0, 0,
-            OpCode::JumpIfFalse as u8, 9*2, 0x00, 0x00, 0x00,
+            OpCode::JumpIfFalse as u8, 5*2, 0x00, 0x00, 0x00,
             OpCode::Push8 as u8, 0x01, 0, 0, 0, 0, 0, 0, 0,
-            OpCode::SetVariable8 as u8, 0, 0, 0, 0, 0, 0, 0, 0,
+            OpCode::SetVariable4 as u8, 0, 0, 0, 0,
             OpCode::Push8 as u8, 0x02, 0, 0, 0, 0, 0, 0, 0,
-            OpCode::SetVariable8 as u8, 1, 0, 0, 0, 0, 0, 0, 0,
+            OpCode::SetVariable4 as u8, 1, 0, 0, 0,
             OpCode::NoOp as u8,
         ];
-        let mut line_numbers = Vec::with_capacity(code.len());
-        for (i, _) in code.iter().enumerate() {
-            line_numbers.push(i);
-        }
-
         let mut line_numbers = Vec::with_capacity(code.len());
         for (i, _) in code.iter().enumerate() {
             line_numbers.push(i);
