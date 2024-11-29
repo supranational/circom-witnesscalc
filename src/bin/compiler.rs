@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use core::convert::TryInto;
 use core::str::FromStr;
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::fmt::Display;
 use std::fs::File;
 use std::io::Write;
@@ -144,19 +145,11 @@ enum OpCode {
     JumpIfFalse      = 15, // Jump to the offset i32 if the value on the top of the stack is false
     Jump             = 16, // Jump to the offset i32
     OpMul            = 17,
-    OpAdd            = 18,
-    OpLt             = 19,
-}
-
-fn assert_u64_value(inst: &InstructionPointer) -> u64 {
-    let value = if let Instruction::Value(ref value) = **inst {
-        value
-    } else {
-        panic!("Expected value instruction, got: {}", inst.to_string());
-    };
-
-    assert!(matches!(value.parse_as, ValueType::U32));
-    value.value.try_into().expect("value is not u64")
+    OpDiv            = 18,
+    OpAdd            = 19,
+    OpLt             = 20,
+    OpNe             = 21,
+    OpNeg            = 22,
 }
 
 #[derive(Debug)]
@@ -769,24 +762,49 @@ fn execute(
                     InputStatus::try_from(code[ip]).unwrap();
                 ip += 1;
 
-                let subcmp_signals_start = call_frames.last().unwrap()
-                    .component.borrow()
-                    .subcomponents[cmp_idx as usize].borrow()
-                    .signals_start;
-                let (sig_idx, overflowed) =
-                    subcmp_signals_start.overflowing_add(sig_idx as usize);
+                let cmp = call_frames.last().unwrap()
+                    .component.clone();
+                let should_call_cmp = {
+                    let cmp = cmp.borrow();
+                    let mut subcmp = cmp
+                        .subcomponents[cmp_idx as usize].borrow_mut();
 
-                if overflowed || sig_idx >= vm.signals.len() {
-                    panic!("Subcomponent signal index is too large");
+                    let (sig_idx, overflowed) =
+                        subcmp.signals_start.overflowing_add(sig_idx as usize);
+
+                    if overflowed || sig_idx >= vm.signals.len() {
+                        panic!("Subcomponent signal index is too large");
+                    }
+
+                    if vm.signals[sig_idx].is_some() {
+                        panic!("Subcomponent signal is already set");
+                    }
+
+                    vm.signals[sig_idx] = Some(vm.stack.pop().unwrap());
+
+                    subcmp.number_of_inputs -= 1;
+
+                    let should_call_cmp = match input_status {
+                        InputStatus::Last => true,
+                        InputStatus::NoLast => false,
+                        InputStatus::Unknown => subcmp.number_of_inputs == 0,
+                    };
+
+                    should_call_cmp
+                };
+
+                if should_call_cmp {
+                    call_frames.last_mut().unwrap().ip = ip;
+                    call_frames.push(
+                        Frame::new(
+                            cmp.borrow().subcomponents[cmp_idx as usize].clone(),
+                            templates));
+
+                    ip = 0usize;
+                    code = call_frames.last().unwrap().code;
+                    template_id = call_frames.last().unwrap().component.borrow().template_id;;
+                    signals_start = call_frames.last().unwrap().component.borrow().signals_start;
                 }
-
-                if vm.signals[sig_idx].is_some() {
-                    panic!("Signal already set");
-                }
-
-                vm.signals[sig_idx] = Some(vm.stack.pop().unwrap());
-
-                todo!();
             }
             OpCode::StoreSubSignal => {
 
@@ -834,7 +852,6 @@ fn execute(
                     should_call_cmp
                 };
 
-
                 if should_call_cmp {
                     call_frames.last_mut().unwrap().ip = ip;
                     call_frames.push(
@@ -875,6 +892,14 @@ fn execute(
                 let a = vm.stack.pop().unwrap();
                 vm.stack.push(a * b);
             }
+            OpCode::OpDiv => {
+                let b = vm.stack.pop().unwrap();
+                let a = vm.stack.pop().unwrap();
+                if b.is_zero() {
+                    panic!("Division by zero");
+                }
+                vm.stack.push(a / b);
+            }
             OpCode::OpAdd => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
@@ -884,6 +909,20 @@ fn execute(
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
                 vm.stack.push(u_lt(&a, &b));
+            }
+            OpCode::OpNe => {
+                let b = vm.stack.pop().unwrap();
+                let a = vm.stack.pop().unwrap();
+                vm.stack.push(match a.cmp(&b) {
+                    Ordering::Equal => Fr::zero(),
+                    _ => Fr::one(),
+                });
+            }
+            OpCode::OpNeg => {
+                let a = vm.stack.pop().unwrap();
+                let mut x = Fr::MODULUS;
+                x.sub_with_borrow(&a.into_bigint());
+                vm.stack.push(Fr::from(x));
             }
             OpCode::GetSelfSignal4 => {
                 let sig_idx = read_u32(code, ip);
@@ -934,12 +973,15 @@ fn emit_jump(code: &mut Vec<u8>, to: usize) {
 }
 
 
-fn pre_emit_jump(code: &mut Vec<u8>) -> usize {
+fn pre_emit_jump_if_false(code: &mut Vec<u8>) -> usize {
     code.push(OpCode::JumpIfFalse as u8);
-    code.push(0xffu8);
-    code.push(0xffu8);
-    code.push(0xffu8);
-    code.push(0xffu8);
+    for i in 0..4 { code.push(0xffu8); }
+    code.len() - 4
+}
+
+fn pre_emit_jump(code: &mut Vec<u8>) -> usize {
+    code.push(OpCode::Jump as u8);
+    for i in 0..4 { code.push(0xffu8); }
     code.len() - 4
 }
 
@@ -1090,7 +1132,7 @@ fn statement(
 
             expression(&loop_bucket.continue_condition, code, constants, line_numbers);
 
-            let loop_end_jump_offset = pre_emit_jump(code);
+            let loop_end_jump_offset = pre_emit_jump_if_false(code);
             line_numbers.push(loop_bucket.line);
             line_numbers.push(usize::MAX);
             line_numbers.push(usize::MAX);
@@ -1167,8 +1209,47 @@ fn statement(
             // pass
             // todo!()
         }
-        _ => {
-            todo!("instruction not supported: {}", inst.to_string());
+        Instruction::Value(_) => {
+            panic!("An expression instruction Value found where statement expected");
+        }
+        Instruction::Load(_) => {
+            panic!("An expression instruction Load found where statement expected");
+        }
+        Instruction::Compute(_) => {
+            panic!("An expression instruction Compute found where statement expected");
+        }
+        Instruction::Branch(ref branch_bucket) => {
+            expression(&branch_bucket.cond, code, constants, line_numbers);
+
+            let else_jump_offset = pre_emit_jump_if_false(code);
+            line_numbers.push(branch_bucket.line);
+            for i in 0..4 { line_numbers.push(usize::MAX); }
+
+            block(&branch_bucket.if_branch, code, constants, line_numbers, components);
+
+            let end_jump_offset = pre_emit_jump(code);
+            line_numbers.push(branch_bucket.line);
+            for i in 0..4 { line_numbers.push(usize::MAX); }
+
+            let to = code.len();
+            patch_jump(code, else_jump_offset, to);
+
+            block(&branch_bucket.else_branch, code, constants, line_numbers, components);
+
+            let to = code.len();
+            patch_jump(code, end_jump_offset, to);
+
+            assert_eq!(line_numbers.len(), code.len());
+        }
+        Instruction::Return(_) => {
+            todo!();
+        }
+        Instruction::Assert(_) => {
+            // TODO: maybe implement asserts at runtime
+            // todo!();
+        }
+        Instruction::Log(_) => {
+            todo!();
         }
     }
 }
@@ -1333,6 +1414,13 @@ fn expression_compute(cb: &ComputeBucket, code: &mut Vec<u8>, constants: &[Fr], 
             code.push(OpCode::OpMul as u8);
             line_numbers.push(cb.line);
         }
+        OperatorType::Div => {
+            assert_eq!(2, cb.stack.len());
+            expression(&cb.stack[0], code, constants, line_numbers);
+            expression(&cb.stack[1], code, constants, line_numbers);
+            code.push(OpCode::OpDiv as u8);
+            line_numbers.push(cb.line);
+        }
         OperatorType::Add | OperatorType::AddAddress => {
             assert_eq!(2, cb.stack.len());
             expression(&cb.stack[0], code, constants, line_numbers);
@@ -1347,6 +1435,19 @@ fn expression_compute(cb: &ComputeBucket, code: &mut Vec<u8>, constants: &[Fr], 
             code.push(OpCode::OpLt as u8);
             line_numbers.push(cb.line);
         }
+        OperatorType::NotEq => {
+            assert_eq!(2, cb.stack.len());
+            expression(&cb.stack[0], code, constants, line_numbers);
+            expression(&cb.stack[1], code, constants, line_numbers);
+            code.push(OpCode::OpNe as u8);
+            line_numbers.push(cb.line);
+        }
+        OperatorType::PrefixSub => {
+            assert_eq!(1, cb.stack.len());
+            expression(&cb.stack[0], code, constants, line_numbers);
+            code.push(OpCode::OpNeg as u8);
+            line_numbers.push(cb.line);
+        }
         OperatorType::ToAddress => {
             assert_eq!(1, cb.stack.len());
             expression(&cb.stack[0], code, constants, line_numbers);
@@ -1355,7 +1456,8 @@ fn expression_compute(cb: &ComputeBucket, code: &mut Vec<u8>, constants: &[Fr], 
             // expression compilation should be stayed as is.
         }
         _ => {
-            todo!("not implemented expression: {}", cb.to_string());
+            todo!("not implemented expression operator {}: {}",
+                cb.op.to_string(), cb.to_string());
         }
     };
 }
@@ -1650,11 +1752,20 @@ fn disassemble_instruction(code: &[u8], line_numbers: &[usize], ip: usize) -> us
         OpCode::OpMul => {
             println!("OpMul");
         }
+        OpCode::OpDiv => {
+            println!("OpDiv");
+        }
         OpCode::OpAdd => {
             println!("OpAdd");
         }
         OpCode::OpLt => {
             println!("OpLt");
+        }
+        OpCode::OpNe => {
+            println!("OpNe");
+        }
+        OpCode::OpNeg => {
+            println!("OpNeg");
         }
         OpCode::GetSelfSignal4 => {
             let sig_idx = read_u32(&code, ip);
@@ -1675,6 +1786,17 @@ mod tests {
     use ark_ff::BigInteger256;
     use compiler::intermediate_representation::ir_interface::{InstrContext, StoreBucket, ValueBucket};
     use super::*;
+
+    fn assert_u64_value(inst: &InstructionPointer) -> u64 {
+        let value = if let Instruction::Value(ref value) = **inst {
+            value
+        } else {
+            panic!("Expected value instruction, got: {}", inst.to_string());
+        };
+
+        assert!(matches!(value.parse_as, ValueType::U32));
+        value.value.try_into().expect("value is not u64")
+    }
 
     #[test]
     fn test_parse_args() {
@@ -2032,7 +2154,7 @@ mod tests {
         code.push(noop);
         let to = code.len();
         code.push(noop);
-        let jump_offset = pre_emit_jump(&mut code);
+        let jump_offset = pre_emit_jump_if_false(&mut code);
 
         assert_eq!(code, vec![noop, noop, OpCode::JumpIfFalse as u8, 0xff, 0xff, 0xff, 0xff]);
         assert_eq!(jump_offset, 3);
@@ -2047,7 +2169,7 @@ mod tests {
         let jmp = OpCode::JumpIfFalse as u8;
         let mut code = vec![];
         code.push(noop);
-        let jump_offset = pre_emit_jump(&mut code);
+        let jump_offset = pre_emit_jump_if_false(&mut code);
         assert_eq!(code, vec![noop, jmp, 0xff, 0xff, 0xff, 0xff]);
         assert_eq!(jump_offset, 2);
 
