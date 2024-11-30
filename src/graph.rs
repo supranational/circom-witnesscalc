@@ -632,7 +632,7 @@ fn shl(a: Fr, b: Fr) -> Fr {
 
     let mut a = a.into_bigint();
     a.muln(n);
-    return Fr::from_bigint(a).unwrap();
+    Fr::from_bigint(a).unwrap()
 }
 
 fn shr(a: Fr, b: Fr) -> Fr {

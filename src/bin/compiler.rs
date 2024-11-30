@@ -20,13 +20,12 @@ use compiler::circuit_design::template::TemplateCode;
 use compiler::compiler_interface::{run_compiler, Circuit, Config};
 use compiler::intermediate_representation::InstructionList;
 use compiler::intermediate_representation::ir_interface::{AddressType, ComputeBucket, CreateCmpBucket, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, OperatorType, StatusInput, ValueType};
-use compiler::num_traits::ops::overflowing::OverflowingAdd;
 use constraint_generation::{build_circuit, BuildConfig};
 use program_structure::error_definition::Report;
 use type_analysis::check_types::check_types;
 use wtns_file::FieldElement;
 use circom_witnesscalc::{deserialize_inputs};
-use circom_witnesscalc::graph::Nodes;
+use circom_witnesscalc::graph::Operation;
 
 struct Args {
     circuit_file: String,
@@ -152,9 +151,11 @@ enum OpCode {
     OpMul          = 17,
     OpDiv          = 18,
     OpAdd          = 19,
-    OpLt           = 20,
-    OpNe           = 21,
-    OpNeg          = 22,
+    OpShR          = 20,
+    OpLt           = 21,
+    OpNe           = 22,
+    OpBAnd         = 23,
+    OpNeg          = 24,
 }
 
 #[derive(Debug)]
@@ -511,7 +512,7 @@ fn build_component(
     for c in &compiled_templates[template_id].components {
         let mut cmp_signal_offset = c.signal_offset;
 
-        for i in c.sub_cmp_idx..c.sub_cmp_idx+c.number_of_cmp {
+        for _ in c.sub_cmp_idx..c.sub_cmp_idx+c.number_of_cmp {
             let subcomponent = build_component(
                 compiled_templates, templates, c.template_id,
                 signals_start + cmp_signal_offset);
@@ -587,7 +588,7 @@ fn execute(
 
     let mut ip = 0usize;
     let mut code: &[u8] = call_frames.last().unwrap().code;
-    let mut template_id: usize = call_frames.last().unwrap().component.borrow().template_id;;
+    let mut template_id: usize = call_frames.last().unwrap().component.borrow().template_id;
     let mut signals_start = call_frames.last().unwrap().component.borrow().signals_start;
 
     loop {
@@ -911,7 +912,7 @@ fn execute(
 
                     ip = 0usize;
                     code = call_frames.last().unwrap().code;
-                    template_id = call_frames.last().unwrap().component.borrow().template_id;;
+                    template_id = call_frames.last().unwrap().component.borrow().template_id;
                     signals_start = call_frames.last().unwrap().component.borrow().signals_start;
                 }
             }
@@ -983,7 +984,7 @@ fn execute(
 
                     ip = 0usize;
                     code = call_frames.last().unwrap().code;
-                    template_id = call_frames.last().unwrap().component.borrow().template_id;;
+                    template_id = call_frames.last().unwrap().component.borrow().template_id;
                     signals_start = call_frames.last().unwrap().component.borrow().signals_start;
                 }
             }
@@ -1027,6 +1028,11 @@ fn execute(
                 let a = vm.stack.pop().unwrap();
                 vm.stack.push(a + b);
             }
+            OpCode::OpShR => {
+                let b = vm.stack.pop().unwrap();
+                let a = vm.stack.pop().unwrap();
+                vm.stack.push(Operation::Shr.eval_fr(a, b));
+            }
             OpCode::OpLt => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
@@ -1039,6 +1045,20 @@ fn execute(
                     Ordering::Equal => Fr::zero(),
                     _ => Fr::one(),
                 });
+            }
+            OpCode::OpBAnd => {
+                let b = vm.stack.pop().unwrap();
+                let a = vm.stack.pop().unwrap();
+                let ai = b.into_bigint();
+                let bi = b.into_bigint();
+                let mut r: BigInt<4> = BigInt!("0");
+                for i in 0..r.0.len() {
+                    r.0[i] = ai.0[i] & bi.0[i];
+                }
+                if r > Fr::MODULUS {
+                    r.sub_with_borrow(&Fr::MODULUS);
+                }
+                vm.stack.push(Fr::from(r));
             }
             OpCode::OpNeg => {
                 let a = vm.stack.pop().unwrap();
@@ -1125,13 +1145,13 @@ fn emit_jump(code: &mut Vec<u8>, to: usize) {
 
 fn pre_emit_jump_if_false(code: &mut Vec<u8>) -> usize {
     code.push(OpCode::JumpIfFalse as u8);
-    for i in 0..4 { code.push(0xffu8); }
+    for _ in 0..4 { code.push(0xffu8); }
     code.len() - 4
 }
 
 fn pre_emit_jump(code: &mut Vec<u8>) -> usize {
     code.push(OpCode::Jump as u8);
-    for i in 0..4 { code.push(0xffu8); }
+    for _ in 0..4 { code.push(0xffu8); }
     code.len() - 4
 }
 
@@ -1334,8 +1354,7 @@ fn statement(
             }
 
             // TODO
-            let want_uniform_parallel = Some(false);
-            assert!(matches!(cmp_bucket.uniform_parallel, want_uniform_parallel));
+            assert!(matches!(cmp_bucket.uniform_parallel, Some(false)));
 
             if cmp_bucket.dimensions.len() > 0 {
                 todo!();
@@ -1367,7 +1386,7 @@ fn statement(
                 todo!("We should insert here a direct instruction to call this component")
             }
         }
-        Instruction::Call(ref call_bucket) => {
+        Instruction::Call(ref _call_bucket) => {
             // pass
             // todo!()
         }
@@ -1385,13 +1404,13 @@ fn statement(
 
             let else_jump_offset = pre_emit_jump_if_false(code);
             line_numbers.push(branch_bucket.line);
-            for i in 0..4 { line_numbers.push(usize::MAX); }
+            for _ in 0..4 { line_numbers.push(usize::MAX); }
 
             block(&branch_bucket.if_branch, code, constants, line_numbers, components);
 
             let end_jump_offset = pre_emit_jump(code);
             line_numbers.push(branch_bucket.line);
-            for i in 0..4 { line_numbers.push(usize::MAX); }
+            for _ in 0..4 { line_numbers.push(usize::MAX); }
 
             let to = code.len();
             patch_jump(code, else_jump_offset, to);
@@ -1591,6 +1610,13 @@ fn expression_compute(cb: &ComputeBucket, code: &mut Vec<u8>, constants: &[Fr], 
             code.push(OpCode::OpAdd as u8);
             line_numbers.push(cb.line);
         }
+        OperatorType::ShiftR => {
+            assert_eq!(2, cb.stack.len());
+            expression(&cb.stack[0], code, constants, line_numbers);
+            expression(&cb.stack[1], code, constants, line_numbers);
+            code.push(OpCode::OpShR as u8);
+            line_numbers.push(cb.line);
+        }
         OperatorType::Lesser => {
             assert_eq!(2, cb.stack.len());
             expression(&cb.stack[0], code, constants, line_numbers);
@@ -1603,6 +1629,13 @@ fn expression_compute(cb: &ComputeBucket, code: &mut Vec<u8>, constants: &[Fr], 
             expression(&cb.stack[0], code, constants, line_numbers);
             expression(&cb.stack[1], code, constants, line_numbers);
             code.push(OpCode::OpNe as u8);
+            line_numbers.push(cb.line);
+        }
+        OperatorType::BitAnd => {
+            assert_eq!(2, cb.stack.len());
+            expression(&cb.stack[0], code, constants, line_numbers);
+            expression(&cb.stack[1], code, constants, line_numbers);
+            code.push(OpCode::OpBAnd as u8);
             line_numbers.push(cb.line);
         }
         OperatorType::PrefixSub => {
@@ -1953,11 +1986,17 @@ fn disassemble_instruction(code: &[u8], line_numbers: &[usize], ip: usize) -> us
         OpCode::OpAdd => {
             println!("OpAdd");
         }
+        OpCode::OpShR => {
+            println!("OpShR");
+        }
         OpCode::OpLt => {
             println!("OpLt");
         }
         OpCode::OpNe => {
             println!("OpNe");
+        }
+        OpCode::OpBAnd => {
+            println!("OpAnd");
         }
         OpCode::OpNeg => {
             println!("OpNeg");
