@@ -67,6 +67,11 @@ impl VM<'_> {
             println!("{:04x}: {}", i, s);
         }
     }
+    fn print_stack_u32(&self) {
+        for (i, s) in self.stack_u32.iter().enumerate() {
+            println!("{:04x}: {}", i, s);
+        }
+    }
 }
 
 #[repr(u8)]
@@ -123,42 +128,55 @@ enum OpCode {
     NoOp = 0,
     GetConstant8   =  1, // pushes the value of a constant to the stack. Address of the constant is u64 little endian
     Push8          =  2, // pushes the value of the following 4 bytes as a little endian u64 to the stack
-    GetVariable4   =  3,
-    GetVariable    =  4,
-    SetVariable4   =  5,
-    SetVariable    =  6,
+    Push4          =  3, // pushes the value of the following 4 bytes as a little endian u64 to the stack_u32
+    GetVariable4   =  4,
+    // Put variables to the stack
+    // arguments:          variables number as u32 to put on stack
+    // required stack_u32: variable index
+    GetVariable    =  5,
+    SetVariable4   =  6,
+    // Set variables from the stack
+    // arguments:          variables number u32
+    // required stack_u32: variable index
+    // required stack:     values to store equal to variables number from arguments
+    SetVariable    =  7,
     // Put signals to the stack
     // arguments: signal index u32, signals number u32
-    GetSelfSignal4 =  7,
+    GetSelfSignal4 =  8,
     // Put signals to the stack
-    // arguments:      signals number u32
-    // required stack: signal index
-    GetSelfSignal  =  8,
-    SetSelfSignal4 =  9,
-    SetSelfSignal  = 10,
+    // arguments:          signals number u32
+    // required stack_u32: signal index
+    GetSelfSignal  =  9,
+    SetSelfSignal4 = 10,
+    SetSelfSignal  = 11,
     // arguments:      subcomponent index u32; signal index u32
-    GetSubSignal4  = 11,
-    // arguments:      subcomponent index u32
-    // required stack: signal index
-    GetSubSignal   = 12,
+    GetSubSignal4  = 12,
+    // Put subcomponent signals to the stack
+    // arguments:          subcomponent index u32
+    // required stack_u32: signal index
+    GetSubSignal   = 13,
     // arguments:      subcomponent index u32; signal index u32; signals number u32; InputStatus
     // required stack: value to store
-    SetSubSignal4  = 13,
-    // arguments:      subcomponent index u32, signals number u32; InputStatus
-    // required stack: signal index; value to store
-    SetSubSignal   = 14,
-    JumpIfFalse    = 15, // Jump to the offset i32 if the value on the top of the stack is false
-    Jump           = 16, // Jump to the offset i32
-    OpMul          = 17,
-    OpDiv          = 18,
-    OpAdd          = 19,
-    OpShR          = 20,
-    OpLt           = 21,
-    OpGt           = 22,
-    OpEq           = 23,
-    OpNe           = 24,
-    OpBAnd         = 25,
-    OpNeg          = 26,
+    SetSubSignal4  = 14,
+    // arguments:          subcomponent index u32, signals number u32; InputStatus
+    // required stack:     value to store
+    // required stack_u32: signal index
+    SetSubSignal   = 15,
+    JumpIfFalse    = 16, // Jump to the offset i32 if the value on the top of the stack is false
+    Jump           = 17, // Jump to the offset i32
+    OpMul          = 18,
+    OpDiv          = 19,
+    OpAdd          = 20,
+    OpShR          = 21,
+    OpLt           = 22,
+    OpGt           = 23,
+    OpEq           = 24,
+    OpNe           = 25,
+    OpBAnd         = 26,
+    OpNeg          = 27,
+    OpToAddr       = 28,
+    OpMulAddr      = 29,
+    OpAddAddr      = 30,
 }
 
 #[derive(Debug)]
@@ -655,12 +673,8 @@ fn execute(
                 }
             }
             OpCode::SetSelfSignal => {
-                let cmp_signal_offset = vm.stack.pop().unwrap();
-                let cmp_signal_offset = bigint_to_u64(
-                    cmp_signal_offset.into_bigint())
-                    .expect("Signal index is too large");
-                let cmp_signal_offset = usize::try_from(cmp_signal_offset)
-                    .expect("Signal index is too large");
+                let cmp_signal_offset =
+                    vm.stack_u32.pop().unwrap() as usize;
 
                 let sigs_number = read_u32(code, ip);
                 ip += size_of::<u32>();
@@ -695,6 +709,11 @@ fn execute(
                 let val = Fr::from(val as u64);
                 vm.stack.push(val);
             }
+            OpCode::Push4 => {
+                let val = read_u32(code, ip);
+                ip += size_of::<u32>();
+                vm.stack_u32.push(val);
+            }
             OpCode::GetVariable4 => {
                 let var_idx = read_u32(code, ip);
                 ip += size_of::<u32>();
@@ -724,23 +743,19 @@ fn execute(
                 }
             }
             OpCode::GetVariable => {
-                let var_idx = vm.stack.pop().unwrap();
-                let var_idx = bigint_to_u64(
-                    var_idx.into_bigint())
-                    .expect("Variable index is too large");
-                let var_idx = usize::try_from(var_idx).unwrap();
+                let var_idx = vm.stack_u32.pop().unwrap() as usize;
 
-                let vars_number = read_u32(code, ip);
+                let vars_number = read_u32(code, ip) as usize;
                 ip += size_of::<u32>();
 
                 let last_frame = call_frames.last().unwrap();
                 let vars = &mut last_frame.component.borrow_mut().vars;
 
-                if vars.len() <= var_idx+vars_number as usize {
+                if vars.len() <= var_idx + vars_number {
                     panic!("Variable not set")
                 }
 
-                for i in var_idx..var_idx+vars_number as usize {
+                for i in var_idx..var_idx+vars_number {
                     if vars[i].is_none() {
                         panic!("Variable not set");
                     }
@@ -779,11 +794,7 @@ fn execute(
                 }
             }
             OpCode::SetVariable => {
-                let var_start = vm.stack.pop().unwrap();
-                let var_start = bigint_to_u64(
-                    var_start.into_bigint())
-                    .expect("Variable index is too large");
-                let var_start = usize::try_from(var_start).unwrap();
+                let var_start = vm.stack_u32.pop().unwrap() as usize;
 
                 let vars_number = read_u32(code, ip);
                 ip += size_of::<u32>();
@@ -932,11 +943,7 @@ fn execute(
                     InputStatus::try_from(code[ip]).unwrap();
                 ip += 1;
 
-                let sig_idx = vm.stack.pop().unwrap();
-                let sig_idx = bigint_to_u64(
-                    sig_idx.into_bigint())
-                    .expect("Signal index does not fits into u64");
-                let sig_idx = usize::try_from(sig_idx).unwrap();
+                let sig_idx = vm.stack_u32.pop().unwrap();
 
                 let cmp = call_frames.last().unwrap()
                     .component.clone();
@@ -946,7 +953,7 @@ fn execute(
                         .subcomponents[cmp_idx as usize].borrow_mut();
 
                     let (sigs_start, overflowed) =
-                        subcmp.signals_start.overflowing_add(sig_idx);
+                        subcmp.signals_start.overflowing_add(sig_idx as usize);
 
                     if overflowed || sigs_start >= vm.signals.len() {
                         panic!("Subcomponent signal start index is too large");
@@ -1105,10 +1112,7 @@ fn execute(
                 }
             }
             OpCode::GetSelfSignal => {
-                let cmp_signal_offset = vm.stack.pop().unwrap();
-                let cmp_signal_offset = bigint_to_u64(
-                    cmp_signal_offset.into_bigint())
-                    .expect("Signal index is too large");
+                let cmp_signal_offset = vm.stack_u32.pop().unwrap();
                 let (sig_start, overflow) =
                     signals_start.overflowing_add(cmp_signal_offset as usize);
                 if overflow {
@@ -1133,10 +1137,38 @@ fn execute(
                     vm.stack.push(vm.signals[sig_idx].expect("Signal is not set"));
                 }
             }
+            OpCode::OpToAddr => {
+                let f = vm.stack.pop().unwrap();
+                let f = bigint_to_u64(f.into_bigint())
+                    .expect("Value is too large for address");
+                let f: u32 = f.try_into()
+                    .expect("Value is too large for address");
+                vm.stack_u32.push(f);
+            }
+            OpCode::OpMulAddr => {
+                let b = vm.stack_u32.pop().unwrap();
+                let a = vm.stack_u32.pop().unwrap();
+                let (r, overflow) = a.overflowing_mul(b);
+                if overflow {
+                    panic!("Address multiplication overflow");
+                }
+                vm.stack_u32.push(r);
+            }
+            OpCode::OpAddAddr => {
+                let b = vm.stack_u32.pop().unwrap();
+                let a = vm.stack_u32.pop().unwrap();
+                let (r, overflow) = a.overflowing_add(b);
+                if overflow {
+                    panic!("Address addition overflow");
+                }
+                vm.stack_u32.push(r);
+            }
         }
 
         println!("==[ Stack ]==");
         vm.print_stack();
+        println!("==[ Stack32 ]==");
+        vm.print_stack_u32();
     }
 }
 
@@ -1212,7 +1244,7 @@ fn statement(
                             for _ in 0..4 { line_numbers.push(usize::MAX); }
                         }
                         U32OrExpression::Expression => {
-                            expression(
+                            expression_u32(
                                 location, code, constants, line_numbers,
                                 components, io_map);
                             code.push(OpCode::SetVariable as u8);
@@ -1245,7 +1277,7 @@ fn statement(
                             for _ in 0..4 { line_numbers.push(usize::MAX); }
                         }
                         U32OrExpression::Expression => {
-                            expression(
+                            expression_u32(
                                 location, code, constants, line_numbers,
                                 components, io_map);
                             code.push(OpCode::SetSelfSignal as u8);
@@ -1297,7 +1329,7 @@ fn statement(
                                     for _ in 0..4 { line_numbers.push(usize::MAX); }
                                 }
                                 U32OrExpression::Expression => {
-                                    expression(
+                                    expression_u32(
                                         location, code, constants, line_numbers,
                                         components, io_map);
 
@@ -1601,6 +1633,8 @@ fn expression_mapped_signal_idx(
     io_map: &TemplateInstanceIOMap,
     components: &mut Vec<ComponentTmpl>) {
 
+    panic!("rewrite this to stack_u32");
+
     let mut template_id = components[0].template_id;
     for e in &components[1..] {
         if e.sub_cmp_idx > sub_cmp_idx {
@@ -1683,7 +1717,7 @@ fn expression_load(
                     for _ in 0..4 { line_numbers.push(usize::MAX); }
                 }
                 U32OrExpression::Expression => {
-                    expression(
+                    expression_u32(
                         location, code, constants, line_numbers, components,
                         io_map);
                     code.push(OpCode::GetSelfSignal as u8);
@@ -1728,7 +1762,7 @@ fn expression_load(
                             for _ in 0..4 { line_numbers.push(usize::MAX); }
                         }
                         U32OrExpression::Expression => {
-                            expression(
+                            expression_u32(
                                 location, code, constants, line_numbers,
                                 components, io_map);
 
@@ -1791,7 +1825,7 @@ fn expression_load(
                     for _ in 0..4 { line_numbers.push(usize::MAX); }
                 }
                 U32OrExpression::Expression => {
-                    expression(
+                    expression_u32(
                         location, code, constants, line_numbers, components,
                         io_map);
                     code.push(OpCode::GetVariable as u8);
@@ -1826,13 +1860,13 @@ fn expression_compute(
     };
 
     match cb.op {
-        OperatorType::Mul | OperatorType::MulAddress => {
+        OperatorType::Mul => {
             op2(OpCode::OpMul);
         }
         OperatorType::Div => {
             op2(OpCode::OpDiv);
         }
-        OperatorType::Add | OperatorType::AddAddress => {
+        OperatorType::Add => {
             op2(OpCode::OpAdd);
         }
         OperatorType::ShiftR => {
@@ -1864,14 +1898,51 @@ fn expression_compute(
             code.push(OpCode::OpNeg as u8);
             line_numbers.push(cb.line);
         }
+        OperatorType::ToAddress | OperatorType::MulAddress | OperatorType::AddAddress => {
+            panic!("Unexpected address operator: {}", cb.op.to_string());
+        }
+        _ => {
+            todo!("not implemented expression operator {}: {}",
+                cb.op.to_string(), cb.to_string());
+        }
+    };
+}
+
+fn expression_compute_u32(
+    cb: &ComputeBucket, code: &mut Vec<u8>, constants: &[Fr],
+    line_numbers: &mut Vec<usize>, components: &mut Vec<ComponentTmpl>,
+    io_map: &TemplateInstanceIOMap) {
+
+    match cb.op {
         OperatorType::ToAddress => {
             assert_eq!(1, cb.stack.len());
             expression(
                 &cb.stack[0], code, constants, line_numbers, components,
                 io_map);
-
-            // do not add instruction as the value on the stack after previous
-            // expression compilation should be stayed as is.
+            code.push(OpCode::OpToAddr as u8);
+            line_numbers.push(cb.line);
+        }
+        OperatorType::MulAddress => {
+            assert_eq!(2, cb.stack.len());
+            expression_u32(
+                &cb.stack[0], code, constants, line_numbers, components,
+                io_map);
+            expression_u32(
+                &cb.stack[1], code, constants, line_numbers, components,
+                io_map);
+            code.push(OpCode::OpMulAddr as u8);
+            line_numbers.push(cb.line);
+        }
+        OperatorType::AddAddress => {
+            assert_eq!(2, cb.stack.len());
+            expression_u32(
+                &cb.stack[0], code, constants, line_numbers, components,
+                io_map);
+            expression_u32(
+                &cb.stack[1], code, constants, line_numbers, components,
+                io_map);
+            code.push(OpCode::OpAddAddr as u8);
+            line_numbers.push(cb.line);
         }
         _ => {
             todo!("not implemented expression operator {}: {}",
@@ -1920,6 +1991,46 @@ fn expression(
         }
         _ => {
             panic!("Expression does not supported: {}", inst.to_string());
+        }
+    }
+}
+
+// After expression execution_u32, the value of the expression should be on the stack_u32
+fn expression_u32(
+    inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[Fr],
+    line_numbers: &mut Vec<usize>, components: &mut Vec<ComponentTmpl>,
+    io_map: &TemplateInstanceIOMap) {
+
+    println!("expression: {}", inst.to_string());
+    match **inst {
+        Instruction::Value(ref value_bucket) => {
+            match value_bucket.parse_as {
+                ValueType::U32 => {
+                    code.push(OpCode::Push4 as u8);
+                    line_numbers.push(value_bucket.line);
+                    let value: u32 = value_bucket.value.try_into().expect("Value is too large");
+                    code.extend_from_slice(value.to_le_bytes().as_ref());
+                    for _ in 0..4 { line_numbers.push(usize::MAX); }
+                }
+                ValueType::BigInt => {
+                    todo!("convert to u32 and check this");
+                    code.push(OpCode::GetConstant8 as u8);
+                    line_numbers.push(value_bucket.line);
+                    assert_64();
+                    code.extend_from_slice(value_bucket.value.to_le_bytes().as_ref());
+                    for _ in 0..8 { line_numbers.push(usize::MAX); }
+                }
+            }
+            assert_eq!(line_numbers.len(), code.len());
+        }
+        Instruction::Compute(ref compute_bucket) => {
+            expression_compute_u32(
+                compute_bucket, code, constants, line_numbers, components,
+                io_map);
+            assert_eq!(line_numbers.len(), code.len());
+        }
+        _ => {
+            panic!("U32 expression does not supported: {}", inst.to_string());
         }
     }
 }
@@ -2095,13 +2206,13 @@ fn disassemble_instruction(code: &[u8], line_numbers: &[usize], ip: usize) -> us
             let sigs_number = read_u32(&code, ip);
             ip += size_of::<u32>();
 
-            println!("StoreSelfSignal8 [{},{}]", sig_idx, sigs_number);
+            println!("SetSelfSignal4 [{},{}]", sig_idx, sigs_number);
         }
         OpCode::SetSelfSignal => {
             let sigs_number = read_u32(&code, ip);
             ip += size_of::<u32>();
 
-            println!("StoreSelfSignal [{}]", sigs_number);
+            println!("SetSelfSignal [{}]", sigs_number);
         }
         OpCode::GetConstant8 => {
             let const_idx = read_usize(&code, ip);
@@ -2114,6 +2225,12 @@ fn disassemble_instruction(code: &[u8], line_numbers: &[usize], ip: usize) -> us
             ip += size_of::<usize>();
 
             println!("Push8 [{}]", val);
+        }
+        OpCode::Push4 => {
+            let val = read_u32(&code, ip);
+            ip += size_of::<u32>();
+
+            println!("Push4 [{}]", val);
         }
         OpCode::GetVariable4 => {
             let var_idx = read_u32(&code, ip);
@@ -2182,7 +2299,7 @@ fn disassemble_instruction(code: &[u8], line_numbers: &[usize], ip: usize) -> us
             ip += 1;
 
             println!(
-                "StoreSubSignal4 [{},{},{},{}]",
+                "SetSubSignal4 [{},{},{},{}]",
                 cmp_idx, sig_idx, sigs_number, input_status);
         }
         OpCode::SetSubSignal => {
@@ -2196,7 +2313,7 @@ fn disassemble_instruction(code: &[u8], line_numbers: &[usize], ip: usize) -> us
             ip += 1;
 
             println!(
-                "StoreSubSignal [{},{},{}]",
+                "SetSubSignal [{},{},{}]",
                 cmp_idx, sigs_number, input_status);
         }
         OpCode::JumpIfFalse => {
@@ -2255,6 +2372,15 @@ fn disassemble_instruction(code: &[u8], line_numbers: &[usize], ip: usize) -> us
             ip += size_of::<u32>();
 
             println!("GetSelfSignal [{}]", sigs_number);
+        }
+        OpCode::OpToAddr => {
+            println!("OpToAddr");
+        }
+        OpCode::OpMulAddr => {
+            println!("OpMulAddr");
+        }
+        OpCode::OpAddAddr => {
+            println!("OpAddAddr");
         }
     }
 
