@@ -19,7 +19,7 @@ use compiler::circuit_design::function::FunctionCode;
 use compiler::circuit_design::template::TemplateCode;
 use compiler::compiler_interface::{run_compiler, Circuit, Config};
 use compiler::intermediate_representation::InstructionList;
-use compiler::intermediate_representation::ir_interface::{AddressType, ComputeBucket, CreateCmpBucket, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, OperatorType, StatusInput, ValueType};
+use compiler::intermediate_representation::ir_interface::{AddressType, ComputeBucket, CreateCmpBucket, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, ObtainMeta, OperatorType, StatusInput, ValueType};
 use constraint_generation::{build_circuit, BuildConfig};
 use program_structure::error_definition::Report;
 use type_analysis::check_types::check_types;
@@ -57,6 +57,7 @@ struct VM<'a> {
     signals: &'a mut [Option<Fr>],
     constants: &'a Vec<Fr>,
     stack: Vec<Fr>,
+    stack_u32: Vec<u32>,
 }
 
 impl VM<'_> {
@@ -153,9 +154,11 @@ enum OpCode {
     OpAdd          = 19,
     OpShR          = 20,
     OpLt           = 21,
-    OpNe           = 22,
-    OpBAnd         = 23,
-    OpNeg          = 24,
+    OpGt           = 22,
+    OpEq           = 23,
+    OpNe           = 24,
+    OpBAnd         = 25,
+    OpNeg          = 26,
 }
 
 #[derive(Debug)]
@@ -581,6 +584,7 @@ fn execute(
         signals,
         constants,
         stack: vec![],
+        stack_u32: vec![],
     };
 
     let mut call_frames: Vec<Frame> =
@@ -1038,6 +1042,16 @@ fn execute(
                 let a = vm.stack.pop().unwrap();
                 vm.stack.push(u_lt(&a, &b));
             }
+            OpCode::OpGt => {
+                let b = vm.stack.pop().unwrap();
+                let a = vm.stack.pop().unwrap();
+                vm.stack.push(Operation::Gt.eval_fr(a, b));
+            }
+            OpCode::OpEq => {
+                let b = vm.stack.pop().unwrap();
+                let a = vm.stack.pop().unwrap();
+                vm.stack.push(Operation::Eq.eval_fr(a, b));
+            }
             OpCode::OpNe => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
@@ -1165,14 +1179,17 @@ fn patch_jump(code: &mut [u8], jump_offset_addr: usize, to: usize) {
 // After statement execution, there should not be side-effect on the stack
 fn statement(
     inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[Fr],
-    line_numbers: &mut Vec<usize>, components: &mut Vec<ComponentTmpl>) {
+    line_numbers: &mut Vec<usize>, components: &mut Vec<ComponentTmpl>,
+    io_map: &TemplateInstanceIOMap) {
 
     println!("statement: {}", inst.to_string());
 
     match **inst {
         Instruction::Store(ref store_bucket) => {
 
-            expression(&store_bucket.src, code, constants, line_numbers);
+            expression(
+                &store_bucket.src, code, constants, line_numbers, components,
+                io_map);
             assert_eq!(line_numbers.len(), code.len());
 
             match store_bucket.dest_address_type {
@@ -1195,7 +1212,9 @@ fn statement(
                             for _ in 0..4 { line_numbers.push(usize::MAX); }
                         }
                         U32OrExpression::Expression => {
-                            expression(location, code, constants, line_numbers);
+                            expression(
+                                location, code, constants, line_numbers,
+                                components, io_map);
                             code.push(OpCode::SetVariable as u8);
                             line_numbers.push(store_bucket.line);
                         }
@@ -1226,7 +1245,9 @@ fn statement(
                             for _ in 0..4 { line_numbers.push(usize::MAX); }
                         }
                         U32OrExpression::Expression => {
-                            expression(location, code, constants, line_numbers);
+                            expression(
+                                location, code, constants, line_numbers,
+                                components, io_map);
                             code.push(OpCode::SetSelfSignal as u8);
                             line_numbers.push(store_bucket.line);
                         }
@@ -1239,6 +1260,7 @@ fn statement(
                 }
 
                 AddressType::SubcmpSignal { ref cmp_address, ref input_information, .. } => {
+                    println!("calc expression: {}", cmp_address.to_string()); // TODO remove
                     let cmp_idx = u32_or_expression(
                         cmp_address, constants, Some(Fr::from(u32::MAX)));
                     let cmp_idx = match cmp_idx {
@@ -1275,7 +1297,9 @@ fn statement(
                                     for _ in 0..4 { line_numbers.push(usize::MAX); }
                                 }
                                 U32OrExpression::Expression => {
-                                    expression(location, code, constants, line_numbers);
+                                    expression(
+                                        location, code, constants, line_numbers,
+                                        components, io_map);
 
                                     code.push(OpCode::SetSubSignal as u8);
                                     line_numbers.push(store_bucket.line);
@@ -1285,9 +1309,36 @@ fn statement(
                                 }
                             };
                         }
-                        LocationRule::Mapped { .. } => {
+                        LocationRule::Mapped { ref signal_code, ref indexes } => {
                             // copy the logic of calc_mapped_signal_idx
-                            todo!();
+
+                            let sig_idx = calc_mapped_signal_idx(
+                                *signal_code, indexes, *cmp_idx as usize,
+                                io_map, components);
+
+                            match sig_idx {
+                                U32OrExpression::U32(sig_idx) => {
+                                    code.push(OpCode::SetSubSignal4 as u8);
+                                    line_numbers.push(store_bucket.line);
+
+                                    code.extend_from_slice(cmp_idx.to_le_bytes().as_ref());
+                                    for _ in 0..4 { line_numbers.push(usize::MAX); }
+
+                                    code.extend_from_slice(sig_idx.to_le_bytes().as_ref());
+                                    for _ in 0..4 { line_numbers.push(usize::MAX); }
+                                }
+                                U32OrExpression::Expression => {
+                                    expression_mapped_signal_idx(
+                                        code, constants, line_numbers, *signal_code,
+                                        indexes, *cmp_idx as usize, io_map, components);
+
+                                    code.push(OpCode::SetSubSignal as u8);
+                                    line_numbers.push(store_bucket.line);
+
+                                    code.extend_from_slice(cmp_idx.to_le_bytes().as_ref());
+                                    for _ in 0..4 { line_numbers.push(usize::MAX); }
+                                }
+                            };
                         }
                     };
 
@@ -1312,7 +1363,9 @@ fn statement(
         Instruction::Loop(ref loop_bucket) => {
             let loop_start = code.len();
 
-            expression(&loop_bucket.continue_condition, code, constants, line_numbers);
+            expression(
+                &loop_bucket.continue_condition, code, constants, line_numbers,
+                components, io_map);
 
             let loop_end_jump_offset = pre_emit_jump_if_false(code);
             line_numbers.push(loop_bucket.line);
@@ -1321,7 +1374,9 @@ fn statement(
             line_numbers.push(usize::MAX);
             line_numbers.push(usize::MAX);
 
-            block(&loop_bucket.body, code, constants, line_numbers, components);
+            block(
+                &loop_bucket.body, code, constants, line_numbers, components,
+                io_map);
 
             emit_jump(code, loop_start);
             line_numbers.push(loop_bucket.line);
@@ -1346,8 +1401,8 @@ fn statement(
                 panic!("Subcomponent index suppose to be a constant");
             };
 
-            let want_defined_positions: Vec<(usize, bool)> = vec![(0, false)];
-            assert_eq!(cmp_bucket.defined_positions, want_defined_positions); // TODO
+            // let want_defined_positions: Vec<(usize, bool)> = vec![(0, false)];
+            // assert_eq!(cmp_bucket.defined_positions, want_defined_positions); // TODO
 
             if cmp_bucket.is_part_mixed_array_not_uniform_parallel {
                 todo!();
@@ -1356,18 +1411,18 @@ fn statement(
             // TODO
             assert!(matches!(cmp_bucket.uniform_parallel, Some(false)));
 
-            if cmp_bucket.dimensions.len() > 0 {
-                todo!();
-            }
-            if cmp_bucket.component_offset != 0 {
-                todo!();
-            }
-            if cmp_bucket.component_offset_jump != 1 {
-                todo!();
-            }
-            if cmp_bucket.number_of_cmp != 1 {
-                todo!();
-            }
+            // if cmp_bucket.dimensions.len() > 0 {
+            //     todo!("{:?}: {}", cmp_bucket.dimensions, cmp_bucket.to_string());
+            // }
+            // if cmp_bucket.component_offset != 0 {
+            //     todo!();
+            // }
+            // if cmp_bucket.component_offset_jump != 1 {
+            //     todo!("{:?}: {}", cmp_bucket.component_offset_jump, cmp_bucket.to_string());
+            // }
+            // if cmp_bucket.number_of_cmp != 1 {
+            //     todo!();
+            // }
 
             components.push(ComponentTmpl {
                 symbol: cmp_bucket.symbol.clone(),
@@ -1388,7 +1443,7 @@ fn statement(
         }
         Instruction::Call(ref _call_bucket) => {
             // pass
-            // todo!()
+            todo!()
         }
         Instruction::Value(_) => {
             panic!("An expression instruction Value found where statement expected");
@@ -1400,13 +1455,17 @@ fn statement(
             panic!("An expression instruction Compute found where statement expected");
         }
         Instruction::Branch(ref branch_bucket) => {
-            expression(&branch_bucket.cond, code, constants, line_numbers);
+            expression(
+                &branch_bucket.cond, code, constants, line_numbers, components,
+                io_map);
 
             let else_jump_offset = pre_emit_jump_if_false(code);
             line_numbers.push(branch_bucket.line);
             for _ in 0..4 { line_numbers.push(usize::MAX); }
 
-            block(&branch_bucket.if_branch, code, constants, line_numbers, components);
+            block(
+                &branch_bucket.if_branch, code, constants, line_numbers,
+                components, io_map);
 
             let end_jump_offset = pre_emit_jump(code);
             line_numbers.push(branch_bucket.line);
@@ -1415,7 +1474,9 @@ fn statement(
             let to = code.len();
             patch_jump(code, else_jump_offset, to);
 
-            block(&branch_bucket.else_branch, code, constants, line_numbers, components);
+            block(
+                &branch_bucket.else_branch, code, constants, line_numbers,
+                components, io_map);
 
             let to = code.len();
             patch_jump(code, end_jump_offset, to);
@@ -1474,7 +1535,134 @@ fn assert_64() {
     assert!(cfg!(target_pointer_width = "64"), "Need a fix for non-64-bit architecture.");
 }
 
-fn expression_load(lb: &LoadBucket, code: &mut Vec<u8>, constants: &[Fr], line_numbers: &mut Vec<usize>) {
+fn calc_mapped_signal_idx(
+    signal_code: usize, indexes: &[InstructionPointer], sub_cmp_idx: usize,
+    io_map: &TemplateInstanceIOMap,
+    components: &mut Vec<ComponentTmpl>) -> U32OrExpression {
+
+    let mut template_id = components[0].template_id;
+    for e in &components[1..] {
+        if e.sub_cmp_idx > sub_cmp_idx {
+            break;
+        }
+        template_id = e.template_id;
+    }
+
+    let signals = io_map.get(&template_id).unwrap();
+    let def = &signals[signal_code];
+    let mut sig_idx: u32 = def.offset.try_into()
+        .expect("Signal index is too large");
+
+    if indexes.is_empty() {
+        panic!("test this");
+        return U32OrExpression::U32(sig_idx);
+    }
+
+    assert_eq!(def.lengths.len(), indexes.len());
+
+    // Compute strides
+    let mut strides = vec![1u32; def.lengths.len()];
+    for i in (0..def.lengths.len() - 1).rev() {
+        let ln: u32 = def.lengths[i+1].try_into().expect("Length is too large");
+        let (s, overflowed) = strides[i+1].overflowing_mul(ln);
+        if overflowed {
+            panic!("Stride is too large");
+        }
+        strides[i] = s;
+    }
+
+    for (i, idx_ip) in indexes.iter().enumerate() {
+        let idx_value = u32_or_expression(
+            idx_ip, &[], Some(Fr::from(u32::MAX)))
+            .unwrap();
+        let idx_value = match idx_value {
+            U32OrExpression::U32(idx_value) => idx_value,
+            U32OrExpression::Expression => {
+                return U32OrExpression::Expression;
+            }
+        };
+
+        let (s, mut overflow) = idx_value.overflowing_mul(strides[i]);
+        if overflow {
+            panic!("Index is too large");
+        }
+        (sig_idx, overflow) = sig_idx.overflowing_add(s);
+        if overflow {
+            panic!("Signal index is too large");
+        }
+    }
+
+    return U32OrExpression::U32(sig_idx);
+}
+
+fn expression_mapped_signal_idx(
+    code: &mut Vec<u8>, constants: &[Fr], line_numbers: &mut Vec<usize>,
+    signal_code: usize, indexes: &[InstructionPointer], sub_cmp_idx: usize,
+    io_map: &TemplateInstanceIOMap,
+    components: &mut Vec<ComponentTmpl>) {
+
+    let mut template_id = components[0].template_id;
+    for e in &components[1..] {
+        if e.sub_cmp_idx > sub_cmp_idx {
+            break;
+        }
+        template_id = e.template_id;
+    }
+
+    let signals = io_map.get(&template_id).unwrap();
+    let def = &signals[signal_code];
+    let mut sig_idx: u32 = def.offset.try_into()
+        .expect("Signal index is too large");
+
+    // TODO replace with short push to stack_u32
+    code.push(OpCode::Push8 as u8);
+    line_numbers.push(usize::MAX);
+    assert_64();
+    code.extend_from_slice(def.offset.to_le_bytes().as_ref());
+    for _ in 0..8 { line_numbers.push(usize::MAX); }
+
+    if indexes.is_empty() {
+        return
+    }
+
+    assert_eq!(def.lengths.len(), indexes.len());
+
+    // Compute strides
+    let mut strides = vec![1u32; def.lengths.len()];
+    for i in (0..def.lengths.len() - 1).rev() {
+        let ln: u32 = def.lengths[i+1].try_into().expect("Length is too large");
+        let (s, overflowed) = strides[i+1].overflowing_mul(ln);
+        if overflowed {
+            panic!("Stride is too large");
+        }
+        strides[i] = s;
+    }
+
+    for (i, idx_ip) in indexes.iter().enumerate() {
+        expression(
+            idx_ip, code, constants, line_numbers, components, io_map);
+
+        code.push(OpCode::Push8 as u8);
+        line_numbers.push(idx_ip.get_line());
+        assert_64();
+        code.extend_from_slice((strides[i] as usize).to_le_bytes().as_ref());
+        for _ in 0..8 { line_numbers.push(usize::MAX); }
+
+        // TODO: replace with Address multiply
+        code.push(OpCode::OpMul as u8);
+        line_numbers.push(idx_ip.get_line());
+
+        // TODO: replace with Address add
+        code.push(OpCode::OpAdd as u8);
+        line_numbers.push(idx_ip.get_line());
+    }
+}
+
+fn expression_load(
+    lb: &LoadBucket, code: &mut Vec<u8>, constants: &[Fr],
+    line_numbers: &mut Vec<usize>, components: &mut Vec<ComponentTmpl>,
+    io_map: &TemplateInstanceIOMap) {
+
     match lb.address_type {
         AddressType::Signal => {
             let location = if let LocationRule::Indexed{ref location, ..} = lb.src {
@@ -1495,7 +1683,9 @@ fn expression_load(lb: &LoadBucket, code: &mut Vec<u8>, constants: &[Fr], line_n
                     for _ in 0..4 { line_numbers.push(usize::MAX); }
                 }
                 U32OrExpression::Expression => {
-                    expression(location, code, constants, line_numbers);
+                    expression(
+                        location, code, constants, line_numbers, components,
+                        io_map);
                     code.push(OpCode::GetSelfSignal as u8);
                     line_numbers.push(lb.line);
                 }
@@ -1538,7 +1728,9 @@ fn expression_load(lb: &LoadBucket, code: &mut Vec<u8>, constants: &[Fr], line_n
                             for _ in 0..4 { line_numbers.push(usize::MAX); }
                         }
                         U32OrExpression::Expression => {
-                            expression(location, code, constants, line_numbers);
+                            expression(
+                                location, code, constants, line_numbers,
+                                components, io_map);
 
                             code.push(OpCode::GetSubSignal as u8);
                             line_numbers.push(lb.line);
@@ -1548,9 +1740,35 @@ fn expression_load(lb: &LoadBucket, code: &mut Vec<u8>, constants: &[Fr], line_n
                         }
                     };
                 }
-                LocationRule::Mapped { .. } => {
+                LocationRule::Mapped { ref signal_code, ref indexes } => {
                     // copy the logic of calc_mapped_signal_idx
-                    todo!();
+                    let sig_idx = calc_mapped_signal_idx(
+                        *signal_code, indexes, *cmp_idx as usize,
+                        io_map, components);
+
+                    match sig_idx {
+                        U32OrExpression::U32(sig_idx) => {
+                            code.push(OpCode::GetSubSignal4 as u8);
+                            line_numbers.push(lb.line);
+
+                            code.extend_from_slice(cmp_idx.to_le_bytes().as_ref());
+                            for _ in 0..4 { line_numbers.push(usize::MAX); }
+
+                            code.extend_from_slice(sig_idx.to_le_bytes().as_ref());
+                            for _ in 0..4 { line_numbers.push(usize::MAX); }
+                        }
+                        U32OrExpression::Expression => {
+                            expression_mapped_signal_idx(
+                                code, constants, line_numbers, *signal_code,
+                                indexes, *cmp_idx as usize, io_map, components);
+
+                            code.push(OpCode::GetSubSignal as u8);
+                            line_numbers.push(lb.line);
+
+                            code.extend_from_slice(cmp_idx.to_le_bytes().as_ref());
+                            for _ in 0..4 { line_numbers.push(usize::MAX); }
+                        }
+                    };
                 }
             };
         }
@@ -1573,7 +1791,9 @@ fn expression_load(lb: &LoadBucket, code: &mut Vec<u8>, constants: &[Fr], line_n
                     for _ in 0..4 { line_numbers.push(usize::MAX); }
                 }
                 U32OrExpression::Expression => {
-                    expression(location, code, constants, line_numbers);
+                    expression(
+                        location, code, constants, line_numbers, components,
+                        io_map);
                     code.push(OpCode::GetVariable as u8);
                     line_numbers.push(lb.line);
                 }
@@ -1587,66 +1807,68 @@ fn expression_load(lb: &LoadBucket, code: &mut Vec<u8>, constants: &[Fr], line_n
     for _ in 0..4 { line_numbers.push(usize::MAX); }
 }
 
-fn expression_compute(cb: &ComputeBucket, code: &mut Vec<u8>, constants: &[Fr], line_numbers: &mut Vec<usize>) {
+fn expression_compute(
+    cb: &ComputeBucket, code: &mut Vec<u8>, constants: &[Fr],
+    line_numbers: &mut Vec<usize>, components: &mut Vec<ComponentTmpl>,
+    io_map: &TemplateInstanceIOMap) {
+
+    // two operand operations
+    let mut op2 = |oc: OpCode| {
+        assert_eq!(2, cb.stack.len());
+        expression(
+            &cb.stack[0], code, constants, line_numbers, components,
+            io_map);
+        expression(
+            &cb.stack[1], code, constants, line_numbers, components,
+            io_map);
+        code.push(oc as u8);
+        line_numbers.push(cb.line);
+    };
+
     match cb.op {
         OperatorType::Mul | OperatorType::MulAddress => {
-            assert_eq!(2, cb.stack.len());
-            expression(&cb.stack[0], code, constants, line_numbers);
-            expression(&cb.stack[1], code, constants, line_numbers);
-            code.push(OpCode::OpMul as u8);
-            line_numbers.push(cb.line);
+            op2(OpCode::OpMul);
         }
         OperatorType::Div => {
-            assert_eq!(2, cb.stack.len());
-            expression(&cb.stack[0], code, constants, line_numbers);
-            expression(&cb.stack[1], code, constants, line_numbers);
-            code.push(OpCode::OpDiv as u8);
-            line_numbers.push(cb.line);
+            op2(OpCode::OpDiv);
         }
         OperatorType::Add | OperatorType::AddAddress => {
-            assert_eq!(2, cb.stack.len());
-            expression(&cb.stack[0], code, constants, line_numbers);
-            expression(&cb.stack[1], code, constants, line_numbers);
-            code.push(OpCode::OpAdd as u8);
-            line_numbers.push(cb.line);
+            op2(OpCode::OpAdd);
         }
         OperatorType::ShiftR => {
-            assert_eq!(2, cb.stack.len());
-            expression(&cb.stack[0], code, constants, line_numbers);
-            expression(&cb.stack[1], code, constants, line_numbers);
-            code.push(OpCode::OpShR as u8);
-            line_numbers.push(cb.line);
+            op2(OpCode::OpShR);
         }
         OperatorType::Lesser => {
-            assert_eq!(2, cb.stack.len());
-            expression(&cb.stack[0], code, constants, line_numbers);
-            expression(&cb.stack[1], code, constants, line_numbers);
-            code.push(OpCode::OpLt as u8);
-            line_numbers.push(cb.line);
+            op2(OpCode::OpLt);
+        }
+        OperatorType::Greater => {
+            op2(OpCode::OpGt);
+        }
+        OperatorType::Eq( x ) => {
+            if x != 1 {
+                todo!();
+            }
+            op2(OpCode::OpEq);
         }
         OperatorType::NotEq => {
-            assert_eq!(2, cb.stack.len());
-            expression(&cb.stack[0], code, constants, line_numbers);
-            expression(&cb.stack[1], code, constants, line_numbers);
-            code.push(OpCode::OpNe as u8);
-            line_numbers.push(cb.line);
+            op2(OpCode::OpNe);
         }
         OperatorType::BitAnd => {
-            assert_eq!(2, cb.stack.len());
-            expression(&cb.stack[0], code, constants, line_numbers);
-            expression(&cb.stack[1], code, constants, line_numbers);
-            code.push(OpCode::OpBAnd as u8);
-            line_numbers.push(cb.line);
+            op2(OpCode::OpBAnd);
         }
         OperatorType::PrefixSub => {
             assert_eq!(1, cb.stack.len());
-            expression(&cb.stack[0], code, constants, line_numbers);
+            expression(
+                &cb.stack[0], code, constants, line_numbers, components,
+                io_map);
             code.push(OpCode::OpNeg as u8);
             line_numbers.push(cb.line);
         }
         OperatorType::ToAddress => {
             assert_eq!(1, cb.stack.len());
-            expression(&cb.stack[0], code, constants, line_numbers);
+            expression(
+                &cb.stack[0], code, constants, line_numbers, components,
+                io_map);
 
             // do not add instruction as the value on the stack after previous
             // expression compilation should be stayed as is.
@@ -1659,7 +1881,11 @@ fn expression_compute(cb: &ComputeBucket, code: &mut Vec<u8>, constants: &[Fr], 
 }
 
 // After expression execution, the value of the expression should be on the stack
-fn expression(inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[Fr], line_numbers: &mut Vec<usize>) {
+fn expression(
+    inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[Fr],
+    line_numbers: &mut Vec<usize>, components: &mut Vec<ComponentTmpl>,
+    io_map: &TemplateInstanceIOMap) {
+
     println!("expression: {}", inst.to_string());
     match **inst {
         Instruction::Value(ref value_bucket) => {
@@ -1682,11 +1908,14 @@ fn expression(inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[Fr], l
             assert_eq!(line_numbers.len(), code.len());
         }
         Instruction::Load(ref load_bucket) => {
-            expression_load(load_bucket, code, constants, line_numbers);
+            expression_load(
+                load_bucket, code, constants, line_numbers, components, io_map);
             assert_eq!(line_numbers.len(), code.len());
         }
         Instruction::Compute(ref compute_bucket) => {
-            expression_compute(compute_bucket, code, constants, line_numbers);
+            expression_compute(
+                compute_bucket, code, constants, line_numbers, components,
+                io_map);
             assert_eq!(line_numbers.len(), code.len());
         }
         _ => {
@@ -1708,14 +1937,19 @@ struct ComponentTmpl {
 
 fn block(
     inst_list: &InstructionList, code: &mut Vec<u8>, constants: &[Fr],
-    line_numbers: &mut Vec<usize>, components: &mut Vec<ComponentTmpl>) {
+    line_numbers: &mut Vec<usize>, components: &mut Vec<ComponentTmpl>,
+    io_map: &TemplateInstanceIOMap) {
+
     for inst in inst_list {
-        statement(inst, code, constants, line_numbers, components);
+        statement(inst, code, constants, line_numbers, components, io_map);
         assert_eq!(line_numbers.len(), code.len());
     }
 }
 
-fn compile_template(tmpl_code: &TemplateCode, constants: &[Fr]) -> Template {
+fn compile_template(
+    tmpl_code: &TemplateCode, constants: &[Fr],
+    io_map: &TemplateInstanceIOMap) -> Template {
+
     println!("Compile template {}", tmpl_code.name);
 
     let mut code = vec![];
@@ -1723,7 +1957,7 @@ fn compile_template(tmpl_code: &TemplateCode, constants: &[Fr]) -> Template {
     let mut components = Vec::new();
     block(
         &tmpl_code.body, &mut code, constants, &mut line_numbers,
-        &mut components);
+        &mut components, io_map);
 
     assert_eq!(line_numbers.len(), code.len());
 
@@ -1744,7 +1978,7 @@ fn compile(
 
     let mut compiled_templates = Vec::with_capacity(templates.len());
     for tmpl in templates.iter() {
-        compiled_templates.push(compile_template(tmpl, constants));
+        compiled_templates.push(compile_template(tmpl, constants, io_map));
     }
 
     // Assert all components created has has_inputs field consistent with
@@ -1992,6 +2226,12 @@ fn disassemble_instruction(code: &[u8], line_numbers: &[usize], ip: usize) -> us
         OpCode::OpLt => {
             println!("OpLt");
         }
+        OpCode::OpGt => {
+            println!("OpGt");
+        }
+        OpCode::OpEq => {
+            println!("OpEq");
+        }
         OpCode::OpNe => {
             println!("OpNe");
         }
@@ -2023,6 +2263,7 @@ fn disassemble_instruction(code: &[u8], line_numbers: &[usize], ip: usize) -> us
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, HashMap};
     use ark_ff::BigInteger256;
     use compiler::intermediate_representation::ir_interface::{InstrContext, StoreBucket, ValueBucket};
     use super::*;
@@ -2085,7 +2326,10 @@ mod tests {
             op_aux_no: 0,
             value: 42,
         }));
-        expression(&inst, &mut code, &constants, &mut vec![]);
+        let io_map: TemplateInstanceIOMap = BTreeMap::new();
+        expression(
+            &inst, &mut code, &constants, &mut vec![],
+            &mut vec![], &io_map);
         assert_eq!(code, vec![OpCode::Push8 as u8, 42, 0, 0, 0, 0, 0, 0, 0]);
     }
 
@@ -2100,7 +2344,7 @@ mod tests {
             op_aux_no: 0,
             value: 42,
         }));
-        expression(&inst, &mut code, &constants, &mut vec![]);
+        expression(&inst, &mut code, &constants, &mut vec![], &mut vec![], &BTreeMap::new());
         assert_eq!(code, vec![OpCode::GetConstant8 as u8, 42, 0, 0, 0, 0, 0, 0, 0]);
     }
 
@@ -2156,7 +2400,7 @@ mod tests {
         let constants = vec![];
         let mut line_numbers = vec![];
         let mut components = vec![];
-        statement(&inst, &mut code, &constants, &mut line_numbers, &mut components);
+        statement(&inst, &mut code, &constants, &mut line_numbers, &mut components, &BTreeMap::new());
         assert_eq!(code,
                    vec![
                        OpCode::GetConstant8 as u8, 0xea, 0, 0, 0, 0, 0, 0, 0,
@@ -2324,11 +2568,11 @@ mod tests {
         let constants = vec![];
         let mut line_numbers = vec![];
         let mut components = vec![];
-        statement(&inst, &mut code, &constants, &mut line_numbers, &mut components);
+        statement(&inst, &mut code, &constants, &mut line_numbers, &mut components, &BTreeMap::new());
 
         let var1 = Some(Fr::from(2));
         let var2 = Some(Fr::from(1));
-        let mut c = Component{
+        let c = Component{
             vars: vec![None, var1, var2],
             signals_start: 0,
             template_id: 0,
