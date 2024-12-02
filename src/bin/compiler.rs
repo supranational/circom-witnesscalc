@@ -4,6 +4,7 @@ use core::convert::TryInto;
 use core::str::FromStr;
 use std::cell::RefCell;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::fs::File;
 use std::io::Write;
@@ -19,7 +20,7 @@ use compiler::circuit_design::function::FunctionCode;
 use compiler::circuit_design::template::TemplateCode;
 use compiler::compiler_interface::{run_compiler, Circuit, Config};
 use compiler::intermediate_representation::InstructionList;
-use compiler::intermediate_representation::ir_interface::{AddressType, ComputeBucket, CreateCmpBucket, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, ObtainMeta, OperatorType, StatusInput, ValueType};
+use compiler::intermediate_representation::ir_interface::{AddressType, ComputeBucket, CreateCmpBucket, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, ObtainMeta, OperatorType, ReturnType, StatusInput, ValueType};
 use constraint_generation::{build_circuit, BuildConfig};
 use program_structure::error_definition::Report;
 use type_analysis::check_types::check_types;
@@ -50,6 +51,12 @@ struct Template {
     code: Vec<u8>,
     line_numbers: Vec<usize>,
     components: Vec<ComponentTmpl>,
+}
+
+struct Function {
+    name: String,
+    code: Vec<u8>,
+    line_numbers: Vec<usize>,
 }
 
 struct VM<'a> {
@@ -177,6 +184,10 @@ enum OpCode {
     OpToAddr       = 28,
     OpMulAddr      = 29,
     OpAddAddr      = 30,
+    FnCall         = 31,
+    FnReturn       = 32,
+    // TODO: Assert should accept an index of the string to print
+    Assert         = 33,
 }
 
 #[derive(Debug)]
@@ -468,20 +479,20 @@ fn main() {
     let constants = get_constants(&circuit);
 
     let main_component_signal_start = 1usize;
-    let compiled_templates = compile(
-        &circuit.templates, &circuit.functions,
-        circuit.c_producer.get_io_map(), &constants);
+    let (compiled_templates, compiled_functions) =
+        compile(
+            &circuit.templates, &circuit.functions,
+            circuit.c_producer.get_io_map(), &constants);
 
     for (i, t) in compiled_templates.iter().enumerate() {
         println!("Compiled template #{}: {}", i, t.name);
-
-        // for c in &t.code {
-        //     println!("{:02x} ", c);
-        // }
-
         disassemble(&t.code, &t.line_numbers);
     }
 
+    for (i, t) in compiled_functions.iter().enumerate() {
+        println!("Compiled function #{}: {}", i, t.name);
+        disassemble(&t.code, &t.line_numbers);
+    }
 
     if let Some(input_file) = args.inputs_file {
 
@@ -497,8 +508,8 @@ fn main() {
 
         println!("Run VM");
         execute(
-            main_component, &compiled_templates, &constants,
-            &mut signals);
+            main_component, &compiled_templates, &compiled_functions,
+            &constants, &mut signals);
 
         if let Some(witness_file) = args.witness_file {
             let mut witness = Vec::with_capacity(witness_list.len());
@@ -576,25 +587,48 @@ fn read_i32(code: &[u8], ip: usize) -> i32 {
     i32::from_le_bytes(code[ip..ip+size_of::<i32>()].try_into().unwrap())
 }
 
-struct Frame<'a> {
-    ip: usize,
-    code: &'a [u8],
-    component: Rc<RefCell<Component>>,
+enum Frame<'a, 'b> {
+    Component {
+        ip: usize,
+        code: &'a [u8],
+        component: Rc<RefCell<Component>>,
+    },
+    Function {
+        ip: usize,
+        vars: Vec<Option<Fr>>,
+        code: &'a [u8],
+        function: &'b Function,
+        return_num: usize,
+    }
 }
 
-impl Frame<'_> {
-    fn new(component: Rc<RefCell<Component>>, templates: &[Template]) -> Frame {
+impl Frame<'_, '_> {
+    fn new_component(component: Rc<RefCell<Component>>, templates: &[Template]) -> Frame {
         let template_id = component.borrow().template_id;
-        Frame {
+        Frame::Component {
             ip: 0,
             code: &templates[template_id].code,
             component,
         }
     }
+
+    fn new_function(
+        fn_idx: usize, functions: &[Function], args_num: usize,
+        return_num: usize) -> Frame {
+
+        Frame::Function {
+            ip: 0,
+            vars: Vec::with_capacity(args_num),
+            code: &functions[fn_idx].code,
+            function: &functions[fn_idx],
+            return_num,
+        }
+    }
 }
 
 fn execute(
-    component: Rc<RefCell<Component>>, templates: &Vec<Template>, constants: &Vec<Fr>,
+    component: Rc<RefCell<Component>>, templates: &Vec<Template>,
+    functions: &[Function], constants: &Vec<Fr>,
     signals: &mut [Option<Fr>]) {
 
     let mut vm = VM {
@@ -606,12 +640,24 @@ fn execute(
     };
 
     let mut call_frames: Vec<Frame> =
-        vec![Frame::new(component.clone(), templates)];
+        vec![Frame::new_component(component.clone(), templates)];
 
     let mut ip = 0usize;
-    let mut code: &[u8] = call_frames.last().unwrap().code;
-    let mut template_id: usize = call_frames.last().unwrap().component.borrow().template_id;
-    let mut signals_start = call_frames.last().unwrap().component.borrow().signals_start;
+    let mut code: &[u8];
+    let mut template_id: usize;
+    let mut signals_start: usize;
+    {
+        match call_frames.last().unwrap() {
+            Frame::Component { code: code_local, component, .. } => {
+                code = *code_local;
+                template_id = component.borrow().template_id;
+                signals_start = component.borrow().signals_start;
+            }
+            Frame::Function { .. } => {
+                panic!("Function frame on top of the call stack");
+            }
+        }
+    }
 
     loop {
         if ip == code.len() {
@@ -621,16 +667,32 @@ fn execute(
             }
 
             let last_frame = call_frames.last().unwrap();
-            ip = last_frame.ip;
-            template_id = last_frame.component.borrow().template_id;
-            code = &templates[template_id].code;
-            signals_start = last_frame.component.borrow().signals_start;
+            match last_frame {
+                Frame::Component { ip: ip_local, component, .. } => {
+                    ip = *ip_local;
+                    let component = component.borrow();
+                    template_id = component.template_id;
+                    code = &templates[template_id].code;
+                    signals_start = component.signals_start;
+                }
+                Frame::Function { .. } => {
+                    panic!("Suppose to exit from the function with the Return statement");
+                }
+            }
         }
 
+        // TODO wrap into `if debug` condition
         {
-            // TODO wrap into `if debug` condition
-            let line_numbers =
-                &templates[template_id].line_numbers;
+            let line_numbers = match call_frames.last().unwrap() {
+                Frame::Component { .. } => {
+                    &templates[template_id].line_numbers
+                }
+                Frame::Function { function, .. } => {
+                    &(*function).line_numbers
+                }
+            };
+            // let line_numbers =
+            //     &templates[template_id].line_numbers;
             disassemble_instruction(code, line_numbers, ip);
         }
 
@@ -729,7 +791,14 @@ fn execute(
                 }
 
                 let last_frame = call_frames.last().unwrap();
-                let vars = &mut last_frame.component.borrow_mut().vars;
+                let vars = match last_frame {
+                    Frame::Component { component, .. } => {
+                        &mut component.borrow_mut().vars
+                    }
+                    Frame::Function { vars, .. } => {
+                        vars
+                    }
+                };
 
                 if vars.len() < var_end {
                     panic!("Variable is not set as {}", var_end-1);
@@ -749,7 +818,14 @@ fn execute(
                 ip += size_of::<u32>();
 
                 let last_frame = call_frames.last().unwrap();
-                let vars = &mut last_frame.component.borrow_mut().vars;
+                let vars = match last_frame {
+                    Frame::Component { component, .. } => {
+                        &mut component.borrow_mut().vars
+                    }
+                    Frame::Function { vars, .. } => {
+                        vars
+                    }
+                };
 
                 if vars.len() <= var_idx + vars_number {
                     panic!("Variable not set")
@@ -781,8 +857,15 @@ fn execute(
                     panic!("Variable index is too large");
                 }
 
-                let last_frame = call_frames.last().unwrap();
-                let vars = &mut last_frame.component.borrow_mut().vars;
+                let last_frame = call_frames.last_mut().unwrap();
+                let vars: &mut Vec<Option<Fr>> = match last_frame {
+                    Frame::Component { component, .. } => {
+                        &mut component.borrow_mut().vars
+                    }
+                    Frame::Function { ref mut vars, .. } => {
+                        vars
+                    }
+                };
 
                 if vars.len() < var_end {
                     vars.resize(var_end, None);
@@ -809,9 +892,15 @@ fn execute(
                     panic!("Variable index is too large");
                 }
 
-                let last_frame = call_frames.last().unwrap();
-                let vars =
-                    &mut last_frame.component.borrow_mut().vars;
+                let mut last_frame = call_frames.last_mut().unwrap();
+                let vars: &mut Vec<Option<Fr>> = match last_frame {
+                    Frame::Component { component, .. } => {
+                        &mut component.borrow_mut().vars
+                    }
+                    Frame::Function { ref mut vars, .. } => {
+                        vars
+                    }
+                };
 
                 if vars.len() < var_end {
                     vars.resize(var_end, None);
@@ -831,10 +920,14 @@ fn execute(
                 let sigs_number = read_u32(code, ip);
                 ip += size_of::<u32>();
 
-                let subcmp_signals_start = call_frames.last().unwrap()
-                    .component.borrow()
-                    .subcomponents[cmp_idx as usize].borrow()
-                    .signals_start;
+                let subcmp_signals_start = if let Frame::Component { component, .. } = call_frames.last().unwrap() {
+                    component.borrow()
+                        .subcomponents[cmp_idx as usize].borrow()
+                        .signals_start
+                } else {
+                    panic!("GetSubSignal4 instruction inside a function");
+                };
+
                 let (sig_start, overflowed) =
                     subcmp_signals_start.overflowing_add(sig_idx as usize);
 
@@ -874,8 +967,12 @@ fn execute(
                     InputStatus::try_from(code[ip]).unwrap();
                 ip += 1;
 
-                let cmp = call_frames.last().unwrap()
-                    .component.clone();
+                let cmp = if let Frame::Component { component, .. } = call_frames.last().unwrap() {
+                    component.clone()
+                } else {
+                    panic!("SetSubSignal4 instruction inside a function");
+                };
+
                 let should_call_cmp = {
                     let cmp = cmp.borrow();
                     let mut subcmp = cmp
@@ -919,16 +1016,31 @@ fn execute(
                 };
 
                 if should_call_cmp {
-                    call_frames.last_mut().unwrap().ip = ip;
+                    match call_frames.last_mut().unwrap() {
+                        Frame::Component { ip: ip_local, .. } => {
+                            *ip_local = ip;
+                        }
+                        Frame::Function { .. } => {
+                            panic!("Does not expect to call a subcomponent from inside the function");
+                        }
+                    }
+
                     call_frames.push(
-                        Frame::new(
+                        Frame::new_component(
                             cmp.borrow().subcomponents[cmp_idx as usize].clone(),
                             templates));
 
-                    ip = 0usize;
-                    code = call_frames.last().unwrap().code;
-                    template_id = call_frames.last().unwrap().component.borrow().template_id;
-                    signals_start = call_frames.last().unwrap().component.borrow().signals_start;
+                    match call_frames.last().unwrap() {
+                        Frame::Component { code: code_local, component,  .. } => {
+                            ip = 0usize;
+                            code = code_local;
+                            template_id = component.borrow().template_id;
+                            signals_start = component.borrow().signals_start;
+                        }
+                        Frame::Function { .. } => {
+                            panic!("Function frame on top of the call stack");
+                        }
+                    }
                 }
             }
             OpCode::SetSubSignal => {
@@ -945,8 +1057,14 @@ fn execute(
 
                 let sig_idx = vm.stack_u32.pop().unwrap();
 
-                let cmp = call_frames.last().unwrap()
-                    .component.clone();
+                let cmp = match call_frames.last().unwrap() {
+                    Frame::Component { component, .. } => {
+                        component.clone()
+                    }
+                    Frame::Function { .. } => {
+                        panic!("SetSubSignal instruction inside a function");
+                    }
+                };
                 let should_call_cmp = {
                     let cmp = cmp.borrow();
                     let mut subcmp = cmp
@@ -987,16 +1105,31 @@ fn execute(
                 };
 
                 if should_call_cmp {
-                    call_frames.last_mut().unwrap().ip = ip;
+                    match call_frames.last_mut().unwrap() {
+                        Frame::Component { ip: ip_local, .. } => {
+                            *ip_local = ip;
+                        }
+                        Frame::Function { .. } => {
+                            panic!("Does not expect to call a subcomponent from inside the function");
+                        }
+                    }
+
                     call_frames.push(
-                        Frame::new(
+                        Frame::new_component(
                             cmp.borrow().subcomponents[cmp_idx as usize].clone(),
                             templates));
 
                     ip = 0usize;
-                    code = call_frames.last().unwrap().code;
-                    template_id = call_frames.last().unwrap().component.borrow().template_id;
-                    signals_start = call_frames.last().unwrap().component.borrow().signals_start;
+                    match call_frames.last().unwrap() {
+                        Frame::Component { code: code_local, component,  .. } => {
+                            code = *code_local;
+                            template_id = component.borrow().template_id;
+                            signals_start = component.borrow().signals_start;
+                        }
+                        Frame::Function { .. } => {
+                            panic!("No way, we just added a component frame");
+                        }
+                    }
                 }
             }
             OpCode::JumpIfFalse => {
@@ -1163,6 +1296,88 @@ fn execute(
                 }
                 vm.stack_u32.push(r);
             }
+            OpCode::FnCall => {
+                let fn_idx = read_u32(code, ip) as usize;
+                ip += size_of::<u32>();
+
+                let args_num = read_u32(code, ip) as usize;
+                ip += size_of::<u32>();
+
+                let return_num = read_u32(code, ip) as usize;
+                ip += size_of::<u32>();
+
+                match call_frames.last_mut().unwrap() {
+                    Frame::Component { ip: ip_local, .. } => {
+                        *ip_local = ip;
+                    }
+                    Frame::Function { ip: ip_local, .. } => {
+                        *ip_local = ip
+                    }
+                }
+
+                call_frames.push(Frame::new_function(
+                    fn_idx, functions, args_num, return_num));
+
+                ip = 0usize;
+                match call_frames.last().unwrap() {
+                    Frame::Component { code: code_local, component,  .. } => {
+                        panic!("No way, we just added a function frame");
+                    }
+                    Frame::Function { code: code_local, .. } => {
+                        code = *code_local;
+                        template_id = usize::MAX;
+                        signals_start = usize::MAX;
+                    }
+                }
+
+                if let Frame::Function {vars, ..} = call_frames.last_mut().unwrap() {
+                    vars.resize(args_num, None);
+                    for i in (0..args_num).rev() {
+                        vars[i] = Some(vm.stack.pop().unwrap());
+                    }
+                } else {
+                    panic!("No way, we just added a function frame")
+                }
+            }
+            OpCode::FnReturn => {
+                let return_num = read_u32(code, ip) as usize;
+                ip += size_of::<u32>();
+
+                match call_frames.last().unwrap() {
+                    Frame::Component { .. } => {
+                        panic!("Return instruction inside the component");
+                    }
+                    Frame::Function { return_num: return_num_local, .. } => {
+                        assert_eq!(
+                            *return_num_local, return_num,
+                            "Function is supposed to return {} values, but actually returned {}",
+                            *return_num_local, return_num);
+                    }
+                }
+
+                call_frames.pop();
+                if call_frames.is_empty() {
+                    panic!("We supposed to exit from the function to the component at least")
+                }
+
+                let last_frame = call_frames.last().unwrap();
+                match last_frame {
+                    Frame::Component { ip: ip_local, component, .. } => {
+                        ip = *ip_local;
+                        let component = component.borrow();
+                        template_id = component.template_id;
+                        code = &templates[template_id].code;
+                        signals_start = component.signals_start;
+                    }
+                    Frame::Function { ip: ip_local, code: code_local, .. } => {
+                        ip = *ip_local;
+                        code = *code_local;
+                    }
+                }
+            }
+            OpCode::Assert => {
+                panic!("Assert instruction");
+            }
         }
 
         println!("==[ Stack ]==");
@@ -1212,7 +1427,7 @@ fn patch_jump(code: &mut [u8], jump_offset_addr: usize, to: usize) {
 fn statement(
     inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[Fr],
     line_numbers: &mut Vec<usize>, components: &mut Vec<ComponentTmpl>,
-    io_map: &TemplateInstanceIOMap) {
+    io_map: &TemplateInstanceIOMap, fn_registry: &mut FnRegistry) {
 
     println!("statement: {}", inst.to_string());
 
@@ -1408,7 +1623,7 @@ fn statement(
 
             block(
                 &loop_bucket.body, code, constants, line_numbers, components,
-                io_map);
+                io_map, fn_registry);
 
             emit_jump(code, loop_start);
             line_numbers.push(loop_bucket.line);
@@ -1473,9 +1688,59 @@ fn statement(
                 todo!("We should insert here a direct instruction to call this component")
             }
         }
-        Instruction::Call(ref _call_bucket) => {
-            // pass
-            todo!()
+        Instruction::Call(ref call_bucket) => {
+            // println!("call bucket: {}", _call_bucket.to_string());
+            // println!("{} {:?}", _call_bucket.symbol, _call_bucket.argument_types.iter().map(|x| format!("{}", x.size)).collect::<Vec<String>>());
+
+            let args_num: usize = call_bucket.arguments.iter().map(
+                |arg| {
+                    expression(
+                        arg, code, constants, line_numbers, components, io_map)
+                }).sum();
+
+            let fn_idx = fn_registry.get(&call_bucket.symbol);
+            let fn_idx: u32 = fn_idx.try_into().expect("Such a lot of functions?");
+            code.push(OpCode::FnCall as u8);
+            line_numbers.push(call_bucket.line);
+
+            code.extend_from_slice(fn_idx.to_le_bytes().as_ref());
+            for _ in 0..4 { line_numbers.push(usize::MAX); }
+
+            let args_num: u32 = args_num.try_into().expect("Too many arguments");
+            code.extend_from_slice(args_num.to_le_bytes().as_ref());
+            for _ in 0..4 { line_numbers.push(usize::MAX); }
+
+            match call_bucket.return_info {
+                ReturnType::Intermediate { .. } => todo!(),
+                ReturnType::Final(ref final_data) => {
+                    let return_num: u32 = final_data.context.size.try_into()
+                        .expect("Too many return values");
+                    code.extend_from_slice(return_num.to_le_bytes().as_ref());
+                    for _ in 0..4 { line_numbers.push(usize::MAX); }
+
+                    match final_data.dest_address_type {
+                        AddressType::Variable => {
+                            let location = if let LocationRule::Indexed{ref location, ..} = final_data.dest {
+                                location
+                            } else {
+                                panic!("Variable destination should be of Indexed type");
+                            };
+                            expression_u32(
+                                location, code, constants, line_numbers,
+                                components, io_map);
+
+                            code.push(OpCode::SetVariable as u8);
+                            line_numbers.push(location.get_line());
+
+                            code.extend_from_slice(return_num.to_le_bytes().as_ref());
+                            for _ in 0..4 { line_numbers.push(usize::MAX); }
+                        }
+                        AddressType::Signal => {todo!()}
+                        AddressType::SubcmpSignal { .. } => {todo!()}
+                    }
+                }
+            }
+
         }
         Instruction::Value(_) => {
             panic!("An expression instruction Value found where statement expected");
@@ -1497,7 +1762,7 @@ fn statement(
 
             block(
                 &branch_bucket.if_branch, code, constants, line_numbers,
-                components, io_map);
+                components, io_map, fn_registry);
 
             let end_jump_offset = pre_emit_jump(code);
             line_numbers.push(branch_bucket.line);
@@ -1508,7 +1773,7 @@ fn statement(
 
             block(
                 &branch_bucket.else_branch, code, constants, line_numbers,
-                components, io_map);
+                components, io_map, fn_registry);
 
             let to = code.len();
             patch_jump(code, end_jump_offset, to);
@@ -1517,6 +1782,137 @@ fn statement(
         }
         Instruction::Return(_) => {
             todo!();
+        }
+        Instruction::Assert(_) => {
+            // TODO: maybe implement asserts at runtime
+            // todo!();
+        }
+        Instruction::Log(_) => {
+            todo!();
+        }
+    }
+}
+
+fn fn_statement(
+    inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[Fr],
+    line_numbers: &mut Vec<usize>) {
+
+    println!("function statement: {}", inst.to_string());
+
+    match **inst {
+        Instruction::Store(ref store_bucket) => {
+
+            let ln = fn_expression(&store_bucket.src, code, constants, line_numbers);
+            assert_eq!(ln, store_bucket.context.size);
+            assert!(matches!(store_bucket.dest_address_type, AddressType::Variable));
+
+            let location = if let LocationRule::Indexed{ref location, ..} = store_bucket.dest {
+                location
+            } else {
+                panic!("Variable destination should be of Indexed type");
+            };
+
+            let var_idx = u32_or_expression(
+                location, constants, Some(Fr::from(u32::MAX)))
+                .unwrap();
+
+            match var_idx {
+                U32OrExpression::U32(var_idx) => {
+                    code.push(OpCode::SetVariable4 as u8);
+                    line_numbers.push(store_bucket.line);
+                    code.extend_from_slice(var_idx.to_le_bytes().as_ref());
+                    for _ in 0..4 { line_numbers.push(usize::MAX); }
+                }
+                U32OrExpression::Expression => {
+                    fn_expression_u32(location, code, constants, line_numbers);
+                    code.push(OpCode::SetVariable as u8);
+                    line_numbers.push(store_bucket.line);
+                }
+            }
+
+            let values_num: u32 = store_bucket.context.size
+                .try_into().expect("Too many values");
+            code.extend_from_slice(values_num.to_le_bytes().as_ref());
+            for _ in 0..4 { line_numbers.push(usize::MAX); }
+
+            assert_eq!(line_numbers.len(), code.len());
+        }
+        Instruction::Loop(ref loop_bucket) => {
+            let loop_start = code.len();
+
+            let ln = fn_expression(
+                &loop_bucket.continue_condition, code, constants, line_numbers);
+            assert_eq!(ln, 1);
+
+            let loop_end_jump_offset = pre_emit_jump_if_false(code);
+            line_numbers.push(loop_bucket.line);
+            for i in 0..4 { line_numbers.push(usize::MAX); }
+
+            fn_block(&loop_bucket.body, code, constants, line_numbers);
+
+            emit_jump(code, loop_start);
+            line_numbers.push(loop_bucket.line);
+            for i in 0..4 { line_numbers.push(usize::MAX); }
+
+            let to = code.len();
+            patch_jump(code, loop_end_jump_offset, to);
+            assert_eq!(line_numbers.len(), code.len());
+        }
+        Instruction::CreateCmp(ref cmp_bucket) => {
+            panic!("`CreateCmp` instruction is not allowed in function body");
+        }
+        Instruction::Call(ref _call_bucket) => {
+            // pass
+            println!("call bucket: {}", _call_bucket.to_string());
+            println!("{} {:?}", _call_bucket.symbol, _call_bucket.argument_types.iter().map(|x| format!("{}", x.size)).collect::<Vec<String>>());
+            todo!()
+        }
+        Instruction::Value(_) => {
+            panic!("An expression instruction Value found where statement expected");
+        }
+        Instruction::Load(_) => {
+            panic!("An expression instruction Load found where statement expected");
+        }
+        Instruction::Compute(_) => {
+            panic!("An expression instruction Compute found where statement expected");
+        }
+        Instruction::Branch(ref branch_bucket) => {
+            let ln = fn_expression(
+                &branch_bucket.cond, code, constants, line_numbers);
+            assert_eq!(ln, 1);
+
+            let else_jump_offset = pre_emit_jump_if_false(code);
+            line_numbers.push(branch_bucket.line);
+            for _ in 0..4 { line_numbers.push(usize::MAX); }
+
+            fn_block(&branch_bucket.if_branch, code, constants, line_numbers);
+
+            let end_jump_offset = pre_emit_jump(code);
+            line_numbers.push(branch_bucket.line);
+            for _ in 0..4 { line_numbers.push(usize::MAX); }
+
+            let to = code.len();
+            patch_jump(code, else_jump_offset, to);
+
+            fn_block(&branch_bucket.else_branch, code, constants, line_numbers);
+
+            let to = code.len();
+            patch_jump(code, end_jump_offset, to);
+
+            assert_eq!(line_numbers.len(), code.len());
+        }
+        Instruction::Return(ref return_bucket) => {
+
+            let return_num = fn_expression(&return_bucket.value, code, constants, line_numbers);
+            let return_num: u32 = return_num.try_into().expect("Too many return values");
+
+            code.push(OpCode::FnReturn as u8);
+            line_numbers.push(return_bucket.line);
+
+            code.extend_from_slice(return_num.to_le_bytes().as_ref());
+            for _ in 0..4 { line_numbers.push(usize::MAX); }
+
+            assert_eq!(line_numbers.len(), code.len());
         }
         Instruction::Assert(_) => {
             // TODO: maybe implement asserts at runtime
@@ -1695,7 +2091,7 @@ fn expression_mapped_signal_idx(
 fn expression_load(
     lb: &LoadBucket, code: &mut Vec<u8>, constants: &[Fr],
     line_numbers: &mut Vec<usize>, components: &mut Vec<ComponentTmpl>,
-    io_map: &TemplateInstanceIOMap) {
+    io_map: &TemplateInstanceIOMap) -> usize {
 
     match lb.address_type {
         AddressType::Signal => {
@@ -1839,12 +2235,51 @@ fn expression_load(
         .try_into().expect("Too many signals");
     code.extend_from_slice(signals_num.to_le_bytes().as_ref());
     for _ in 0..4 { line_numbers.push(usize::MAX); }
+    lb.context.size
+}
+
+fn fn_expression_load(
+    lb: &LoadBucket, code: &mut Vec<u8>, constants: &[Fr],
+    line_numbers: &mut Vec<usize>) -> usize {
+
+    assert!(matches!(lb.address_type, AddressType::Variable));
+
+    let location = if let LocationRule::Indexed{ref location, ..} = lb.src {
+        location
+    } else {
+        panic!("Variable source location should be of Indexed type");
+    };
+
+    let idx = u32_or_expression(
+        location, constants, Some(Fr::from(u32::MAX)))
+        .unwrap();
+
+    match idx {
+        U32OrExpression::U32(idx) => {
+            code.push(OpCode::GetVariable4 as u8);
+            line_numbers.push(lb.line);
+            code.extend_from_slice(idx.to_le_bytes().as_ref());
+            for _ in 0..4 { line_numbers.push(usize::MAX); }
+        }
+        U32OrExpression::Expression => {
+            fn_expression_u32(location, code, constants, line_numbers);
+            code.push(OpCode::GetVariable as u8);
+            line_numbers.push(lb.line);
+        }
+    }
+
+    let values_num: u32 = lb.context.size
+        .try_into().expect("Too many signals");
+    code.extend_from_slice(values_num.to_le_bytes().as_ref());
+    for _ in 0..4 { line_numbers.push(usize::MAX); }
+
+    lb.context.size
 }
 
 fn expression_compute(
     cb: &ComputeBucket, code: &mut Vec<u8>, constants: &[Fr],
     line_numbers: &mut Vec<usize>, components: &mut Vec<ComponentTmpl>,
-    io_map: &TemplateInstanceIOMap) {
+    io_map: &TemplateInstanceIOMap) -> usize {
 
     // two operand operations
     let mut op2 = |oc: OpCode| {
@@ -1906,6 +2341,71 @@ fn expression_compute(
                 cb.op.to_string(), cb.to_string());
         }
     };
+    1
+}
+
+fn fn_expression_compute(
+    cb: &ComputeBucket, code: &mut Vec<u8>, constants: &[Fr],
+    line_numbers: &mut Vec<usize>) -> usize {
+
+    // two operand operations
+    let mut op2 = |oc: OpCode| {
+        assert_eq!(2, cb.stack.len());
+        let ln = fn_expression(&cb.stack[0], code, constants, line_numbers);
+        assert_eq!(1, ln);
+        let ln = fn_expression(&cb.stack[1], code, constants, line_numbers);
+        assert_eq!(1, ln);
+        code.push(oc as u8);
+        line_numbers.push(cb.line);
+    };
+
+    match cb.op {
+        OperatorType::Mul => {
+            op2(OpCode::OpMul);
+        }
+        OperatorType::Div => {
+            op2(OpCode::OpDiv);
+        }
+        OperatorType::Add => {
+            op2(OpCode::OpAdd);
+        }
+        OperatorType::ShiftR => {
+            op2(OpCode::OpShR);
+        }
+        OperatorType::Lesser => {
+            op2(OpCode::OpLt);
+        }
+        OperatorType::Greater => {
+            op2(OpCode::OpGt);
+        }
+        OperatorType::Eq( x ) => {
+            if x != 1 {
+                todo!();
+            }
+            op2(OpCode::OpEq);
+        }
+        OperatorType::NotEq => {
+            op2(OpCode::OpNe);
+        }
+        OperatorType::BitAnd => {
+            op2(OpCode::OpBAnd);
+        }
+        OperatorType::PrefixSub => {
+            assert_eq!(1, cb.stack.len());
+            let ln = fn_expression(&cb.stack[0], code, constants, line_numbers);
+            assert_eq!(1, ln);
+            code.push(OpCode::OpNeg as u8);
+            line_numbers.push(cb.line);
+        }
+        OperatorType::ToAddress | OperatorType::MulAddress | OperatorType::AddAddress => {
+            panic!("Unexpected address operator: {}", cb.op.to_string());
+        }
+        _ => {
+            todo!("not implemented function expression operator {}: {}",
+                cb.op.to_string(), cb.to_string());
+        }
+    };
+    1
 }
 
 fn expression_compute_u32(
@@ -1951,13 +2451,47 @@ fn expression_compute_u32(
     };
 }
 
-// After expression execution, the value of the expression should be on the stack
+fn fn_expression_compute_u32(
+    cb: &ComputeBucket, code: &mut Vec<u8>, constants: &[Fr],
+    line_numbers: &mut Vec<usize>) {
+
+    match cb.op {
+        OperatorType::ToAddress => {
+            assert_eq!(1, cb.stack.len());
+            let ln = fn_expression(&cb.stack[0], code, constants, line_numbers);
+            assert_eq!(1, ln);
+            code.push(OpCode::OpToAddr as u8);
+            line_numbers.push(cb.line);
+        }
+        OperatorType::MulAddress => {
+            assert_eq!(2, cb.stack.len());
+            fn_expression_u32(&cb.stack[0], code, constants, line_numbers);
+            fn_expression_u32(&cb.stack[1], code, constants, line_numbers);
+            code.push(OpCode::OpMulAddr as u8);
+            line_numbers.push(cb.line);
+        }
+        OperatorType::AddAddress => {
+            assert_eq!(2, cb.stack.len());
+            fn_expression_u32(&cb.stack[0], code, constants, line_numbers);
+            fn_expression_u32(&cb.stack[1], code, constants, line_numbers);
+            code.push(OpCode::OpAddAddr as u8);
+            line_numbers.push(cb.line);
+        }
+        _ => {
+            todo!("not implemented function expression operator {}: {}",
+                cb.op.to_string(), cb.to_string());
+        }
+    };
+}
+
+// After expression execution, the value of the expression should be on the stack.
+// Return the number of values put on the stack.
 fn expression(
     inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[Fr],
     line_numbers: &mut Vec<usize>, components: &mut Vec<ComponentTmpl>,
-    io_map: &TemplateInstanceIOMap) {
+    io_map: &TemplateInstanceIOMap) -> usize {
 
-    println!("expression: {}", inst.to_string());
+    // println!("expression: {}", inst.to_string());
     match **inst {
         Instruction::Value(ref value_bucket) => {
             match value_bucket.parse_as {
@@ -1977,17 +2511,63 @@ fn expression(
                 }
             }
             assert_eq!(line_numbers.len(), code.len());
+            1
         }
         Instruction::Load(ref load_bucket) => {
-            expression_load(
+            let n = expression_load(
                 load_bucket, code, constants, line_numbers, components, io_map);
             assert_eq!(line_numbers.len(), code.len());
+            n
         }
         Instruction::Compute(ref compute_bucket) => {
-            expression_compute(
+            let n = expression_compute(
                 compute_bucket, code, constants, line_numbers, components,
                 io_map);
             assert_eq!(line_numbers.len(), code.len());
+            n
+        }
+        _ => {
+            panic!("Expression does not supported: {}", inst.to_string());
+        }
+    }
+}
+
+fn fn_expression(
+    inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[Fr],
+    line_numbers: &mut Vec<usize>) -> usize {
+
+    match **inst {
+        Instruction::Value(ref value_bucket) => {
+            match value_bucket.parse_as {
+                ValueType::U32 => {
+                    code.push(OpCode::Push8 as u8);
+                    line_numbers.push(value_bucket.line);
+                    assert_64();
+                    code.extend_from_slice(value_bucket.value.to_le_bytes().as_ref());
+                    for _ in 0..8 { line_numbers.push(usize::MAX); }
+                }
+                ValueType::BigInt => {
+                    code.push(OpCode::GetConstant8 as u8);
+                    line_numbers.push(value_bucket.line);
+                    assert_64();
+                    code.extend_from_slice(value_bucket.value.to_le_bytes().as_ref());
+                    for _ in 0..8 { line_numbers.push(usize::MAX); }
+                }
+            }
+            assert_eq!(line_numbers.len(), code.len());
+            1
+        }
+        Instruction::Load(ref load_bucket) => {
+            let ln =
+                fn_expression_load(load_bucket, code, constants, line_numbers);
+            assert_eq!(line_numbers.len(), code.len());
+            ln
+        }
+        Instruction::Compute(ref compute_bucket) => {
+            let ln = fn_expression_compute(
+                compute_bucket, code, constants, line_numbers);
+            assert_eq!(line_numbers.len(), code.len());
+            ln
         }
         _ => {
             panic!("Expression does not supported: {}", inst.to_string());
@@ -2035,6 +2615,44 @@ fn expression_u32(
     }
 }
 
+fn fn_expression_u32(
+    inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[Fr],
+    line_numbers: &mut Vec<usize>) {
+
+    match **inst {
+        Instruction::Value(ref value_bucket) => {
+            match value_bucket.parse_as {
+                ValueType::U32 => {
+                    code.push(OpCode::Push4 as u8);
+                    line_numbers.push(value_bucket.line);
+                    let value: u32 = value_bucket.value.try_into().expect("Value is too large");
+                    code.extend_from_slice(value.to_le_bytes().as_ref());
+                    for _ in 0..4 { line_numbers.push(usize::MAX); }
+                }
+                ValueType::BigInt => {
+                    todo!("convert to u32 and check this");
+                    code.push(OpCode::GetConstant8 as u8);
+                    line_numbers.push(value_bucket.line);
+                    assert_64();
+                    code.extend_from_slice(value_bucket.value.to_le_bytes().as_ref());
+                    for _ in 0..8 { line_numbers.push(usize::MAX); }
+                }
+            }
+            assert_eq!(line_numbers.len(), code.len());
+        }
+        Instruction::Compute(ref compute_bucket) => {
+            fn_expression_compute_u32(
+                compute_bucket, code, constants, line_numbers);
+            assert_eq!(line_numbers.len(), code.len());
+        }
+        _ => {
+            panic!(
+                "U32 function expression does not supported: {}",
+                inst.to_string());
+        }
+    }
+}
+
 struct ComponentTmpl {
     symbol: String,
     sub_cmp_idx: usize,
@@ -2049,17 +2667,29 @@ struct ComponentTmpl {
 fn block(
     inst_list: &InstructionList, code: &mut Vec<u8>, constants: &[Fr],
     line_numbers: &mut Vec<usize>, components: &mut Vec<ComponentTmpl>,
-    io_map: &TemplateInstanceIOMap) {
+    io_map: &TemplateInstanceIOMap, fn_registry: &mut FnRegistry) {
 
     for inst in inst_list {
-        statement(inst, code, constants, line_numbers, components, io_map);
+        statement(
+            inst, code, constants, line_numbers, components, io_map,
+            fn_registry);
+        assert_eq!(line_numbers.len(), code.len());
+    }
+}
+
+fn fn_block(
+    inst_list: &InstructionList, code: &mut Vec<u8>, constants: &[Fr],
+    line_numbers: &mut Vec<usize>) {
+
+    for inst in inst_list {
+        fn_statement(inst, code, constants, line_numbers);
         assert_eq!(line_numbers.len(), code.len());
     }
 }
 
 fn compile_template(
-    tmpl_code: &TemplateCode, constants: &[Fr],
-    io_map: &TemplateInstanceIOMap) -> Template {
+    tmpl_code: &TemplateCode, constants: &[Fr], io_map: &TemplateInstanceIOMap,
+    fn_registry: &mut FnRegistry) -> Template {
 
     println!("Compile template {}", tmpl_code.name);
 
@@ -2068,7 +2698,7 @@ fn compile_template(
     let mut components = Vec::new();
     block(
         &tmpl_code.body, &mut code, constants, &mut line_numbers,
-        &mut components, io_map);
+        &mut components, io_map, fn_registry);
 
     assert_eq!(line_numbers.len(), code.len());
 
@@ -2080,17 +2710,71 @@ fn compile_template(
     }
 }
 
+fn compile_function(
+    fn_code: &FunctionCode, constants: &[Fr],
+    fn_registry: &mut FnRegistry) -> Function {
+
+    println!("Compile function {}", fn_code.name);
+
+    let mut code = vec![];
+    let mut line_numbers = vec![];
+    fn_block(&fn_code.body, &mut code, constants, &mut line_numbers);
+
+    assert_eq!(line_numbers.len(), code.len());
+
+    Function {
+        name: fn_code.name.clone(),
+        code,
+        line_numbers,
+    }
+}
+
+struct FnRegistry (HashMap<String, usize>);
+
+impl FnRegistry {
+    fn new() -> Self {
+        FnRegistry(HashMap::new())
+    }
+
+    fn sort(&self, fns: &mut [Function]) {
+        fns.sort_by_key(|f| self.0.get(&f.name).unwrap());
+    }
+
+    fn get(&mut self, name: &str) -> usize {
+        match self.0.get(name) {
+            Some(idx) => *idx,
+            None => {
+                self.0.insert(name.to_string(), self.0.len());
+                self.0.len() - 1
+            },
+        }
+    }
+}
+
 fn compile(
     templates: &Vec<TemplateCode>,
     functions: &Vec<FunctionCode>,
     io_map: &TemplateInstanceIOMap,
     constants: &[Fr],
-) -> Vec<Template>{
+) -> (Vec<Template>, Vec<Function>) {
+
+    let mut fn_registry = FnRegistry::new();
+
+    let mut compiled_functions = Vec::with_capacity(functions.len());
+
+    for fun in functions {
+        println!("Function: {}", fun.name);
+        compiled_functions.push(
+            compile_function(fun, constants, &mut fn_registry));
+    }
 
     let mut compiled_templates = Vec::with_capacity(templates.len());
     for tmpl in templates.iter() {
-        compiled_templates.push(compile_template(tmpl, constants, io_map));
+        compiled_templates.push(
+            compile_template(tmpl, constants, io_map, &mut fn_registry));
     }
+
+    fn_registry.sort(&mut compiled_functions);
 
     // Assert all components created has has_inputs field consistent with
     // the number of inputs in the templates
@@ -2103,7 +2787,7 @@ fn compile(
         }
     }
 
-    compiled_templates
+    (compiled_templates, compiled_functions)
 }
 
 fn init_input_signals(
@@ -2382,6 +3066,27 @@ fn disassemble_instruction(code: &[u8], line_numbers: &[usize], ip: usize) -> us
         OpCode::OpAddAddr => {
             println!("OpAddAddr");
         }
+        OpCode::FnCall => {
+            let fn_idx = read_u32(&code, ip);
+            ip += size_of::<u32>();
+
+            let args_num = read_u32(&code, ip);
+            ip += size_of::<u32>();
+
+            let return_num = read_u32(&code, ip);
+            ip += size_of::<u32>();
+
+            println!("FnCall [{},{},{}]", fn_idx, args_num, return_num);
+        }
+        OpCode::FnReturn => {
+            let return_num = read_u32(&code, ip);
+            ip += size_of::<u32>();
+
+            println!("FnReturn [{}]", return_num);
+        }
+        OpCode::Assert => {
+            println!("Assert");
+        }
     }
 
     ip
@@ -2389,7 +3094,7 @@ fn disassemble_instruction(code: &[u8], line_numbers: &[usize], ip: usize) -> us
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::{BTreeMap};
     use ark_ff::BigInteger256;
     use compiler::intermediate_representation::ir_interface::{InstrContext, StoreBucket, ValueBucket};
     use super::*;
@@ -2526,7 +3231,10 @@ mod tests {
         let constants = vec![];
         let mut line_numbers = vec![];
         let mut components = vec![];
-        statement(&inst, &mut code, &constants, &mut line_numbers, &mut components, &BTreeMap::new());
+        let mut fn_registry = FnRegistry::new();
+        statement(
+            &inst, &mut code, &constants, &mut line_numbers, &mut components,
+            &BTreeMap::new(), &mut fn_registry);
         assert_eq!(code,
                    vec![
                        OpCode::GetConstant8 as u8, 0xea, 0, 0, 0, 0, 0, 0, 0,
@@ -2694,7 +3402,9 @@ mod tests {
         let constants = vec![];
         let mut line_numbers = vec![];
         let mut components = vec![];
-        statement(&inst, &mut code, &constants, &mut line_numbers, &mut components, &BTreeMap::new());
+        statement(
+            &inst, &mut code, &constants, &mut line_numbers, &mut components,
+            &BTreeMap::new(), &mut FnRegistry::new());
 
         let var1 = Some(Fr::from(2));
         let var2 = Some(Fr::from(1));
@@ -2718,7 +3428,7 @@ mod tests {
         disassemble(&templates[0].code, &templates[0].line_numbers);
 
         println!("execute");
-        execute(component.clone(), &templates, &constants, &mut signals);
+        execute(component.clone(), &templates, &vec![], &constants, &mut signals);
         println!("{:?}", component.borrow().vars);
         assert_eq!(
             &vec![None, Some(Fr::from(10u64)), var2],
@@ -2831,7 +3541,7 @@ mod tests {
         }];
         let constants = vec![];
         let mut signals = vec![None; 10];
-        execute(component.clone(), &templates, &constants, &mut signals);
+        execute(component.clone(), &templates, &vec![], &constants, &mut signals);
         println!("{:?}", &component.borrow().vars);
     }
 
@@ -2856,6 +3566,6 @@ mod tests {
         }];
         let constants = vec![];
         let mut signals = vec![None; 10];
-        execute(component, &templates, &constants, &mut signals);
+        execute(component, &templates, &vec![], &constants, &mut signals);
     }
 }
