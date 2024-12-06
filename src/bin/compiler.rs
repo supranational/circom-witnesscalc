@@ -1429,7 +1429,7 @@ fn statement(
     line_numbers: &mut Vec<usize>, components: &mut Vec<ComponentTmpl>,
     io_map: &TemplateInstanceIOMap, fn_registry: &mut FnRegistry) {
 
-    println!("statement: {}", inst.to_string());
+    // println!("statement: {}", inst.to_string());
 
     match **inst {
         Instruction::Store(ref store_bucket) => {
@@ -1507,7 +1507,6 @@ fn statement(
                 }
 
                 AddressType::SubcmpSignal { ref cmp_address, ref input_information, .. } => {
-                    println!("calc expression: {}", cmp_address.to_string()); // TODO remove
                     let cmp_idx = u32_or_expression(
                         cmp_address, constants, Some(Fr::from(u32::MAX)));
                     let cmp_idx = match cmp_idx {
@@ -1797,7 +1796,7 @@ fn fn_statement(
     inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[Fr],
     line_numbers: &mut Vec<usize>) {
 
-    println!("function statement: {}", inst.to_string());
+    // println!("function statement: {}", inst.to_string());
 
     match **inst {
         Instruction::Store(ref store_bucket) => {
@@ -1862,9 +1861,6 @@ fn fn_statement(
             panic!("`CreateCmp` instruction is not allowed in function body");
         }
         Instruction::Call(ref _call_bucket) => {
-            // pass
-            println!("call bucket: {}", _call_bucket.to_string());
-            println!("{} {:?}", _call_bucket.symbol, _call_bucket.argument_types.iter().map(|x| format!("{}", x.size)).collect::<Vec<String>>());
             todo!()
         }
         Instruction::Value(_) => {
@@ -2763,7 +2759,6 @@ fn compile(
     let mut compiled_functions = Vec::with_capacity(functions.len());
 
     for fun in functions {
-        println!("Function: {}", fun.name);
         compiled_functions.push(
             compile_function(fun, constants, &mut fn_registry));
     }
