@@ -157,7 +157,7 @@ fn populate_inputs(
         if len != value.len() {
             panic!("Invalid input length for {}", key);
         }
-        println!("input {}, offset {}, len {}", key, offset, len);
+        // println!("input {}, offset {}, len {}", key, offset, len);
 
         for (i, v) in value.iter().enumerate() {
             input_buffer[offset + i] = *v;
