@@ -162,32 +162,29 @@ enum OpCode {
     // arguments:          subcomponent index u32
     // required stack_u32: signal index
     GetSubSignal   = 13,
-    // arguments:      subcomponent index u32; signal index u32; signals number u32; InputStatus
-    // required stack: value to store
-    SetSubSignal4  = 14,
     // arguments:          subcomponent index u32, signals number u32; InputStatus
-    // required stack:     value to store
-    // required stack_u32: signal index
-    SetSubSignal   = 15,
-    JumpIfFalse    = 16, // Jump to the offset i32 if the value on the top of the stack is false
-    Jump           = 17, // Jump to the offset i32
-    OpMul          = 18,
-    OpDiv          = 19,
-    OpAdd          = 20,
-    OpShR          = 21,
-    OpLt           = 22,
-    OpGt           = 23,
-    OpEq           = 24,
-    OpNe           = 25,
-    OpBAnd         = 26,
-    OpNeg          = 27,
-    OpToAddr       = 28,
-    OpMulAddr      = 29,
-    OpAddAddr      = 30,
-    FnCall         = 31,
-    FnReturn       = 32,
+    // required stack:     values to store (equal to signals number)
+    // required stack_u32: first signal index
+    SetSubSignal   = 14,
+    JumpIfFalse    = 15, // Jump to the offset i32 if the value on the top of the stack is false
+    Jump           = 16, // Jump to the offset i32
+    OpMul          = 17,
+    OpDiv          = 18,
+    OpAdd          = 19,
+    OpShR          = 20,
+    OpLt           = 21,
+    OpGt           = 22,
+    OpEq           = 23,
+    OpNe           = 24,
+    OpBAnd         = 25,
+    OpNeg          = 26,
+    OpToAddr       = 27,
+    OpMulAddr      = 28,
+    OpAddAddr      = 29,
+    FnCall         = 30,
+    FnReturn       = 31,
     // TODO: Assert should accept an index of the string to print
-    Assert         = 33,
+    Assert         = 32,
 }
 
 #[derive(Debug)]
@@ -949,100 +946,6 @@ fn execute(
             OpCode::GetSubSignal => {
                 todo!();
             }
-            OpCode::SetSubSignal4 => {
-                let cmp_idx = read_u32(code, ip);
-                ip += size_of::<u32>();
-
-                let sig_idx = read_u32(code, ip);
-                ip += size_of::<u32>();
-
-                let sigs_number = read_u32(code, ip);
-                ip += size_of::<u32>();
-
-                if sigs_number as usize > vm.stack.len() {
-                    panic!("Number of signals is greater than the stack depth");
-                }
-
-                let input_status =
-                    InputStatus::try_from(code[ip]).unwrap();
-                ip += 1;
-
-                let cmp = if let Frame::Component { component, .. } = call_frames.last().unwrap() {
-                    component.clone()
-                } else {
-                    panic!("SetSubSignal4 instruction inside a function");
-                };
-
-                let should_call_cmp = {
-                    let cmp = cmp.borrow();
-                    let mut subcmp = cmp
-                        .subcomponents[cmp_idx as usize].borrow_mut();
-
-                    if sigs_number as usize > subcmp.number_of_inputs {
-                        panic!("Number of signals is greater than the number of inputs left");
-                    }
-
-                    let (sig_start, overflowed) =
-                        subcmp.signals_start.overflowing_add(sig_idx as usize);
-
-                    if overflowed {
-                        panic!("Subcomponent signal index is too large");
-                    }
-
-                    let (sig_end, overflowed) =
-                        sig_start.overflowing_add(sigs_number as usize);
-
-                    if overflowed || sig_end > vm.signals.len() {
-                        panic!("Subcomponent signal index is too large");
-                    }
-
-                    for sig_idx in (sig_start..sig_end).rev() {
-                        if vm.signals[sig_idx].is_some() {
-                            panic!("Subcomponent signal is already set");
-                        }
-
-                        vm.signals[sig_idx] = Some(vm.stack.pop().unwrap());
-                    }
-
-                    subcmp.number_of_inputs -= sigs_number as usize;
-
-                    let should_call_cmp = match input_status {
-                        InputStatus::Last => true,
-                        InputStatus::NoLast => false,
-                        InputStatus::Unknown => subcmp.number_of_inputs == 0,
-                    };
-
-                    should_call_cmp
-                };
-
-                if should_call_cmp {
-                    match call_frames.last_mut().unwrap() {
-                        Frame::Component { ip: ip_local, .. } => {
-                            *ip_local = ip;
-                        }
-                        Frame::Function { .. } => {
-                            panic!("Does not expect to call a subcomponent from inside the function");
-                        }
-                    }
-
-                    call_frames.push(
-                        Frame::new_component(
-                            cmp.borrow().subcomponents[cmp_idx as usize].clone(),
-                            templates));
-
-                    match call_frames.last().unwrap() {
-                        Frame::Component { code: code_local, component,  .. } => {
-                            ip = 0usize;
-                            code = code_local;
-                            template_id = component.borrow().template_id;
-                            signals_start = component.borrow().signals_start;
-                        }
-                        Frame::Function { .. } => {
-                            panic!("Function frame on top of the call stack");
-                        }
-                    }
-                }
-            }
             OpCode::SetSubSignal => {
 
                 let cmp_idx = read_u32(code, ip);
@@ -1050,6 +953,10 @@ fn execute(
 
                 let sigs_number = read_u32(code, ip);
                 ip += size_of::<u32>();
+
+                if vm.stack.len() < sigs_number as usize {
+                    panic!("Number of signals is greater than the stack depth");
+                }
 
                 let input_status =
                     InputStatus::try_from(code[ip]).unwrap();
@@ -1516,7 +1423,7 @@ fn statement(
                                 U32OrExpression::Expression => {
                                     panic!(
                                         "Subcomponent index suppose to be \
-                                        a constant");
+                                        a constant: {}", cmp_address.to_string());
                                 }
                             }
                         }
@@ -1533,11 +1440,8 @@ fn statement(
 
                             match sig_idx {
                                 U32OrExpression::U32(sig_idx) => {
-                                    code.push(OpCode::SetSubSignal4 as u8);
+                                    code.push(OpCode::Push4 as u8);
                                     line_numbers.push(store_bucket.line);
-
-                                    code.extend_from_slice(cmp_idx.to_le_bytes().as_ref());
-                                    for _ in 0..4 { line_numbers.push(usize::MAX); }
 
                                     code.extend_from_slice(sig_idx.to_le_bytes().as_ref());
                                     for _ in 0..4 { line_numbers.push(usize::MAX); }
@@ -1546,12 +1450,6 @@ fn statement(
                                     expression_u32(
                                         location, code, constants, line_numbers,
                                         components, io_map);
-
-                                    code.push(OpCode::SetSubSignal as u8);
-                                    line_numbers.push(store_bucket.line);
-
-                                    code.extend_from_slice(cmp_idx.to_le_bytes().as_ref());
-                                    for _ in 0..4 { line_numbers.push(usize::MAX); }
                                 }
                             };
                         }
@@ -1564,11 +1462,8 @@ fn statement(
 
                             match sig_idx {
                                 U32OrExpression::U32(sig_idx) => {
-                                    code.push(OpCode::SetSubSignal4 as u8);
+                                    code.push(OpCode::Push4 as u8);
                                     line_numbers.push(store_bucket.line);
-
-                                    code.extend_from_slice(cmp_idx.to_le_bytes().as_ref());
-                                    for _ in 0..4 { line_numbers.push(usize::MAX); }
 
                                     code.extend_from_slice(sig_idx.to_le_bytes().as_ref());
                                     for _ in 0..4 { line_numbers.push(usize::MAX); }
@@ -1577,16 +1472,16 @@ fn statement(
                                     expression_mapped_signal_idx(
                                         code, constants, line_numbers, *signal_code,
                                         indexes, *cmp_idx as usize, io_map, components);
-
-                                    code.push(OpCode::SetSubSignal as u8);
-                                    line_numbers.push(store_bucket.line);
-
-                                    code.extend_from_slice(cmp_idx.to_le_bytes().as_ref());
-                                    for _ in 0..4 { line_numbers.push(usize::MAX); }
                                 }
                             };
                         }
                     };
+
+                    code.push(OpCode::SetSubSignal as u8);
+                    line_numbers.push(store_bucket.line);
+
+                    code.extend_from_slice(cmp_idx.to_le_bytes().as_ref());
+                    for _ in 0..4 { line_numbers.push(usize::MAX); }
 
                     let signals_num: u32 = store_bucket.context.size
                         .try_into().expect("Too many signals");
@@ -1681,7 +1576,7 @@ fn statement(
                 has_inputs: cmp_bucket.has_inputs,
             });
 
-            println!("{}", fmt_create_cmp_bucket(cmp_bucket, sub_cmp_idx));
+            // println!("{}", fmt_create_cmp_bucket(cmp_bucket, sub_cmp_idx));
 
             if !cmp_bucket.has_inputs {
                 todo!("We should insert here a direct instruction to call this component")
@@ -2016,16 +1911,13 @@ fn calc_mapped_signal_idx(
         }
     }
 
-    return U32OrExpression::U32(sig_idx);
+    U32OrExpression::U32(sig_idx)
 }
 
 fn expression_mapped_signal_idx(
     code: &mut Vec<u8>, constants: &[Fr], line_numbers: &mut Vec<usize>,
     signal_code: usize, indexes: &[InstructionPointer], sub_cmp_idx: usize,
-    io_map: &TemplateInstanceIOMap,
-    components: &mut Vec<ComponentTmpl>) {
-
-    panic!("rewrite this to stack_u32");
+    io_map: &TemplateInstanceIOMap, components: &mut Vec<ComponentTmpl>) {
 
     let mut template_id = components[0].template_id;
     for e in &components[1..] {
@@ -2040,12 +1932,15 @@ fn expression_mapped_signal_idx(
     let mut sig_idx: u32 = def.offset.try_into()
         .expect("Signal index is too large");
 
+    let offset: u32 = def.offset.try_into()
+        .expect("Offset index is too large");
+
+    // panic!("rewrite this to stack_u32");
     // TODO replace with short push to stack_u32
-    code.push(OpCode::Push8 as u8);
+    code.push(OpCode::Push4 as u8);
     line_numbers.push(usize::MAX);
-    assert_64();
-    code.extend_from_slice(def.offset.to_le_bytes().as_ref());
-    for _ in 0..8 { line_numbers.push(usize::MAX); }
+    code.extend_from_slice(offset.to_le_bytes().as_ref());
+    for _ in 0..4 { line_numbers.push(usize::MAX); }
 
     if indexes.is_empty() {
         return
@@ -2065,21 +1960,18 @@ fn expression_mapped_signal_idx(
     }
 
     for (i, idx_ip) in indexes.iter().enumerate() {
-        expression(
+        expression_u32(
             idx_ip, code, constants, line_numbers, components, io_map);
 
-        code.push(OpCode::Push8 as u8);
+        code.push(OpCode::Push4 as u8);
         line_numbers.push(idx_ip.get_line());
-        assert_64();
-        code.extend_from_slice((strides[i] as usize).to_le_bytes().as_ref());
-        for _ in 0..8 { line_numbers.push(usize::MAX); }
+        code.extend_from_slice(strides[i].to_le_bytes().as_ref());
+        for _ in 0..4 { line_numbers.push(usize::MAX); }
 
-        // TODO: replace with Address multiply
-        code.push(OpCode::OpMul as u8);
+        code.push(OpCode::OpMulAddr as u8);
         line_numbers.push(idx_ip.get_line());
 
-        // TODO: replace with Address add
-        code.push(OpCode::OpAdd as u8);
+        code.push(OpCode::OpAddAddr as u8);
         line_numbers.push(idx_ip.get_line());
     }
 }
@@ -2577,7 +2469,7 @@ fn expression_u32(
     line_numbers: &mut Vec<usize>, components: &mut Vec<ComponentTmpl>,
     io_map: &TemplateInstanceIOMap) {
 
-    println!("expression: {}", inst.to_string());
+    // println!("expression: {}", inst.to_string());
     match **inst {
         Instruction::Value(ref value_bucket) => {
             match value_bucket.parse_as {
@@ -2963,23 +2855,6 @@ fn disassemble_instruction(code: &[u8], line_numbers: &[usize], ip: usize) -> us
 
             println!(
                 "GetSubSignal [{},{}]", cmp_idx, sigs_number);
-        }
-        OpCode::SetSubSignal4 => {
-            let cmp_idx = read_u32(&code, ip);
-            ip += size_of::<u32>();
-
-            let sig_idx = read_u32(&code, ip);
-            ip += size_of::<u32>();
-
-            let sigs_number = read_u32(&code, ip);
-            ip += size_of::<u32>();
-
-            let input_status = InputStatus::try_from(code[ip]).unwrap();
-            ip += 1;
-
-            println!(
-                "SetSubSignal4 [{},{},{},{}]",
-                cmp_idx, sig_idx, sigs_number, input_status);
         }
         OpCode::SetSubSignal => {
             let cmp_idx = read_u32(&code, ip);
