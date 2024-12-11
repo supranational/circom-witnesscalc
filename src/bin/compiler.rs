@@ -1296,16 +1296,7 @@ fn execute(
             OpCode::OpBAnd => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
-                let ai = b.into_bigint();
-                let bi = b.into_bigint();
-                let mut r: BigInt<4> = BigInt!("0");
-                for i in 0..r.0.len() {
-                    r.0[i] = ai.0[i] & bi.0[i];
-                }
-                if r > Fr::MODULUS {
-                    r.sub_with_borrow(&Fr::MODULUS);
-                }
-                vm.stack.push(Fr::from(r));
+                vm.stack.push(Operation::Band.eval_fr(a, b));
             }
             OpCode::OpNeg => {
                 let a = vm.stack.pop().unwrap();
@@ -3076,7 +3067,7 @@ fn disassemble_instruction(
             println!("OpNe");
         }
         OpCode::OpBAnd => {
-            println!("OpAnd");
+            println!("OpBAnd");
         }
         OpCode::OpNeg => {
             println!("OpNeg");
