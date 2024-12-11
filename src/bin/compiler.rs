@@ -1167,7 +1167,7 @@ fn execute(
                         panic!("Subcomponent signal end index is too large");
                     }
 
-                    for sig_idx in sigs_start..sigs_end {
+                    for sig_idx in (sigs_start..sigs_end).rev() {
                         vm.set_signal(sig_idx);
                     }
 
@@ -3014,11 +3014,11 @@ fn disassemble_instruction(
                 ip += size_of::<u32>();
 
                 println!(
-                    "SetSubSignal [{},{},{},{}]",
+                    "SetSubSignal [M,{},{},{},{}]",
                     sigs_number, input_status, indexes_number, signal_code);
             } else {
                 println!(
-                    "SetSubSignal [{},{}]", sigs_number, input_status);
+                    "SetSubSignal [NM,{},{}]", sigs_number, input_status);
             }
         }
         OpCode::JumpIfFalse => {
