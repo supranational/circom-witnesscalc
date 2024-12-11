@@ -9,6 +9,7 @@ use std::fmt::Display;
 use std::fs::File;
 use std::io::Write;
 use std::rc::Rc;
+use std::time::Instant;
 use ark_bn254::Fr;
 use ark_ff::BigInt;
 use ark_ff::PrimeField;
@@ -586,6 +587,8 @@ fn main() {
     let (compiled_templates, compiled_functions) =
         compile(&circuit.templates, &circuit.functions, &constants);
 
+    let start = Instant::now();
+
     for (i, t) in compiled_templates.iter().enumerate() {
         println!("Compiled template #{}: {}", i, t.name);
         disassemble(&t.code, &t.line_numbers, t.name.as_str());
@@ -595,6 +598,8 @@ fn main() {
         println!("Compiled function #{}: {}", i, t.name);
         disassemble(&t.code, &t.line_numbers, &t.name);
     }
+
+    println!("Compilation time: {:?}", start.elapsed());
 
     if let Some(input_file) = args.inputs_file {
 
@@ -614,19 +619,22 @@ fn main() {
         init_input_signals(&circuit, input_file, &mut signals);
 
         println!("Run VM");
+        let start = Instant::now();
         let io_map = circuit.c_producer.get_io_map();
         execute(
             main_component, &compiled_templates, &compiled_functions,
             &constants, &mut signals, io_map, args.expected_signals.as_ref());
 
+        println!("Execution time: {:?}", start.elapsed());
+
         if let Some(witness_file) = args.witness_file {
             let mut witness = Vec::with_capacity(witness_list.len());
             for (i, w) in witness_list.iter().enumerate() {
-                println!("w: {}",
-                         signals[*w]
-                             .expect(
-                                 format!("signal at {} is not set", i).as_str())
-                             .to_string());
+                // println!("w: {}",
+                //          signals[*w]
+                //              .expect(
+                //                  format!("signal at {} is not set", i).as_str())
+                //              .to_string());
                 witness.push(signals[*w].unwrap());
             }
 
@@ -832,7 +840,7 @@ fn execute(
             }
         }
 
-        // TODO wrap into `if debug` condition
+        #[cfg(feature = "print_opcode")]
         {
             let (line_numbers, name) = match vm.call_frames.last().unwrap() {
                 Frame::Component { .. } => {
@@ -1501,10 +1509,13 @@ fn execute(
             }
         }
 
-        println!("==[ Stack ]==");
-        vm.print_stack();
-        println!("==[ Stack32 ]==");
-        vm.print_stack_u32();
+        #[cfg(feature = "print_opcode")]
+        {
+            println!("==[ Stack ]==");
+            vm.print_stack();
+            println!("==[ Stack32 ]==");
+            vm.print_stack_u32();
+        }
     }
 }
 
