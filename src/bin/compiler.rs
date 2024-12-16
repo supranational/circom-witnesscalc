@@ -240,23 +240,29 @@ enum OpCode {
     OpDiv          = 18,
     OpAdd          = 19,
     OpSub          = 20,
-    OpShL          = 21,
-    OpShR          = 22,
-    OpLe           = 23,
-    OpLt           = 24,
-    OpGt           = 25,
-    OpEq           = 26,
-    OpNe           = 27,
-    OpBAnd         = 28,
-    OpNeg          = 29,
-    OpToAddr       = 30,
-    OpMulAddr      = 31,
-    OpAddAddr      = 32,
-    CmpCall        = 33,
-    FnCall         = 34,
-    FnReturn       = 35,
+    OpIntDiv       = 21,
+    OpMod          = 22,
+    OpShL          = 23,
+    OpShR          = 24,
+    OpLtE          = 25,
+    OpGtE          = 26,
+    OpLt           = 27,
+    OpGt           = 28,
+    OpEq           = 29,
+    OpNe           = 30,
+    OpBoolAnd      = 31,
+    OpBitOr        = 32,
+    OpBitAnd       = 33,
+    OpBitXor       = 34,
+    OpNeg          = 35,
+    OpToAddr       = 36,
+    OpMulAddr      = 37,
+    OpAddAddr      = 38,
+    CmpCall        = 39,
+    FnCall         = 40,
+    FnReturn       = 41,
     // TODO: Assert should accept an index of the string to print
-    Assert         = 36,
+    Assert         = 42,
 }
 
 #[derive(Debug)]
@@ -314,7 +320,7 @@ fn u32_or_expression(inst: &InstructionPointer, constants: &[Fr]) -> Result<U32O
                 OperatorType::Sub => two_op_fn(Operation::Sub),
                 OperatorType::Pow => {todo!()}
                 OperatorType::IntDiv => {todo!()}
-                OperatorType::Mod => {todo!()}
+                OperatorType::Mod => two_op_fn(Operation::Mod),
                 OperatorType::ShiftL => {todo!()}
                 OperatorType::ShiftR => {todo!()}
                 OperatorType::LesserEq => {todo!()}
@@ -576,28 +582,27 @@ fn main() {
     // assert that template id is equal to index in templates list
     for (i, t) in circuit.templates.iter().enumerate() {
         assert_eq!(i, t.id);
-        if args.print_debug {
-            println!("Template #{}: {}", i, t.name);
-        }
+        // if args.print_debug {
+        //     println!("Template #{}: {}", i, t.name);
+        // }
     }
 
     let constants = get_constants(&circuit);
-
     let main_component_signal_start = 1usize;
+    let start = Instant::now();
     let (compiled_templates, compiled_functions) =
         compile(&circuit.templates, &circuit.functions, &constants);
 
-    let start = Instant::now();
 
-    for (i, t) in compiled_templates.iter().enumerate() {
-        println!("Compiled template #{}: {}", i, t.name);
-        disassemble(&t.code, &t.line_numbers, t.name.as_str());
-    }
-
-    for (i, t) in compiled_functions.iter().enumerate() {
-        println!("Compiled function #{}: {}", i, t.name);
-        disassemble(&t.code, &t.line_numbers, &t.name);
-    }
+    // for (i, t) in compiled_templates.iter().enumerate() {
+    //     println!("Compiled template #{}: {}", i, t.name);
+    //     disassemble(&t.code, &t.line_numbers, t.name.as_str());
+    // }
+    //
+    // for (i, t) in compiled_functions.iter().enumerate() {
+    //     println!("Compiled function #{}: {}", i, t.name);
+    //     disassemble(&t.code, &t.line_numbers, &t.name);
+    // }
 
     println!("Compilation time: {:?}", start.elapsed());
 
@@ -818,11 +823,12 @@ fn execute(
         }
     }
 
-    loop {
-        if ip == code.len() {
+
+    'main: loop {
+        while ip == code.len() {
             vm.call_frames.pop();
             if vm.call_frames.is_empty() {
-                break;
+                break 'main;
             }
 
             let last_frame = vm.call_frames.last().unwrap();
@@ -1263,6 +1269,16 @@ fn execute(
                 let a = vm.stack.pop().unwrap();
                 vm.stack.push(Operation::Sub.eval_fr(a, b));
             }
+            OpCode::OpIntDiv => {
+                let b = vm.stack.pop().unwrap();
+                let a = vm.stack.pop().unwrap();
+                vm.stack.push(Operation::Idiv.eval_fr(a, b));
+            }
+            OpCode::OpMod => {
+                let b = vm.stack.pop().unwrap();
+                let a = vm.stack.pop().unwrap();
+                vm.stack.push(Operation::Mod.eval_fr(a, b));
+            }
             OpCode::OpShL => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
@@ -1273,10 +1289,15 @@ fn execute(
                 let a = vm.stack.pop().unwrap();
                 vm.stack.push(Operation::Shr.eval_fr(a, b));
             }
-            OpCode::OpLe => {
+            OpCode::OpLtE => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
                 vm.stack.push(Operation::Leq.eval_fr(a, b));
+            }
+            OpCode::OpGtE => {
+                let b = vm.stack.pop().unwrap();
+                let a = vm.stack.pop().unwrap();
+                vm.stack.push(Operation::Geq.eval_fr(a, b));
             }
             OpCode::OpLt => {
                 let b = vm.stack.pop().unwrap();
@@ -1301,10 +1322,25 @@ fn execute(
                     _ => Fr::one(),
                 });
             }
-            OpCode::OpBAnd => {
+            OpCode::OpBoolAnd => {
+                let b = vm.stack.pop().unwrap();
+                let a = vm.stack.pop().unwrap();
+                vm.stack.push(Operation::Land.eval_fr(a, b));
+            }
+            OpCode::OpBitOr => {
+                let b = vm.stack.pop().unwrap();
+                let a = vm.stack.pop().unwrap();
+                vm.stack.push(Operation::Bor.eval_fr(a, b));
+            }
+            OpCode::OpBitAnd => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
                 vm.stack.push(Operation::Band.eval_fr(a, b));
+            }
+            OpCode::OpBitXor => {
+                let b = vm.stack.pop().unwrap();
+                let a = vm.stack.pop().unwrap();
+                vm.stack.push(Operation::Bxor.eval_fr(a, b));
             }
             OpCode::OpNeg => {
                 let a = vm.stack.pop().unwrap();
@@ -1938,7 +1974,7 @@ fn statement(
 
 fn fn_statement(
     inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[Fr],
-    line_numbers: &mut Vec<usize>) {
+    line_numbers: &mut Vec<usize>, fn_registry: &mut FnRegistry) {
 
     // println!("function statement: {}", inst.to_string());
 
@@ -1993,7 +2029,8 @@ fn fn_statement(
             line_numbers.push(loop_bucket.line);
             for _ in 0..4 { line_numbers.push(usize::MAX); }
 
-            fn_block(&loop_bucket.body, code, constants, line_numbers);
+            fn_block(
+                &loop_bucket.body, code, constants, line_numbers, fn_registry);
 
             emit_jump(code, loop_start);
             line_numbers.push(loop_bucket.line);
@@ -2006,8 +2043,53 @@ fn fn_statement(
         Instruction::CreateCmp(ref cmp_bucket) => {
             panic!("`CreateCmp` instruction is not allowed in function body");
         }
-        Instruction::Call(ref _call_bucket) => {
-            todo!()
+        Instruction::Call(ref call_bucket) => {
+            let args_num: usize = call_bucket.arguments.iter().map(
+                |arg| {
+                    fn_expression(arg, code, constants, line_numbers)
+                }).sum();
+
+            let fn_idx = fn_registry.get(&call_bucket.symbol);
+            let fn_idx: u32 = fn_idx.try_into().expect("Such a lot of functions?");
+            code.push(OpCode::FnCall as u8);
+            line_numbers.push(call_bucket.line);
+
+            code.extend_from_slice(fn_idx.to_le_bytes().as_ref());
+            for _ in 0..4 { line_numbers.push(usize::MAX); }
+
+            let args_num: u32 = args_num.try_into().expect("Too many arguments");
+            code.extend_from_slice(args_num.to_le_bytes().as_ref());
+            for _ in 0..4 { line_numbers.push(usize::MAX); }
+
+            match call_bucket.return_info {
+                ReturnType::Intermediate { .. } => todo!(),
+                ReturnType::Final(ref final_data) => {
+                    let return_num: u32 = final_data.context.size.try_into()
+                        .expect("Too many return values");
+                    code.extend_from_slice(return_num.to_le_bytes().as_ref());
+                    for _ in 0..4 { line_numbers.push(usize::MAX); }
+
+                    match final_data.dest_address_type {
+                        AddressType::Variable => {
+                            let location = if let LocationRule::Indexed{ref location, ..} = final_data.dest {
+                                location
+                            } else {
+                                panic!("Variable destination should be of Indexed type");
+                            };
+                            fn_expression_u32(
+                                location, code, constants, line_numbers);
+
+                            code.push(OpCode::SetVariable as u8);
+                            line_numbers.push(location.get_line());
+
+                            code.extend_from_slice(return_num.to_le_bytes().as_ref());
+                            for _ in 0..4 { line_numbers.push(usize::MAX); }
+                        }
+                        AddressType::Signal => {todo!()}
+                        AddressType::SubcmpSignal { .. } => {todo!()}
+                    }
+                }
+            }
         }
         Instruction::Value(_) => {
             panic!("An expression instruction Value found where statement expected");
@@ -2027,7 +2109,9 @@ fn fn_statement(
             line_numbers.push(branch_bucket.line);
             for _ in 0..4 { line_numbers.push(usize::MAX); }
 
-            fn_block(&branch_bucket.if_branch, code, constants, line_numbers);
+            fn_block(
+                &branch_bucket.if_branch, code, constants, line_numbers,
+                fn_registry);
 
             let end_jump_offset = pre_emit_jump(code);
             line_numbers.push(branch_bucket.line);
@@ -2036,7 +2120,9 @@ fn fn_statement(
             let to = code.len();
             patch_jump(code, else_jump_offset, to);
 
-            fn_block(&branch_bucket.else_branch, code, constants, line_numbers);
+            fn_block(
+                &branch_bucket.else_branch, code, constants, line_numbers,
+                fn_registry);
 
             let to = code.len();
             patch_jump(code, end_jump_offset, to);
@@ -2347,6 +2433,12 @@ fn expression_compute(
         OperatorType::Sub => {
             op2(OpCode::OpSub);
         }
+        OperatorType::IntDiv => {
+            op2(OpCode::OpIntDiv);
+        }
+        OperatorType::Mod => {
+            op2(OpCode::OpMod);
+        }
         OperatorType::ShiftL => {
             op2(OpCode::OpShL);
         }
@@ -2354,7 +2446,10 @@ fn expression_compute(
             op2(OpCode::OpShR);
         }
         OperatorType::LesserEq => {
-            op2(OpCode::OpLe);
+            op2(OpCode::OpLtE);
+        }
+        OperatorType::GreaterEq => {
+            op2(OpCode::OpGtE);
         }
         OperatorType::Lesser => {
             op2(OpCode::OpLt);
@@ -2371,8 +2466,17 @@ fn expression_compute(
         OperatorType::NotEq => {
             op2(OpCode::OpNe);
         }
+        OperatorType::BoolAnd => {
+            op2(OpCode::OpBoolAnd);
+        }
+        OperatorType::BitOr => {
+            op2(OpCode::OpBitOr);
+        }
         OperatorType::BitAnd => {
-            op2(OpCode::OpBAnd);
+            op2(OpCode::OpBitAnd);
+        }
+        OperatorType::BitXor => {
+            op2(OpCode::OpBitXor);
         }
         OperatorType::PrefixSub => {
             assert_eq!(1, cb.stack.len());
@@ -2419,11 +2523,20 @@ fn fn_expression_compute(
         OperatorType::Sub => {
             op2(OpCode::OpSub);
         }
+        OperatorType::Mod => {
+            op2(OpCode::OpMod);
+        }
         OperatorType::ShiftL => {
             op2(OpCode::OpShL);
         }
         OperatorType::ShiftR => {
             op2(OpCode::OpShR);
+        }
+        OperatorType::LesserEq => {
+            op2(OpCode::OpLtE);
+        }
+        OperatorType::GreaterEq => {
+            op2(OpCode::OpGtE);
         }
         OperatorType::Lesser => {
             op2(OpCode::OpLt);
@@ -2440,8 +2553,17 @@ fn fn_expression_compute(
         OperatorType::NotEq => {
             op2(OpCode::OpNe);
         }
+        OperatorType::BoolAnd => {
+            op2(OpCode::OpBoolAnd);
+        }
+        OperatorType::BitOr => {
+            op2(OpCode::OpBitOr);
+        }
         OperatorType::BitAnd => {
-            op2(OpCode::OpBAnd);
+            op2(OpCode::OpBitAnd);
+        }
+        OperatorType::BitXor => {
+            op2(OpCode::OpBitXor);
         }
         OperatorType::PrefixSub => {
             assert_eq!(1, cb.stack.len());
@@ -2720,10 +2842,10 @@ fn block(
 
 fn fn_block(
     inst_list: &InstructionList, code: &mut Vec<u8>, constants: &[Fr],
-    line_numbers: &mut Vec<usize>) {
+    line_numbers: &mut Vec<usize>, fn_registry: &mut FnRegistry) {
 
     for inst in inst_list {
-        fn_statement(inst, code, constants, line_numbers);
+        fn_statement(inst, code, constants, line_numbers, fn_registry);
         assert_eq!(line_numbers.len(), code.len());
     }
 }
@@ -2732,7 +2854,7 @@ fn compile_template(
     tmpl_code: &TemplateCode, constants: &[Fr],
     fn_registry: &mut FnRegistry) -> Template {
 
-    println!("Compile template {}", tmpl_code.name);
+    // println!("Compile template {}", tmpl_code.name);
 
     let mut code = vec![];
     let mut line_numbers = vec![];
@@ -2755,11 +2877,12 @@ fn compile_function(
     fn_code: &FunctionCode, constants: &[Fr],
     fn_registry: &mut FnRegistry) -> Function {
 
-    println!("Compile function {}", fn_code.name);
+    // println!("Compile function {}", fn_code.name);
 
     let mut code = vec![];
     let mut line_numbers = vec![];
-    fn_block(&fn_code.body, &mut code, constants, &mut line_numbers);
+    fn_block(
+        &fn_code.body, &mut code, constants, &mut line_numbers, fn_registry);
 
     assert_eq!(line_numbers.len(), code.len());
 
@@ -2818,11 +2941,11 @@ fn compile(
     // Assert all components created has has_inputs field consistent with
     // the number of inputs in the templates
     for (i, tmpl) in compiled_templates.iter().enumerate() {
-        println!("Template #{}: {}", i, tmpl.name);
+        // println!("Template #{}: {}", i, tmpl.name);
         for c in tmpl.components.iter() {
             let has_inputs = templates[c.template_id].number_of_inputs > 0;
             assert_eq!(c.has_inputs, has_inputs);
-            println!("Component: {} {}", c.symbol, c.template_id);
+            // println!("Component: {} {}", c.symbol, c.template_id);
         }
     }
 
@@ -3056,14 +3179,23 @@ fn disassemble_instruction(
         OpCode::OpSub => {
             println!("OpSub");
         }
+        OpCode::OpIntDiv => {
+            println!("OpIntDiv");
+        }
+        OpCode::OpMod => {
+            println!("OpMod");
+        }
         OpCode::OpShL => {
             println!("OpShL");
         }
         OpCode::OpShR => {
             println!("OpShR");
         }
-        OpCode::OpLe => {
-            println!("OpLe");
+        OpCode::OpLtE => {
+            println!("OpLtE");
+        }
+        OpCode::OpGtE => {
+            println!("OpGtE");
         }
         OpCode::OpLt => {
             println!("OpLt");
@@ -3077,8 +3209,17 @@ fn disassemble_instruction(
         OpCode::OpNe => {
             println!("OpNe");
         }
-        OpCode::OpBAnd => {
-            println!("OpBAnd");
+        OpCode::OpBoolAnd => {
+            println!("OpBoolAnd");
+        }
+        OpCode::OpBitOr => {
+            println!("OpBitOr");
+        }
+        OpCode::OpBitAnd => {
+            println!("OpBitAnd");
+        }
+        OpCode::OpBitXor => {
+            println!("OpBitXor");
         }
         OpCode::OpNeg => {
             println!("OpNeg");
