@@ -57,6 +57,7 @@ struct Template {
 
 struct Function {
     name: String,
+    symbol: String,
     code: Vec<u8>,
     line_numbers: Vec<usize>,
 }
@@ -596,12 +597,13 @@ fn main() {
 
     // for (i, t) in compiled_templates.iter().enumerate() {
     //     println!("Compiled template #{}: {}", i, t.name);
-    //     disassemble(&t.code, &t.line_numbers, t.name.as_str());
+    //     disassemble(
+    //         &t.code, &t.line_numbers, t.name.as_str(), &compiled_functions);
     // }
     //
     // for (i, t) in compiled_functions.iter().enumerate() {
     //     println!("Compiled function #{}: {}", i, t.name);
-    //     disassemble(&t.code, &t.line_numbers, &t.name);
+    //     disassemble(&t.code, &t.line_numbers, &t.name, &compiled_functions);
     // }
 
     println!("Compilation time: {:?}", start.elapsed());
@@ -856,7 +858,7 @@ fn execute(
                     (&(*function).line_numbers, function.name.as_str())
                 }
             };
-            disassemble_instruction(code, line_numbers, ip, name);
+            disassemble_instruction(code, line_numbers, ip, name, functions);
         }
 
         let op = read_instruction(code, ip);
@@ -984,8 +986,11 @@ fn execute(
                     }
                 };
 
-                if vars.len() <= var_idx + vars_number {
-                    panic!("Variable not set")
+                if var_idx + vars_number > vars.len() {
+                    vm.print_stack_trace();
+                    panic!(
+                        "Variable not set. Total variables length: {}, var_idx: {}, vars_number: {}",
+                        vars.len(), var_idx, vars_number);
                 }
 
                 for i in var_idx..var_idx+vars_number {
@@ -1512,11 +1517,11 @@ fn execute(
                     Frame::Component { .. } => {
                         panic!("Return instruction inside the component");
                     }
-                    Frame::Function { return_num: return_num_local, .. } => {
+                    Frame::Function { return_num: return_num_local, function, .. } => {
                         assert_eq!(
                             *return_num_local, return_num,
-                            "Function is supposed to return {} values, but actually returned {}",
-                            *return_num_local, return_num);
+                            "Function {} is supposed to return {} values, but actually returned {}",
+                            function.name, *return_num_local, return_num);
                     }
                 }
 
@@ -1871,7 +1876,7 @@ fn statement(
         }
         Instruction::Call(ref call_bucket) => {
             // println!("call bucket: {}", _call_bucket.to_string());
-            // println!("{} {:?}", _call_bucket.symbol, _call_bucket.argument_types.iter().map(|x| format!("{}", x.size)).collect::<Vec<String>>());
+            // println!("[3, component] {} {:?}", call_bucket.symbol, call_bucket.argument_types.iter().map(|x| format!("{}", x.size)).collect::<Vec<String>>());
 
             let args_num: usize = call_bucket.arguments.iter().map(
                 |arg| {
@@ -2044,6 +2049,7 @@ fn fn_statement(
             panic!("`CreateCmp` instruction is not allowed in function body");
         }
         Instruction::Call(ref call_bucket) => {
+            // println!("[3, function] {} {:?}", call_bucket.symbol, call_bucket.argument_types.iter().map(|x| format!("{}", x.size)).collect::<Vec<String>>());
             let args_num: usize = call_bucket.arguments.iter().map(
                 |arg| {
                     fn_expression(arg, code, constants, line_numbers)
@@ -2888,6 +2894,7 @@ fn compile_function(
 
     Function {
         name: fn_code.name.clone(),
+        symbol: fn_code.header.clone(),
         code,
         line_numbers,
     }
@@ -2901,7 +2908,15 @@ impl FnRegistry {
     }
 
     fn sort(&self, fns: &mut [Function]) {
-        fns.sort_by_key(|f| self.0.get(&f.name).unwrap_or(&usize::MAX));
+        fns.sort_by_key(|f| {
+            match self.0.get(&f.symbol) {
+                Some(idx) => *idx,
+                None => {
+                    println!("Function {} not found in registry", f.name);
+                    usize::MAX
+                },
+            }
+        });
     }
 
     fn get(&mut self, name: &str) -> usize {
@@ -3026,15 +3041,18 @@ fn u_lt(a: &Fr, b: &Fr) -> Fr {
     }
 }
 
-fn disassemble(code: &[u8], line_numbers: &[usize], name: &str) {
+fn disassemble(
+    code: &[u8], line_numbers: &[usize], name: &str, functions: &[Function]) {
+
     let mut ip = 0usize;
     while ip < code.len() {
-        ip = disassemble_instruction(code, line_numbers, ip, &name);
+        ip = disassemble_instruction(code, line_numbers, ip, &name, functions);
     }
 }
 
 fn disassemble_instruction(
-    code: &[u8], line_numbers: &[usize], ip: usize, name: &str) -> usize {
+    code: &[u8], line_numbers: &[usize], ip: usize, name: &str,
+    functions: &[Function]) -> usize {
 
     print!("{:08x} [{:10}:{:4}] ", ip, name, line_numbers[ip]);
 
@@ -3264,7 +3282,10 @@ fn disassemble_instruction(
             let return_num = read_u32(&code, ip);
             ip += size_of::<u32>();
 
-            println!("FnCall [{},{},{}]", fn_idx, args_num, return_num);
+            let fn_name = &functions[fn_idx as usize].name;
+
+            println!(
+                "FnCall [{}:{},{},{}]", fn_idx, fn_name, args_num, return_num);
         }
         OpCode::FnReturn => {
             let return_num = read_u32(&code, ip);
@@ -3628,13 +3649,17 @@ mod tests {
 
         let mut signals = vec![None, None, Some(Fr::from(8))];
 
-        disassemble(&templates[0].code, &templates[0].line_numbers, "test");
+        let functions = vec![];
+
+        disassemble(
+            &templates[0].code, &templates[0].line_numbers, "test",
+            &functions);
 
         let io_map = BTreeMap::new();
 
         println!("execute");
         execute(
-            component.clone(), &templates, &vec![], &constants,
+            component.clone(), &templates, &functions, &constants,
             &mut signals, &io_map, None);
         println!("{:?}", component.borrow().vars);
         assert_eq!(
@@ -3708,10 +3733,11 @@ STORE(
         let constants = vec![];
         let mut line_numbers = vec![];
         let mut components = vec![];
+        let functions = vec![];
         statement(
             &inst, &mut code, &constants, &mut line_numbers, &mut components,
             &mut FnRegistry::new());
-        disassemble(&code, &line_numbers, "test");
+        disassemble(&code, &line_numbers, "test", &functions);
     }
 
     #[test]
@@ -3801,7 +3827,9 @@ STORE(
             line_numbers.push(i);
         }
 
-        disassemble(&code, &line_numbers, "test");
+        let functions = vec![];
+
+        disassemble(&code, &line_numbers, "test", &functions);
         println!("execute");
 
         let c = Component{
@@ -3822,7 +3850,7 @@ STORE(
         let mut signals = vec![None; 10];
         let io_map = BTreeMap::new();
         execute(
-            component.clone(), &templates, &vec![], &constants,
+            component.clone(), &templates, &functions, &constants,
             &mut signals, &io_map, None);
         println!("{:?}", &component.borrow().vars);
     }
@@ -3852,5 +3880,59 @@ STORE(
         execute(
             component, &templates, &vec![], &constants, &mut signals,
             &io_map, None);
+    }
+
+    fn names_from_fn_vec(fns: &Vec<Function>) -> Vec<String> {
+        fns.iter().map(|f| f.name.clone()).collect()
+    }
+
+    fn mk_empty_fun(name: &str, symbol: &str) -> Function {
+        Function {
+            name: name.to_string(),
+            symbol: symbol.to_string(),
+            code: vec![],
+            line_numbers: vec![],
+        }
+    }
+
+    #[test]
+    fn test_fn_registry_sort() {
+        let mut reg = FnRegistry::new();
+        assert_eq!(0, reg.get("ssigma1_1"));
+        assert_eq!(1, reg.get("ssigma0_2"));
+        assert_eq!(2, reg.get("bsigma1_3"));
+        assert_eq!(3, reg.get("Ch_4"));
+        assert_eq!(4, reg.get("sha256K_5"));
+        assert_eq!(5, reg.get("bsigma0_6"));
+        assert_eq!(6, reg.get("Maj_7"));
+        assert_eq!(7, reg.get("rrot_8"));
+        assert_eq!(8, reg.get("sha256compression_0"));
+
+        let mut fns: Vec<Function> = vec![
+            mk_empty_fun("sha256compression", "sha256compression_0"),
+            mk_empty_fun("ssigma1", "ssigma1_1"),
+            mk_empty_fun("ssigma0", "ssigma0_2"),
+            mk_empty_fun("bsigma1", "bsigma1_3"),
+            mk_empty_fun("Ch", "Ch_4"),
+            mk_empty_fun("sha256K", "sha256K_5"),
+            mk_empty_fun("bsigma0", "bsigma0_6"),
+            mk_empty_fun("Maj", "Maj_7"),
+            mk_empty_fun("rrot", "rrot_8"),
+        ];
+
+        let want = vec![
+            "ssigma1".to_string(),
+            "ssigma0".to_string(),
+            "bsigma1".to_string(),
+            "Ch".to_string(),
+            "sha256K".to_string(),
+            "bsigma0".to_string(),
+            "Maj".to_string(),
+            "rrot".to_string(),
+            "sha256compression".to_string(),
+        ];
+
+        reg.sort(&mut fns);
+        assert_eq!(want, names_from_fn_vec(&fns));
     }
 }

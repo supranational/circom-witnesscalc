@@ -758,7 +758,8 @@ fn process_instruction(
             // panic!("not implemented");
         }
         Instruction::Log(_) => {
-            panic!("not implemented");
+            // we are unable to log anything in witness graph
+            // panic!("not implemented");
         }
         Instruction::Loop(ref loop_bucket) => {
             while check_continue_condition(
