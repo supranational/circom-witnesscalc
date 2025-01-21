@@ -1477,11 +1477,8 @@ fn execute(
                 ip += size_of::<u32>();
 
                 match vm.call_frames.last_mut().unwrap() {
-                    Frame::Component { ip: ip_local, .. } => {
+                    Frame::Component { ip: ip_local, .. } | Frame::Function { ip: ip_local, .. } => {
                         *ip_local = ip;
-                    }
-                    Frame::Function { ip: ip_local, .. } => {
-                        *ip_local = ip
                     }
                 }
 
@@ -1596,6 +1593,105 @@ fn patch_jump(code: &mut [u8], jump_offset_addr: usize, to: usize) {
     code[jump_offset_addr..jump_offset_addr+4].copy_from_slice(offset.to_le_bytes().as_ref());
 }
 
+fn store_subsignal(
+    code: &mut Vec<u8>, dest: &LocationRule, constants: &[Fr],
+    components: &mut Vec<ComponentTmpl>, line_numbers: &mut Vec<usize>,
+    line_no: usize, cmp_address: &InstructionPointer,
+    input_information: &InputInformation, signals_num: u32) {
+
+    let mut indexes_number = 0u32;
+    let mut signal_code = 0u32;
+    let is_signal_idx_mapped = match dest {
+        LocationRule::Indexed { ref location, .. } => {
+            let sig_idx =
+                u32_or_expression(location, constants).unwrap();
+
+            match sig_idx {
+                U32OrExpression::U32(sig_idx) => {
+                    code.push(OpCode::Push4 as u8);
+                    line_numbers.push(line_no);
+
+                    code.extend_from_slice(sig_idx.to_le_bytes().as_ref());
+                    for _ in 0..4 { line_numbers.push(usize::MAX); }
+                }
+                U32OrExpression::BigInt(_) => {
+                    panic!("Signal index is not u32");
+                }
+                U32OrExpression::Expression => {
+                    expression_u32(
+                        location, code, constants, line_numbers,
+                        components);
+                }
+            };
+
+            false
+        }
+        LocationRule::Mapped { signal_code: ref signal_code_local, ref indexes } => {
+            for idx_inst in indexes {
+                expression_u32(
+                    idx_inst, code, constants, line_numbers,
+                    components)
+            }
+
+            indexes_number = indexes.len()
+                .try_into().expect("Too many indexes");
+            signal_code = (*signal_code_local).try_into()
+                .expect("Too large signal code");
+
+            true
+        }
+    };
+    let cmp_idx =
+        u32_or_expression(cmp_address, constants);
+    match cmp_idx {
+        Ok(ref cmp_idx) => {
+            match cmp_idx {
+                U32OrExpression::U32(cmp_idx) => {
+                    code.push(OpCode::Push4 as u8);
+                    line_numbers.push(line_no);
+
+                    code.extend_from_slice(cmp_idx.to_le_bytes().as_ref());
+                    for _ in 0..4 { line_numbers.push(usize::MAX); }
+                },
+                U32OrExpression::BigInt(_) => {
+                    panic!("Component index is not u32");
+                },
+                U32OrExpression::Expression => {
+                    expression_u32(
+                        cmp_address, code, constants,
+                        line_numbers, components);
+                }
+            }
+        }
+        Err(e) => {
+            panic!("Error: {:?}", e);
+        }
+    };
+
+
+    code.push(OpCode::SetSubSignal as u8);
+    line_numbers.push(line_no);
+
+    code.extend_from_slice(signals_num.to_le_bytes().as_ref());
+    for _ in 0..4 { line_numbers.push(usize::MAX); }
+
+    let input_status: InputStatus = if let InputInformation::Input{ status } = input_information {
+        status.into()
+    } else {
+        panic!("Can't store signal to non-input subcomponent");
+    };
+    code.push(mk_flags(input_status, is_signal_idx_mapped));
+    line_numbers.push(usize::MAX);
+
+    if is_signal_idx_mapped {
+        code.extend_from_slice(indexes_number.to_le_bytes().as_ref());
+        for _ in 0..4 { line_numbers.push(usize::MAX); }
+
+        code.extend_from_slice(signal_code.to_le_bytes().as_ref());
+        for _ in 0..4 { line_numbers.push(usize::MAX); }
+    }
+}
+
 // After statement execution, there should not be side-effect on the stack
 fn statement(
     inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[Fr],
@@ -1683,100 +1779,13 @@ fn statement(
                 }
 
                 AddressType::SubcmpSignal { ref cmp_address, ref input_information, .. } => {
-                    let mut indexes_number = 0u32;
-                    let mut signal_code = 0u32;
-                    let is_signal_idx_mapped = match store_bucket.dest {
-                        LocationRule::Indexed { ref location, .. } => {
-                            let sig_idx =
-                                u32_or_expression(location, constants).unwrap();
-
-                            match sig_idx {
-                                U32OrExpression::U32(sig_idx) => {
-                                    code.push(OpCode::Push4 as u8);
-                                    line_numbers.push(store_bucket.line);
-
-                                    code.extend_from_slice(sig_idx.to_le_bytes().as_ref());
-                                    for _ in 0..4 { line_numbers.push(usize::MAX); }
-                                }
-                                U32OrExpression::BigInt(_) => {
-                                    panic!("Signal index is not u32");
-                                }
-                                U32OrExpression::Expression => {
-                                    expression_u32(
-                                        location, code, constants, line_numbers,
-                                        components);
-                                }
-                            };
-
-                            false
-                        }
-                        LocationRule::Mapped { signal_code: ref signal_code_local, ref indexes } => {
-                            for idx_inst in indexes {
-                                expression_u32(
-                                    idx_inst, code, constants, line_numbers,
-                                    components)
-                            }
-
-                            indexes_number = indexes.len()
-                                .try_into().expect("Too many indexes");
-                            signal_code = (*signal_code_local).try_into()
-                                .expect("Too large signal code");
-
-                            true
-                        }
-                    };
-
-                    let cmp_idx =
-                        u32_or_expression(cmp_address, constants);
-                    match cmp_idx {
-                        Ok(ref cmp_idx) => {
-                            match cmp_idx {
-                                U32OrExpression::U32(cmp_idx) => {
-                                    code.push(OpCode::Push4 as u8);
-                                    line_numbers.push(store_bucket.line);
-
-                                    code.extend_from_slice(cmp_idx.to_le_bytes().as_ref());
-                                    for _ in 0..4 { line_numbers.push(usize::MAX); }
-                                },
-                                U32OrExpression::BigInt(_) => {
-                                    panic!("Component index is not u32");
-                                },
-                                U32OrExpression::Expression => {
-                                    expression_u32(
-                                        cmp_address, code, constants,
-                                        line_numbers, components);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            panic!("Error: {:?}", e);
-                        }
-                    };
-
-
-                    code.push(OpCode::SetSubSignal as u8);
-                    line_numbers.push(store_bucket.line);
-
                     let signals_num: u32 = store_bucket.context.size
                         .try_into().expect("Too many signals");
-                    code.extend_from_slice(signals_num.to_le_bytes().as_ref());
-                    for _ in 0..4 { line_numbers.push(usize::MAX); }
 
-                    let input_status: InputStatus = if let InputInformation::Input{ status } = input_information {
-                        status.into()
-                    } else {
-                        panic!("Can't store signal to non-input subcomponent");
-                    };
-                    code.push(mk_flags(input_status, is_signal_idx_mapped));
-                    line_numbers.push(usize::MAX);
-
-                    if is_signal_idx_mapped {
-                        code.extend_from_slice(indexes_number.to_le_bytes().as_ref());
-                        for _ in 0..4 { line_numbers.push(usize::MAX); }
-
-                        code.extend_from_slice(signal_code.to_le_bytes().as_ref());
-                        for _ in 0..4 { line_numbers.push(usize::MAX); }
-                    }
+                    store_subsignal(
+                        code, &store_bucket.dest, constants, components,
+                        line_numbers, store_bucket.get_line(), cmp_address,
+                        input_information, signals_num);
                 }
             }
             assert_eq!(line_numbers.len(), code.len());
@@ -1921,7 +1930,12 @@ fn statement(
                             for _ in 0..4 { line_numbers.push(usize::MAX); }
                         }
                         AddressType::Signal => {todo!()}
-                        AddressType::SubcmpSignal { .. } => {todo!()}
+                        AddressType::SubcmpSignal { ref cmp_address, ref input_information, .. } => {
+                            store_subsignal(
+                                code, &final_data.dest, constants, components,
+                                line_numbers, call_bucket.get_line(), cmp_address,
+                                input_information, return_num);
+                        }
                     }
                 }
             }
