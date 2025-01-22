@@ -5,6 +5,7 @@
 mod field;
 pub mod graph;
 pub mod storage;
+pub mod vm;
 
 use std::collections::HashMap;
 use std::ffi::{c_void, c_char, c_int, CStr};
