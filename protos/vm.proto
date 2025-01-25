@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package vm.proto;
+
+// Virtual Machine metadata
+message VmMd {
+  uint64 main_template_id = 1;
+  uint64 templates_num = 2;
+  uint64 functions_num = 3;
+  uint64 signals_num = 4;
+}
+
+message ComponentTmpl {
+  string symbol = 1;
+  uint64 sub_cmp_idx = 2;
+  uint64 number_of_cmp = 3;
+  string name_subcomponent = 4;
+  uint64 signal_offset = 5;
+  uint64 signal_offset_jump = 6;
+  uint64 template_id = 7;
+  bool has_inputs = 8;
+}
+
+message Template {
+  string name = 1;
+  bytes code = 2;
+  repeated uint64 line_numbers = 3;
+  repeated ComponentTmpl components = 4;
+  uint64 var_stack_depth = 5;
+  uint64 number_of_inputs = 6;
+}
+
+message Function {
+  string name = 1;
+  string symbol = 2;
+  bytes code = 3;
+  repeated uint64 line_numbers = 4;
+}

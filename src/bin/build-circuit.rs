@@ -2347,7 +2347,7 @@ fn store_subcomponent_signals(
     nodes: &mut Nodes, tmpl_vars: &mut Vec<Option<Var>>,
     signal_node_idx: &mut Vec<usize>,
     subcomponents: &mut Vec<Option<ComponentInstance>>,
-    io_map: &TemplateInstanceIOMap, src_node_idxs: &Vec<usize>, dest: &LocationRule,
+    io_map: &TemplateInstanceIOMap, src_node_idxs: &[usize], dest: &LocationRule,
     size: usize, templates: &Vec<TemplateCode>, functions: &Vec<FunctionCode>,
     print_debug: bool, call_stack: &Vec<String>, cmp: &ComponentInstance) {
 
@@ -2380,7 +2380,7 @@ fn store_subcomponent_signals(
         LocationRule::Mapped { ref signal_code, ref indexes } => {
             calc_mapped_signal_idx(
                 subcomponents, subcomponent_idx, io_map,
-                signal_code.clone(), indexes, nodes, tmpl_vars,
+                *signal_code, indexes, nodes, tmpl_vars,
                 cmp.signal_offset, signal_node_idx, print_debug, call_stack)
         }
     };

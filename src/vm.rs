@@ -1,12 +1,12 @@
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::fmt::Display;
+use std::num::TryFromIntError;
 use std::rc::Rc;
 use std::str::FromStr;
 use ark_bn254::Fr;
 use ark_ff::{BigInt, One, PrimeField, Zero};
 use code_producers::c_elements::TemplateInstanceIOMap;
-use compiler::circuit_design::template::TemplateCode;
 use compiler::intermediate_representation::ir_interface::StatusInput;
 use crate::graph::{Operation, UnoOperation};
 
@@ -29,11 +29,71 @@ pub struct ComponentTmpl {
     pub has_inputs: bool,
 }
 
+impl TryInto<crate::proto::vm::ComponentTmpl> for &ComponentTmpl {
+    type Error = TryFromIntError;
+
+    fn try_into(self) -> Result<crate::proto::vm::ComponentTmpl, Self::Error> {
+        Ok(crate::proto::vm::ComponentTmpl{
+            symbol: self.symbol.clone(),
+            sub_cmp_idx: self.sub_cmp_idx.try_into()?,
+            number_of_cmp: self.number_of_cmp.try_into()?,
+            name_subcomponent: self.name_subcomponent.clone(),
+            signal_offset: self.signal_offset.try_into()?,
+            signal_offset_jump: self.signal_offset_jump.try_into()?,
+            template_id: self.template_id.try_into()?,
+            has_inputs: self.has_inputs,
+        })
+    }
+}
+
 pub struct Template {
     pub name: String,
     pub code: Vec<u8>,
     pub line_numbers: Vec<usize>,
     pub components: Vec<ComponentTmpl>,
+    pub var_stack_depth: usize,
+    pub number_of_inputs: usize,
+}
+
+impl TryInto<crate::proto::vm::Template> for &Template {
+    type Error = TryFromIntError;
+
+    fn try_into(self) -> Result<crate::proto::vm::Template, Self::Error> {
+        Ok(crate::proto::vm::Template{
+            name:self.name.clone(),
+            code: self.code.clone(),
+            line_numbers: self.line_numbers.iter()
+                .map(|x| TryInto::try_into(*x))
+                .collect::<Result<Vec<u64>, TryFromIntError>>()?,
+            components: self.components.iter()
+                .map(TryInto::<crate::proto::vm::ComponentTmpl>::try_into)
+                .collect::<Result<Vec<_>, _>>()?,
+            var_stack_depth: self.var_stack_depth.try_into()?,
+            number_of_inputs: self.number_of_inputs.try_into()?,
+        })
+    }
+}
+
+impl TryFrom<&crate::proto::vm::Template> for Template {
+    type Error = TryFromIntError;
+
+    fn try_from(value: &crate::proto::vm::Template) -> Result<Self, Self::Error> {
+        Ok(Template{
+            name: value.name.clone(),
+            code: value.code.clone(),
+            line_numbers: value.line_numbers
+                .iter()
+                .map(|x| TryInto::<usize>::try_into(*x))
+                .collect::<Result<Vec<usize>, TryFromIntError>>()?,
+            components: vec![],
+            var_stack_depth: value.var_stack_depth.try_into()?,
+            number_of_inputs: value.number_of_inputs.try_into()?,
+            // line_numbers: value.line_numbers,
+            // components: value.components,
+            // var_stack_depth: value.var_stack_depth,
+            // number_of_inputs: value.number_of_inputs,
+        })
+    }
 }
 
 pub struct Function {
@@ -41,6 +101,21 @@ pub struct Function {
     pub symbol: String,
     pub code: Vec<u8>,
     pub line_numbers: Vec<usize>,
+}
+
+impl TryInto<crate::proto::vm::Function> for &Function {
+    type Error = TryFromIntError;
+
+    fn try_into(self) -> Result<crate::proto::vm::Function, Self::Error> {
+        Ok(crate::proto::vm::Function{
+            name: self.name.clone(),
+            symbol: self.symbol.clone(),
+            code: self.code.clone(),
+            line_numbers: self.line_numbers.iter()
+                .map(|x| TryInto::try_into(*x))
+                .collect::<Result<Vec<u64>, TryFromIntError>>()?,
+        })
+    }
 }
 
 enum Frame<'a, 'b> {
@@ -118,12 +193,14 @@ impl<'a, 'b> VM<'a, 'b> {
         self.assert_signal(sig_idx);
     }
 
+    #[cfg(feature = "print_opcode")]
     fn print_stack(&self) {
         for (i, s) in self.stack.iter().enumerate() {
             let s = if s.is_zero() { String:: from("0") } else { s.to_string() };
             println!("{:04x}: {}", i, s);
         }
     }
+    #[cfg(feature = "print_opcode")]
     fn print_stack_u32(&self) {
         for (i, s) in self.stack_u32.iter().enumerate() {
             println!("{:04x}: {}", i, s);
@@ -625,7 +702,7 @@ fn bigint_to_u64<const N: usize>(i: BigInt<N>) -> Option<u64> {
 }
 
 pub fn build_component(
-    compiled_templates: &[Template], templates: &[TemplateCode],
+    compiled_templates: &[Template],
     template_id: usize, signals_start: usize) -> Component {
 
     let mut subcomponents = Vec::with_capacity(
@@ -636,7 +713,7 @@ pub fn build_component(
 
         for _ in c.sub_cmp_idx..c.sub_cmp_idx+c.number_of_cmp {
             let subcomponent = build_component(
-                compiled_templates, templates, c.template_id,
+                compiled_templates, c.template_id,
                 signals_start + cmp_signal_offset);
             subcomponents.push(Rc::new(RefCell::new(subcomponent)));
             cmp_signal_offset += c.signal_offset_jump;
@@ -644,11 +721,11 @@ pub fn build_component(
     }
 
     Component {
-        vars: vec![None; templates[template_id].var_stack_depth],
+        vars: vec![None; compiled_templates[template_id].var_stack_depth],
         signals_start,
         template_id,
         subcomponents,
-        number_of_inputs: templates[template_id].number_of_inputs,
+        number_of_inputs: compiled_templates[template_id].number_of_inputs,
     }
 }
 
@@ -921,7 +998,7 @@ pub fn execute(
                     panic!("Variable index is too large");
                 }
 
-                let mut last_frame = vm.call_frames.last_mut().unwrap();
+                let last_frame = vm.call_frames.last_mut().unwrap();
                 let vars: &mut Vec<Option<Fr>> = match last_frame {
                     Frame::Component { component, .. } => {
                         &mut component.borrow_mut().vars
@@ -1385,7 +1462,7 @@ pub fn execute(
             }
             OpCode::FnReturn => {
                 let return_num = read_u32(code, ip) as usize;
-                ip += size_of::<u32>();
+                // ip += size_of::<u32>(); // no need to increment ip, it would be changed to where we return
 
                 match vm.call_frames.last().unwrap() {
                     Frame::Component { .. } => {

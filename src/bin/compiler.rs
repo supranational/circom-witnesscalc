@@ -3,9 +3,7 @@ use std::path::PathBuf;
 use core::convert::TryInto;
 use core::str::FromStr;
 use std::cell::RefCell;
-use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::fmt::Display;
 use std::fs::File;
 use std::io::Write;
 use std::rc::Rc;
@@ -14,26 +12,24 @@ use ark_bn254::Fr;
 use ark_ff::BigInt;
 use ark_ff::PrimeField;
 use ark_ff::BigInteger;
-use ark_ff::One;
-use ark_ff::Zero;
-use code_producers::c_elements::TemplateInstanceIOMap;
 use compiler::circuit_design::function::FunctionCode;
 use compiler::circuit_design::template::TemplateCode;
 use compiler::compiler_interface::{run_compiler, Circuit, Config};
 use compiler::intermediate_representation::InstructionList;
-use compiler::intermediate_representation::ir_interface::{AddressType, ComputeBucket, CreateCmpBucket, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, ObtainMeta, OperatorType, ReturnType, StatusInput, ValueType};
+use compiler::intermediate_representation::ir_interface::{AddressType, ComputeBucket, CreateCmpBucket, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, ObtainMeta, OperatorType, ReturnType, ValueType};
 use constraint_generation::{build_circuit, BuildConfig};
 use program_structure::error_definition::Report;
 use type_analysis::check_types::check_types;
 use wtns_file::FieldElement;
 use circom_witnesscalc::{deserialize_inputs};
-use circom_witnesscalc::graph::{Operation, UnoOperation};
+use circom_witnesscalc::graph::Operation;
+use circom_witnesscalc::storage::serialize_witnesscalc_vm;
 use circom_witnesscalc::vm::{build_component, disassemble_instruction, execute, ComponentTmpl, Function, InputStatus, OpCode, Template};
 
 struct Args {
     circuit_file: String,
     inputs_file: Option<String>,
-    graph_file: String,
+    vm_out_file: String,
     link_libraries: Vec<PathBuf>,
     print_debug: bool,
     witness_file: Option<String>,
@@ -42,7 +38,7 @@ struct Args {
 
 #[derive(Debug)]
 enum CompilationError {
-    NotAnExpression(String),
+    NotAnExpression(()),
 }
 
 enum U32OrExpression {
@@ -51,7 +47,9 @@ enum U32OrExpression {
     Expression,
 }
 
-fn u32_or_expression(inst: &InstructionPointer, constants: &[Fr]) -> Result<U32OrExpression, CompilationError> {
+fn u32_or_expression(
+    inst: &InstructionPointer,
+    constants: &[Fr]) -> Result<U32OrExpression, CompilationError> {
 
     match **inst {
         Instruction::Value(ref value) => {
@@ -61,7 +59,8 @@ fn u32_or_expression(inst: &InstructionPointer, constants: &[Fr]) -> Result<U32O
                     // if value.value > u32::MAX as usize {
                     //     return Ok(U32OrExpression::Expression);
                     // }
-                    let v: u32 = value.value.try_into().expect("value is too large for stack_u32");
+                    let v: u32 = value.value.try_into()
+                        .expect("value is too large for stack_u32");
                     Ok(U32OrExpression::U32(v))
                 },
                 ValueType::BigInt => {
@@ -75,7 +74,7 @@ fn u32_or_expression(inst: &InstructionPointer, constants: &[Fr]) -> Result<U32O
             let two_op_fn = |op: Operation| -> Result<U32OrExpression, CompilationError> {
                 assert_eq!(2, compute_bucket.stack.len());
                 let a = match u32_or_expression(&compute_bucket.stack[0], constants)? {
-                    U32OrExpression::U32(v) => panic!("expected BigInt value"),
+                    U32OrExpression::U32(_) => panic!("expected BigInt value"),
                     U32OrExpression::BigInt(v) => v,
                     U32OrExpression::Expression => { return Ok(U32OrExpression::Expression) }
                 };
@@ -164,7 +163,7 @@ fn u32_or_expression(inst: &InstructionPointer, constants: &[Fr]) -> Result<U32O
             }
         },
         _ => {
-            Err(CompilationError::NotAnExpression(inst.to_string()))
+            Err(CompilationError::NotAnExpression(()))
         }
     }
 }
@@ -173,7 +172,7 @@ fn parse_args() -> Args {
     let args: Vec<String> = env::args().collect();
     let mut i = 1;
     let mut circuit_file: Option<String> = None;
-    let mut graph_file: Option<String> = None;
+    let mut vm_out_file: Option<String> = None;
     let mut link_libraries: Vec<PathBuf> = Vec::new();
     let mut inputs_file: Option<String> = None;
     let mut witness_file: Option<String> = None;
@@ -182,7 +181,7 @@ fn parse_args() -> Args {
 
     let usage = |err_msg: &str| -> String {
         eprintln!("{}", err_msg);
-        eprintln!("Usage: {} <circuit_file> <graph_file> [-l <link_library>]* [-i <inputs_file.json>] [-print-unoptimized] [-v] [-wtns <output.wtns]", args[0]);
+        eprintln!("Usage: {} <circuit_file> <vm_out_file> [-l <link_library>]* [-i <inputs_file.json>] [-print-unoptimized] [-v] [-wtns <output.wtns]", args[0]);
         std::process::exit(1);
     };
 
@@ -234,8 +233,8 @@ fn parse_args() -> Args {
             usage(&message);
         } else if let None = circuit_file {
             circuit_file = Some(args[i].clone());
-        } else if let None = graph_file {
-            graph_file = Some(args[i].clone());
+        } else if let None = vm_out_file {
+            vm_out_file = Some(args[i].clone());
         } else {
             usage(format!("unexpected argument: {}", args[i]).as_str());
         }
@@ -245,7 +244,7 @@ fn parse_args() -> Args {
     Args {
         circuit_file: circuit_file.unwrap_or_else(|| { usage("missing circuit file") }),
         inputs_file,
-        graph_file: graph_file.unwrap_or_else(|| { usage("missing graph file") }),
+        vm_out_file: vm_out_file.unwrap_or_else(|| { usage("missing vm_out_file file") }),
         link_libraries,
         print_debug,
         witness_file,
@@ -356,9 +355,9 @@ fn main() {
     // assert that template id is equal to index in templates list
     for (i, t) in circuit.templates.iter().enumerate() {
         assert_eq!(i, t.id);
-        // if args.print_debug {
-        //     println!("Template #{}: {}", i, t.name);
-        // }
+        if args.print_debug {
+            println!("Template #{}: {}", i, t.name);
+        }
     }
 
     let constants = get_constants(&circuit);
@@ -368,27 +367,28 @@ fn main() {
         compile(&circuit.templates, &circuit.functions, &constants);
 
 
-    // for (i, t) in compiled_templates.iter().enumerate() {
-    //     println!("Compiled template #{}: {}", i, t.name);
-    //     disassemble(
-    //         &t.code, &t.line_numbers, t.name.as_str(), &compiled_functions);
-    // }
-    //
-    // for (i, t) in compiled_functions.iter().enumerate() {
-    //     println!("Compiled function #{}: {}", i, t.name);
-    //     disassemble(&t.code, &t.line_numbers, &t.name, &compiled_functions);
-    // }
+    if args.print_debug {
+        for (i, t) in compiled_templates.iter().enumerate() {
+            println!("Compiled template #{}: {}", i, t.name);
+            disassemble(
+                &t.code, &t.line_numbers, t.name.as_str(), &compiled_functions);
+        }
+
+        for (i, t) in compiled_functions.iter().enumerate() {
+            println!("Compiled function #{}: {}", i, t.name);
+            disassemble(&t.code, &t.line_numbers, &t.name, &compiled_functions);
+        }
+    }
 
     println!("Compilation time: {:?}", start.elapsed());
+
+    let sigs_num = circuit.c_producer.get_total_number_of_signals();
 
     if let Some(input_file) = args.inputs_file {
 
         let main_component = build_component(
-            &compiled_templates, &circuit.templates, main_template_id,
-            main_component_signal_start);
+            &compiled_templates, main_template_id, main_component_signal_start);
         let main_component = Rc::new(RefCell::new(main_component));
-
-        let sigs_num = circuit.c_producer.get_total_number_of_signals();
 
         if let Some(ref expected_signals) = args.expected_signals {
             assert_eq!(expected_signals.len(), sigs_num);
@@ -409,12 +409,7 @@ fn main() {
 
         if let Some(witness_file) = args.witness_file {
             let mut witness = Vec::with_capacity(witness_list.len());
-            for (i, w) in witness_list.iter().enumerate() {
-                // println!("w: {}",
-                //          signals[*w]
-                //              .expect(
-                //                  format!("signal at {} is not set", i).as_str())
-                //              .to_string());
+            for w in witness_list.iter() {
                 witness.push(signals[*w].unwrap());
             }
 
@@ -428,6 +423,11 @@ fn main() {
             println!("Witness file is not set. Witness was calculated but not saved.")
         }
     }
+
+    let f = fs::File::create(&args.vm_out_file).unwrap();
+    serialize_witnesscalc_vm(
+        f, main_template_id, &compiled_templates, &compiled_functions,
+        sigs_num).unwrap();
 }
 
 fn get_constants(circuit: &Circuit) -> Vec<Fr> {
@@ -942,7 +942,7 @@ fn fn_statement(
             patch_jump(code, loop_end_jump_offset, to);
             assert_eq!(line_numbers.len(), code.len());
         }
-        Instruction::CreateCmp(ref cmp_bucket) => {
+        Instruction::CreateCmp(..) => {
             panic!("`CreateCmp` instruction is not allowed in function body");
         }
         Instruction::Call(ref call_bucket) => {
@@ -1133,7 +1133,7 @@ fn expression_load(
             code.extend_from_slice(signals_num.to_le_bytes().as_ref());
             for _ in 0..4 { line_numbers.push(usize::MAX); }
         }
-        AddressType::SubcmpSignal { ref cmp_address, ref input_information, .. } => {
+        AddressType::SubcmpSignal { ref cmp_address, .. } => {
 
             let mut indexes_number = 0u32;
             let mut signal_code = 0u32;
@@ -1663,11 +1663,11 @@ fn expression_u32(
                 }
                 ValueType::BigInt => {
                     todo!("convert to u32 and check this");
-                    code.push(OpCode::GetConstant8 as u8);
-                    line_numbers.push(value_bucket.line);
-                    assert_64();
-                    code.extend_from_slice(value_bucket.value.to_le_bytes().as_ref());
-                    for _ in 0..8 { line_numbers.push(usize::MAX); }
+                    // code.push(OpCode::GetConstant8 as u8);
+                    // line_numbers.push(value_bucket.line);
+                    // assert_64();
+                    // code.extend_from_slice(value_bucket.value.to_le_bytes().as_ref());
+                    // for _ in 0..8 { line_numbers.push(usize::MAX); }
                 }
             }
             assert_eq!(line_numbers.len(), code.len());
@@ -1699,11 +1699,11 @@ fn fn_expression_u32(
                 }
                 ValueType::BigInt => {
                     todo!("convert to u32 and check this");
-                    code.push(OpCode::GetConstant8 as u8);
-                    line_numbers.push(value_bucket.line);
-                    assert_64();
-                    code.extend_from_slice(value_bucket.value.to_le_bytes().as_ref());
-                    for _ in 0..8 { line_numbers.push(usize::MAX); }
+                    // code.push(OpCode::GetConstant8 as u8);
+                    // line_numbers.push(value_bucket.line);
+                    // assert_64();
+                    // code.extend_from_slice(value_bucket.value.to_le_bytes().as_ref());
+                    // for _ in 0..8 { line_numbers.push(usize::MAX); }
                 }
             }
             assert_eq!(line_numbers.len(), code.len());
@@ -1762,6 +1762,8 @@ fn compile_template(
         code,
         line_numbers,
         components: components,
+        var_stack_depth: tmpl_code.var_stack_depth,
+        number_of_inputs: tmpl_code.number_of_inputs,
     }
 }
 
@@ -1845,7 +1847,7 @@ fn compile(
         // println!("Template #{}: {}", i, tmpl.name);
         for c in tmpl.components.iter() {
             let has_inputs = templates[c.template_id].number_of_inputs > 0;
-            assert_eq!(c.has_inputs, has_inputs);
+            assert_eq!(c.has_inputs, has_inputs, "#{} {}", i, c.symbol);
             // println!("Component: {} {}", c.symbol, c.template_id);
         }
     }
@@ -2262,6 +2264,8 @@ mod tests {
             code: code,
             line_numbers,
             components,
+            var_stack_depth: 0,
+            number_of_inputs: 0,
         }];
 
         let mut signals = vec![None, None, Some(Fr::from(8))];
@@ -2462,6 +2466,8 @@ STORE(
             code: code.clone(),
             line_numbers,
             components: vec![],
+            var_stack_depth: 0,
+            number_of_inputs: 0,
         }];
         let constants = vec![];
         let mut signals = vec![None; 10];
@@ -2490,6 +2496,8 @@ STORE(
             code: code.clone(),
             line_numbers: vec![0],
             components: vec![],
+            var_stack_depth: 0,
+            number_of_inputs: 0,
         }];
         let constants = vec![];
         let mut signals = vec![None; 10];

@@ -5,7 +5,7 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use prost::Message;
 use crate::graph::{Operation, TresOperation, UnoOperation};
 use crate::InputSignalsInfo;
-
+use crate::vm::{Function, Template};
 // format of the wtns.graph file:
 // + magic line: wtns.graph.001
 // + 4 bytes unsigned LE 32-bit integer: number of nodes
@@ -14,6 +14,7 @@ use crate::InputSignalsInfo;
 // + 8 bytes unsigned LE 64-bit integer: offset of GraphMetadata message
 
 const WITNESSCALC_GRAPH_MAGIC: &[u8] = b"wtns.graph.001";
+const WITNESSCALC_VM_MAGIC: &[u8] = b"wtns.vm.001";
 
 const MAX_VARINT_LENGTH: usize = 10;
 
@@ -178,6 +179,80 @@ pub fn serialize_witnesscalc_graph<T: Write>(
     buf.clear();
 
     w.write_u64::<LittleEndian>(ptr as u64)?;
+
+    Ok(())
+}
+
+pub fn serialize_witnesscalc_vm<T: Write>(
+    mut w: T, main_template_id: usize, templates: &Vec<Template>,
+    functions: &Vec<Function>, signals_num: usize,
+    // witness_signals: &Vec<usize>,
+    // input_signals: &InputSignalsInfo,
+) -> std::io::Result<()> {
+
+    w.write_all(WITNESSCALC_VM_MAGIC).unwrap();
+
+    let md = crate::proto::vm::VmMd {
+        main_template_id: main_template_id.try_into().unwrap(),
+        templates_num: templates.len() as u64,
+        functions_num: functions.len() as u64,
+        signals_num: signals_num as u64,
+    };
+
+    let mut buf = Vec::new();
+    md.encode_length_delimited(&mut buf)?;
+    w.write_all(&buf)?;
+    buf.clear();
+
+    for tmpl in templates {
+        let tmpl_pb: crate::proto::vm::Template = tmpl.try_into().unwrap();
+        assert_eq!(buf.len(), 0);
+        tmpl_pb.encode_length_delimited(&mut buf)?;
+        w.write_all(&buf)?;
+        buf.clear();
+    }
+
+    for func in functions {
+        let func_pb: crate::proto::vm::Function = func.try_into().unwrap();
+        assert_eq!(buf.len(), 0);
+        func_pb.encode_length_delimited(&mut buf)?;
+        w.write_all(&buf)?;
+        buf.clear();
+    }
+
+    // let metadata = crate::proto::GraphMetadata {
+    //     witness_signals: witness_signals.iter().map(|x| *x as u32).collect::<Vec<u32>>(),
+    //     inputs: input_signals.iter().map(|(k, v)| {
+    //         let sig = crate::proto::SignalDescription {
+    //             offset: v.0 as u32,
+    //             len: v.1 as u32 };
+    //         (k.clone(), sig)
+    //     }).collect()
+    // };
+    // 
+    // // capacity of buf should be enough to hold the largest message + 10 bytes
+    // // of varint length
+    // let mut buf =
+    //     Vec::with_capacity(metadata.encoded_len() + MAX_VARINT_LENGTH);
+    // 
+    // for node in nodes {
+    //     let node_pb = crate::proto::Node{
+    //         node: Some(crate::proto::node::Node::from(node)),
+    //     };
+    // 
+    //     assert_eq!(buf.len(), 0);
+    //     node_pb.encode_length_delimited(&mut buf)?;
+    //     ptr += buf.len();
+    // 
+    //     w.write_all(&buf)?;
+    //     buf.clear();
+    // }
+    // 
+    // metadata.encode_length_delimited(&mut buf)?;
+    // w.write_all(&buf)?;
+    // buf.clear();
+    // 
+    // w.write_u64::<LittleEndian>(ptr as u64)?;
 
     Ok(())
 }

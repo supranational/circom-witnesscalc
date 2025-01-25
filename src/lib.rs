@@ -21,6 +21,10 @@ pub type InputSignalsInfo = HashMap<String, (usize, usize)>;
 
 pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/circom_witnesscalc.proto.rs"));
+
+    pub mod vm {
+        include!(concat!(env!("OUT_DIR"), "/vm.proto.rs"));
+    }
 }
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
