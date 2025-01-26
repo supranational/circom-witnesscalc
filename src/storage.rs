@@ -4,9 +4,11 @@ use ark_ff::{PrimeField};
 use ark_serialize::CanonicalDeserialize;
 use ark_serialize::CanonicalSerialize;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use code_producers::c_elements::InputList;
 use prost::Message;
 use crate::graph::{Operation, TresOperation, UnoOperation};
 use crate::InputSignalsInfo;
+use crate::proto::vm::InputSignalDescription;
 use crate::vm::{Function, Template};
 // format of the wtns.graph file:
 // + magic line: wtns.graph.001
@@ -189,9 +191,18 @@ pub fn serialize_witnesscalc_graph<T: Write>(
 pub fn serialize_witnesscalc_vm(
     mut w: impl Write, main_template_id: usize, templates: &Vec<Template>,
     functions: &Vec<Function>, signals_num: usize, constants: &[Fr],
+    inputs: &InputList,
     // witness_signals: &Vec<usize>,
     // input_signals: &InputSignalsInfo,
 ) -> std::io::Result<()> {
+
+    let inputs_desc = inputs.iter().map(|(name, offset, len)| {
+        crate::proto::vm::InputSignalDescription {
+            name: name.clone(),
+            offset: (*offset) as u64,
+            len: (*len) as u64,
+        }
+    }).collect::<Vec<crate::proto::vm::InputSignalDescription>>();
 
     w.write_all(WITNESSCALC_VM_MAGIC).unwrap();
 
@@ -201,6 +212,7 @@ pub fn serialize_witnesscalc_vm(
         functions_num: functions.len() as u64,
         signals_num: signals_num as u64,
         constants_num: constants.len() as u64,
+        inputs: inputs_desc,
     };
 
     let mut buf = Vec::new();
@@ -299,7 +311,7 @@ fn read_message<R: Read, M: Message + Default>(rw: &mut WriteBackReader<R>) -> s
 }
 
 pub fn deserialize_witnesscalc_vm(
-    mut r: impl Read) -> std::io::Result<(Vec<Template>, Vec<Function>, usize, usize, Vec<Fr>)>{
+    mut r: impl Read) -> std::io::Result<(Vec<Template>, Vec<Function>, usize, usize, Vec<Fr>, Vec<InputSignalDescription>)>{
 
     let mut br = WriteBackReader::new(&mut r);
     let mut magic = [0u8; WITNESSCALC_VM_MAGIC.len()];
@@ -332,7 +344,7 @@ pub fn deserialize_witnesscalc_vm(
         constants.push(c);
     }
 
-    Ok((templates, functions, md.main_template_id as usize, md.signals_num as usize, constants))
+    Ok((templates, functions, md.main_template_id as usize, md.signals_num as usize, constants, md.inputs))
 }
 
 pub fn deserialize_witnesscalc_graph(
@@ -436,7 +448,6 @@ mod tests {
     use crate::graph::{Operation, TresOperation, UnoOperation};
     use core::str::FromStr;
     use byteorder::ByteOrder;
-    use hex::ToHex;
     use super::*;
 
     #[test]

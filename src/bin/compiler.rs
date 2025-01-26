@@ -427,7 +427,8 @@ fn main() {
     let mut f = fs::File::create(&args.vm_out_file).unwrap();
     serialize_witnesscalc_vm(
         &mut f, main_template_id, &compiled_templates, &compiled_functions,
-        sigs_num, &constants).unwrap();
+        sigs_num, &constants,
+        circuit.c_producer.get_main_input_list()).unwrap();
 }
 
 fn get_constants(circuit: &Circuit) -> Vec<Fr> {
@@ -1761,7 +1762,7 @@ fn compile_template(
         name: tmpl_code.name.clone(),
         code,
         line_numbers,
-        components: components,
+        components,
         var_stack_depth: tmpl_code.var_stack_depth,
         number_of_inputs: tmpl_code.number_of_inputs,
     }
@@ -1819,7 +1820,7 @@ impl FnRegistry {
 }
 
 fn compile(
-    templates: &Vec<TemplateCode>,
+    templates: &[TemplateCode],
     functions: &Vec<FunctionCode>,
     constants: &[Fr],
 ) -> (Vec<Template>, Vec<Function>) {
@@ -1921,7 +1922,7 @@ fn disassemble(
 
     let mut ip = 0usize;
     while ip < code.len() {
-        ip = disassemble_instruction(code, line_numbers, ip, &name, functions);
+        ip = disassemble_instruction(code, line_numbers, ip, name, functions);
     }
 }
 

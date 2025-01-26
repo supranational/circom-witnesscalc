@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::env;
+use std::{env};
 use std::fs::File;
 use core::str::FromStr;
 use std::cell::RefCell;
@@ -8,6 +8,7 @@ use std::rc::Rc;
 use std::time::Instant;
 use ark_bn254::Fr;
 use code_producers::c_elements::TemplateInstanceIOMap;
+use circom_witnesscalc::proto::vm;
 use circom_witnesscalc::{Error};
 use circom_witnesscalc::Error::InputsUnmarshal;
 use circom_witnesscalc::storage::deserialize_witnesscalc_vm;
@@ -132,7 +133,7 @@ fn main() {
     let inputs = deserialize_inputs(inputs_data.as_bytes()).unwrap();
     println!("number of input keys {}", inputs.len());
 
-    let (templates, functions, main_template_id, signals_num, constants) = 
+    let (templates, functions, main_template_id, signals_num, constants, inputs_desc) =
         deserialize_witnesscalc_vm(std::io::Cursor::new(vm_data)).unwrap();
 
     let main_component_signals_start = 1;
@@ -148,8 +149,10 @@ fn main() {
     //
     // let witness = graph::evaluate(&nodes, inputs_buffer.as_slice(), &signals);
     //
-    // TODO
-    let mut signals = Vec::with_capacity(signals_num);
+    let mut signals = Vec::new();
+    signals.resize(signals_num, None);
+    init_input_signals(&inputs_desc, &inputs, &mut signals);
+
     // TODO
     let io_map = TemplateInstanceIOMap::new();
     // TODO: pass expected signals
@@ -170,6 +173,33 @@ fn main() {
     }
     //
     // println!("witness saved to {}", &args.witness_file);
+}
+
+fn init_input_signals(
+    inputs_desc: &[vm::InputSignalDescription],
+    inputs: &HashMap<String, Vec<Fr>>,
+    signals: &mut [Option<Fr>],
+) {
+    signals[0] = Some(Fr::from(1u32));
+
+    // let input_list = circuit.c_producer.get_main_input_list();
+    for id in inputs_desc {
+        match inputs.get(&id.name) {
+            Some(values) => {
+                if values.len() != id.len as usize {
+                    panic!(
+                        "input signal {} has different length in inputs file, want {}, actual {}",
+                        id.name, id.len, values.len());
+                }
+                for (i, v) in values.iter().enumerate() {
+                    signals[id.offset as usize + i] = Some(*v);
+                }
+            }
+            None => {
+                panic!("input signal {} is not found in inputs file", id.name);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
