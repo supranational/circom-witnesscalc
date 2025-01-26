@@ -276,7 +276,7 @@ fn read_message_length<R: Read>(rw: &mut WriteBackReader<R>) -> std::io::Result<
     Ok(len_delimiter)
 }
 
-fn read_message<R: Read, M: Message + std::default::Default>(rw: &mut WriteBackReader<R>) -> std::io::Result<M> {
+fn read_message<R: Read, M: Message + Default>(rw: &mut WriteBackReader<R>) -> std::io::Result<M> {
     let ln = read_message_length(rw)?;
     let mut buf = vec![0u8; ln];
     let bytes_read = rw.read(&mut buf)?;
@@ -288,6 +288,37 @@ fn read_message<R: Read, M: Message + std::default::Default>(rw: &mut WriteBackR
     let msg = prost::Message::decode(&buf[..])?;
 
     Ok(msg)
+}
+
+pub fn deserialize_witnesscalc_vm(
+    r: impl Read) -> std::io::Result<(Vec<Template>, Vec<Function>, usize, usize)>{
+
+    let mut br = WriteBackReader::new(r);
+    let mut magic = [0u8; WITNESSCALC_VM_MAGIC.len()];
+
+    br.read_exact(&mut magic)?;
+
+    if !magic.eq(WITNESSCALC_VM_MAGIC) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "vm file does not look like a witnesscalc vm file"));
+    };
+
+    let md: crate::proto::vm::VmMd = read_message(&mut br)?;
+
+    let mut templates: Vec<Template> = Vec::with_capacity(md.templates_num as usize);
+    for _ in 0..md.templates_num {
+        let tmpl: crate::proto::vm::Template = read_message(&mut br)?;
+        templates.push(Template::try_from(&tmpl).unwrap());
+    }
+
+    let mut functions: Vec<Function> = Vec::with_capacity(md.functions_num as usize);
+    for _ in 0..md.functions_num {
+        let func: crate::proto::vm::Function = read_message(&mut br)?;
+        functions.push(Function::try_from(&func).unwrap());
+    }
+
+    Ok((templates, functions, md.main_template_id as usize, md.signals_num as usize))
 }
 
 pub fn deserialize_witnesscalc_graph(

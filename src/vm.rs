@@ -88,10 +88,6 @@ impl TryFrom<&crate::proto::vm::Template> for Template {
             components: vec![],
             var_stack_depth: value.var_stack_depth.try_into()?,
             number_of_inputs: value.number_of_inputs.try_into()?,
-            // line_numbers: value.line_numbers,
-            // components: value.components,
-            // var_stack_depth: value.var_stack_depth,
-            // number_of_inputs: value.number_of_inputs,
         })
     }
 }
@@ -114,6 +110,22 @@ impl TryInto<crate::proto::vm::Function> for &Function {
             line_numbers: self.line_numbers.iter()
                 .map(|x| TryInto::try_into(*x))
                 .collect::<Result<Vec<u64>, TryFromIntError>>()?,
+        })
+    }
+}
+
+impl TryFrom<&crate::proto::vm::Function> for Function {
+    type Error = TryFromIntError;
+
+    fn try_from(value: &crate::proto::vm::Function) -> Result<Self, Self::Error> {
+        Ok(Function{
+            name: value.name.clone(),
+            symbol: value.symbol.clone(),
+            code: value.code.clone(),
+            line_numbers: value.line_numbers
+                .iter()
+                .map(|x| TryInto::<usize>::try_into(*x))
+                .collect::<Result<Vec<usize>, TryFromIntError>>()?,
         })
     }
 }

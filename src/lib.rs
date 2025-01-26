@@ -194,7 +194,6 @@ impl From<ParseError> for Error {
         Error::InputFieldNumberParseError(e)
     }
 }
-
 fn calc_len(vs: &Vec<serde_json::Value>) -> usize {
     let mut len = vs.len();
 
