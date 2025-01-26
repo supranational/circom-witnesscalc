@@ -1149,13 +1149,11 @@ pub fn execute(
 
                     subcmp.number_of_inputs -= sigs_number as usize;
 
-                    let should_call_cmp = match input_status {
+                    match input_status {
                         InputStatus::Last => true,
                         InputStatus::NoLast => false,
                         InputStatus::Unknown => subcmp.number_of_inputs == 0,
-                    };
-
-                    should_call_cmp
+                    }
                 };
 
                 if should_call_cmp {
@@ -1196,7 +1194,7 @@ pub fn execute(
                 let c = vm.stack.pop().unwrap();
                 if c.is_zero() {
                     if offset < 0 {
-                        ip = ip - offset.abs() as usize;
+                        ip -= offset.unsigned_abs() as usize;
                     } else {
                         ip += offset as usize;
                     }
@@ -1206,7 +1204,7 @@ pub fn execute(
                 let offset = read_i32(code, ip);
                 ip += size_of::<i32>();
                 if offset < 0 {
-                    ip = ip - offset.abs() as usize;
+                    ip -= offset.unsigned_abs() as usize;
                 } else {
                     ip += offset as usize;
                 }

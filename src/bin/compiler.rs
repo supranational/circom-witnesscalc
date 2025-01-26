@@ -424,10 +424,10 @@ fn main() {
         }
     }
 
-    let f = fs::File::create(&args.vm_out_file).unwrap();
+    let mut f = fs::File::create(&args.vm_out_file).unwrap();
     serialize_witnesscalc_vm(
-        f, main_template_id, &compiled_templates, &compiled_functions,
-        sigs_num).unwrap();
+        &mut f, main_template_id, &compiled_templates, &compiled_functions,
+        sigs_num, &constants).unwrap();
 }
 
 fn get_constants(circuit: &Circuit) -> Vec<Fr> {

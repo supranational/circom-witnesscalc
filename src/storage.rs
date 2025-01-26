@@ -1,6 +1,8 @@
 use std::io::{Write, Read};
 use ark_bn254::Fr;
 use ark_ff::{PrimeField};
+use ark_serialize::CanonicalDeserialize;
+use ark_serialize::CanonicalSerialize;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use prost::Message;
 use crate::graph::{Operation, TresOperation, UnoOperation};
@@ -135,8 +137,9 @@ impl From<crate::proto::TresOp> for TresOperation {
     }
 }
 
+
 pub fn serialize_witnesscalc_graph<T: Write>(
-    mut w: T, nodes: &Vec<crate::graph::Node>, witness_signals: &Vec<usize>,
+    mut w: T, nodes: &Vec<crate::graph::Node>, witness_signals: &[usize],
     input_signals: &InputSignalsInfo) -> std::io::Result<()> {
 
     let mut ptr = 0usize;
@@ -183,9 +186,9 @@ pub fn serialize_witnesscalc_graph<T: Write>(
     Ok(())
 }
 
-pub fn serialize_witnesscalc_vm<T: Write>(
-    mut w: T, main_template_id: usize, templates: &Vec<Template>,
-    functions: &Vec<Function>, signals_num: usize,
+pub fn serialize_witnesscalc_vm(
+    mut w: impl Write, main_template_id: usize, templates: &Vec<Template>,
+    functions: &Vec<Function>, signals_num: usize, constants: &[Fr],
     // witness_signals: &Vec<usize>,
     // input_signals: &InputSignalsInfo,
 ) -> std::io::Result<()> {
@@ -197,6 +200,7 @@ pub fn serialize_witnesscalc_vm<T: Write>(
         templates_num: templates.len() as u64,
         functions_num: functions.len() as u64,
         signals_num: signals_num as u64,
+        constants_num: constants.len() as u64,
     };
 
     let mut buf = Vec::new();
@@ -218,6 +222,10 @@ pub fn serialize_witnesscalc_vm<T: Write>(
         func_pb.encode_length_delimited(&mut buf)?;
         w.write_all(&buf)?;
         buf.clear();
+    }
+
+    for c in constants {
+        c.serialize_compressed(&mut w).unwrap();
     }
 
     // let metadata = crate::proto::GraphMetadata {
@@ -291,9 +299,9 @@ fn read_message<R: Read, M: Message + Default>(rw: &mut WriteBackReader<R>) -> s
 }
 
 pub fn deserialize_witnesscalc_vm(
-    r: impl Read) -> std::io::Result<(Vec<Template>, Vec<Function>, usize, usize)>{
+    mut r: impl Read) -> std::io::Result<(Vec<Template>, Vec<Function>, usize, usize, Vec<Fr>)>{
 
-    let mut br = WriteBackReader::new(r);
+    let mut br = WriteBackReader::new(&mut r);
     let mut magic = [0u8; WITNESSCALC_VM_MAGIC.len()];
 
     br.read_exact(&mut magic)?;
@@ -318,7 +326,13 @@ pub fn deserialize_witnesscalc_vm(
         functions.push(Function::try_from(&func).unwrap());
     }
 
-    Ok((templates, functions, md.main_template_id as usize, md.signals_num as usize))
+    let mut constants = Vec::with_capacity(md.constants_num as usize);
+    for _ in 0 .. md.constants_num {
+        let c: Fr = Fr::deserialize_compressed(&mut r).unwrap();
+        constants.push(c);
+    }
+
+    Ok((templates, functions, md.main_template_id as usize, md.signals_num as usize, constants))
 }
 
 pub fn deserialize_witnesscalc_graph(
@@ -422,6 +436,7 @@ mod tests {
     use crate::graph::{Operation, TresOperation, UnoOperation};
     use core::str::FromStr;
     use byteorder::ByteOrder;
+    use hex::ToHex;
     use super::*;
 
     #[test]
@@ -573,5 +588,23 @@ mod tests {
         };
 
         assert_eq!(metadata, metadata_want);
+    }
+
+    #[test]
+    fn test_fr_serialize() {
+        // Check that default Fr serializer packs the value in little-endian
+        let want = "000000f093f5e1439170b97948e833285d588181b64550b829a031e1724e6430";
+        let f = Fr::from_str("21888242871839275222246405745257275088548364400416034343698204186575808495616").unwrap();
+
+        let mut buf = Vec::new();
+        f.serialize_compressed(&mut buf).unwrap();
+        assert_eq!(hex::encode(&buf), want);
+
+        let want = "9488010000000000000000000000000000000000000000000000000000000000";
+        let f = Fr::from_str("100500").unwrap();
+
+        buf.clear();
+        f.serialize_compressed(&mut buf).unwrap();
+        assert_eq!(hex::encode(&buf), want);
     }
 }

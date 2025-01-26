@@ -106,7 +106,7 @@ pub fn deserialize_inputs(inputs_data: &[u8]) -> Result<HashMap<String, Vec<Fr>>
                 inputs.insert(k.clone(), vec![i]);
             }
             serde_json::Value::Array(ss) => {
-                let vals: Vec<Fr> = flatten_array(k.as_str(), &ss)?;
+                let vals: Vec<Fr> = flatten_array(k.as_str(), ss)?;
                 inputs.insert(k.clone(), vals);
             }
             _ => {
@@ -132,9 +132,8 @@ fn main() {
     let inputs = deserialize_inputs(inputs_data.as_bytes()).unwrap();
     println!("number of input keys {}", inputs.len());
 
-
-    let (templates, functions, main_template_id, signals_num) =  deserialize_witnesscalc_vm(
-        std::io::Cursor::new(vm_data)).unwrap();
+    let (templates, functions, main_template_id, signals_num, constants) = 
+        deserialize_witnesscalc_vm(std::io::Cursor::new(vm_data)).unwrap();
 
     let main_component_signals_start = 1;
     let main_component = build_component(
@@ -149,8 +148,6 @@ fn main() {
     //
     // let witness = graph::evaluate(&nodes, inputs_buffer.as_slice(), &signals);
     //
-    // TODO
-    let constants = vec![];
     // TODO
     let mut signals = Vec::with_capacity(signals_num);
     // TODO

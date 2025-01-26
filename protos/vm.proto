@@ -8,6 +8,7 @@ message VmMd {
   uint64 templates_num = 2;
   uint64 functions_num = 3;
   uint64 signals_num = 4;
+  uint64 constants_num = 5;
 }
 
 message ComponentTmpl {
