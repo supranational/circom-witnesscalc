@@ -370,7 +370,7 @@ pub fn evaluate(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<U256>
 
     // Evaluate the graph.
     let mut values = Vec::with_capacity(nodes.len());
-    for (_, &node) in nodes.iter().enumerate() {
+    for &node in nodes.iter() {
         let value = match node {
             Node::Constant(c) => Fr::new(c.into()),
             Node::MontConstant(c) => c,
@@ -499,7 +499,7 @@ pub fn tree_shake(nodes: &mut Vec<Node>, outputs: &mut [usize]) {
 }
 
 /// Randomly evaluate the graph
-fn random_eval(nodes: &mut Vec<Node>) -> Vec<U256> {
+fn random_eval(nodes: &mut [Node]) -> Vec<U256> {
     let mut rng = rand::thread_rng();
     let mut values = Vec::with_capacity(nodes.len());
     let mut inputs = HashMap::new();
@@ -676,8 +676,8 @@ fn bit_and(a: Fr, b: Fr) -> Fr {
     let a = a.into_bigint();
     let b = b.into_bigint();
     let mut c: [u64; 4] = [0; 4];
-    for i in 0..4 {
-        c[i] = a.0[i] & b.0[i];
+    for (i, item) in c.iter_mut().enumerate() {
+        *item = a.0[i] & b.0[i];
     }
     let mut d: BigInt<4> = BigInt::new(c);
     if d > Fr::MODULUS {
@@ -691,8 +691,8 @@ fn bit_or(a: Fr, b: Fr) -> Fr {
     let a = a.into_bigint();
     let b = b.into_bigint();
     let mut c: [u64; 4] = [0; 4];
-    for i in 0..4 {
-        c[i] = a.0[i] | b.0[i];
+    for (i, item) in c.iter_mut().enumerate() {
+        *item = a.0[i] | b.0[i];
     }
     let mut d: BigInt<4> = BigInt::new(c);
     if d > Fr::MODULUS {
@@ -706,8 +706,8 @@ fn bit_xor(a: Fr, b: Fr) -> Fr {
     let a = a.into_bigint();
     let b = b.into_bigint();
     let mut c: [u64; 4] = [0; 4];
-    for i in 0..4 {
-        c[i] = a.0[i] ^ b.0[i];
+    for (i, item) in c.iter_mut().enumerate() {
+        *item = a.0[i] ^ b.0[i];
     }
     let mut d: BigInt<4> = BigInt::new(c);
     if d > Fr::MODULUS {

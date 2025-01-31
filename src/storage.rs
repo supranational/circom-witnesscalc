@@ -1,4 +1,3 @@
-use std::collections::{HashMap};
 use std::io::{Write, Read};
 use ark_bn254::Fr;
 use ark_ff::{PrimeField};
@@ -6,11 +5,11 @@ use ark_serialize::CanonicalDeserialize;
 use ark_serialize::CanonicalSerialize;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use code_producers::c_elements::InputList;
-use code_producers::components::TemplateInstanceIOMap;
+use code_producers::components::{TemplateInstanceIOMap};
 use prost::Message;
 use crate::graph::{Operation, TresOperation, UnoOperation};
 use crate::InputSignalsInfo;
-use crate::proto::vm::InputSignalDescription;
+use crate::proto::vm::{InputSignalDescription, IoDef, IoDefs};
 use crate::vm::{Function, Template};
 // format of the wtns.graph file:
 // + magic line: wtns.graph.001
@@ -204,25 +203,58 @@ pub struct CompiledCircuit {
 pub fn serialize_witnesscalc_vm(
     mut w: impl Write, cs: &CompiledCircuit) -> std::io::Result<()> {
 
-    let inputs_desc = cs.inputs.iter().map(|(name, offset, len)| {
-        InputSignalDescription {
-            name: name.clone(),
-            offset: (*offset) as u64,
-            len: (*len) as u64,
-        }
-    }).collect::<Vec<InputSignalDescription>>();
+    let inputs_desc = cs.inputs.iter()
+        .map(|(name, offset, len)| {
+            InputSignalDescription {
+                name: name.clone(),
+                // TODO make u32
+                offset: (*offset) as u64,
+                len: (*len) as u64,
+            }
+        }).collect::<Vec<InputSignalDescription>>();
 
     w.write_all(WITNESSCALC_VM_MAGIC).unwrap();
 
+    let io_map = cs.io_map.iter()
+        .map(|(tmpl_idx, io_list)| {
+            (
+                TryInto::<u32>::try_into(*tmpl_idx)
+                    .expect("io_map template index is too large"),
+                IoDefs{
+                    io_defs: io_list.iter()
+                        .map(|x| IoDef{
+                            code: x.code.try_into()
+                                .expect("signal code is too large"),
+                            offset: x.offset.try_into()
+                                .expect("signal offset is too large"),
+                            lengths: x.lengths.iter()
+                                .map(|l| TryInto::<u32>::try_into(*l)
+                                    .expect("signal length is too large"))
+                                .collect::<Vec<u32>>(),
+                        })
+                        .collect()
+                }
+            )
+        })
+        .collect();
+
     let md = crate::proto::vm::VmMd {
-        main_template_id: cs.main_template_id.try_into().unwrap(),
-        templates_num: cs.templates.len() as u32,
-        functions_num: cs.functions.len() as u32,
-        signals_num: cs.signals_num as u32,
-        constants_num: cs.constants.len() as u32,
+        main_template_id: cs.main_template_id.try_into()
+            .expect("main template id too large"),
+        templates_num: TryInto::<u32>::try_into(cs.templates.len())
+            .expect("too many templates"),
+        functions_num: TryInto::<u32>::try_into(cs.functions.len())
+            .expect("too many functions"),
+        signals_num: TryInto::<u32>::try_into(cs.signals_num)
+            .expect("too many signals"),
+        constants_num: TryInto::<u32>::try_into(cs.constants.len())
+            .expect("too many constants"),
         inputs: inputs_desc,
-        witness_signals: cs.witness_signals.iter().map(|x| *x as u32).collect(),
-        io_map: HashMap::new(), // TODO: fixme
+        witness_signals: cs.witness_signals.iter()
+            .map(|x| TryInto::<u32>::try_into(*x)
+                .expect("witness signal index is too large"))
+            .collect(),
+        io_map,
     };
 
     let mut buf = Vec::new();
