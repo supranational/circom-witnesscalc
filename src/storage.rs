@@ -1,3 +1,4 @@
+use std::collections::{HashMap};
 use std::io::{Write, Read};
 use ark_bn254::Fr;
 use ark_ff::{PrimeField};
@@ -5,6 +6,7 @@ use ark_serialize::CanonicalDeserialize;
 use ark_serialize::CanonicalSerialize;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use code_producers::c_elements::InputList;
+use code_producers::components::TemplateInstanceIOMap;
 use prost::Message;
 use crate::graph::{Operation, TresOperation, UnoOperation};
 use crate::InputSignalsInfo;
@@ -188,31 +190,39 @@ pub fn serialize_witnesscalc_graph<T: Write>(
     Ok(())
 }
 
-pub fn serialize_witnesscalc_vm(
-    mut w: impl Write, main_template_id: usize, templates: &Vec<Template>,
-    functions: &Vec<Function>, signals_num: usize, constants: &[Fr],
-    inputs: &InputList,
-    // witness_signals: &Vec<usize>,
-    // input_signals: &InputSignalsInfo,
-) -> std::io::Result<()> {
+pub struct CompiledCircuit {
+    pub main_template_id: usize,
+    pub templates: Vec<Template>,
+    pub functions: Vec<Function>,
+    pub signals_num: usize,
+    pub constants: Vec<Fr>,
+    pub inputs: InputList,
+    pub witness_signals: Vec<usize>,
+    pub io_map: TemplateInstanceIOMap,
+}
 
-    let inputs_desc = inputs.iter().map(|(name, offset, len)| {
-        crate::proto::vm::InputSignalDescription {
+pub fn serialize_witnesscalc_vm(
+    mut w: impl Write, cs: &CompiledCircuit) -> std::io::Result<()> {
+
+    let inputs_desc = cs.inputs.iter().map(|(name, offset, len)| {
+        InputSignalDescription {
             name: name.clone(),
             offset: (*offset) as u64,
             len: (*len) as u64,
         }
-    }).collect::<Vec<crate::proto::vm::InputSignalDescription>>();
+    }).collect::<Vec<InputSignalDescription>>();
 
     w.write_all(WITNESSCALC_VM_MAGIC).unwrap();
 
     let md = crate::proto::vm::VmMd {
-        main_template_id: main_template_id.try_into().unwrap(),
-        templates_num: templates.len() as u64,
-        functions_num: functions.len() as u64,
-        signals_num: signals_num as u64,
-        constants_num: constants.len() as u64,
+        main_template_id: cs.main_template_id.try_into().unwrap(),
+        templates_num: cs.templates.len() as u32,
+        functions_num: cs.functions.len() as u32,
+        signals_num: cs.signals_num as u32,
+        constants_num: cs.constants.len() as u32,
         inputs: inputs_desc,
+        witness_signals: cs.witness_signals.iter().map(|x| *x as u32).collect(),
+        io_map: HashMap::new(), // TODO: fixme
     };
 
     let mut buf = Vec::new();
@@ -220,7 +230,7 @@ pub fn serialize_witnesscalc_vm(
     w.write_all(&buf)?;
     buf.clear();
 
-    for tmpl in templates {
+    for tmpl in &cs.templates {
         let tmpl_pb: crate::proto::vm::Template = tmpl.try_into().unwrap();
         assert_eq!(buf.len(), 0);
         tmpl_pb.encode_length_delimited(&mut buf)?;
@@ -228,7 +238,7 @@ pub fn serialize_witnesscalc_vm(
         buf.clear();
     }
 
-    for func in functions {
+    for func in &cs.functions {
         let func_pb: crate::proto::vm::Function = func.try_into().unwrap();
         assert_eq!(buf.len(), 0);
         func_pb.encode_length_delimited(&mut buf)?;
@@ -236,7 +246,7 @@ pub fn serialize_witnesscalc_vm(
         buf.clear();
     }
 
-    for c in constants {
+    for c in &cs.constants {
         c.serialize_compressed(&mut w).unwrap();
     }
 

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use core::convert::TryInto;
 use core::str::FromStr;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap};
 use std::fs::File;
 use std::io::Write;
 use std::rc::Rc;
@@ -12,6 +12,7 @@ use ark_bn254::Fr;
 use ark_ff::BigInt;
 use ark_ff::PrimeField;
 use ark_ff::BigInteger;
+use code_producers::components::{IODef, TemplateInstanceIOMap};
 use compiler::circuit_design::function::FunctionCode;
 use compiler::circuit_design::template::TemplateCode;
 use compiler::compiler_interface::{run_compiler, Circuit, Config};
@@ -23,7 +24,7 @@ use type_analysis::check_types::check_types;
 use wtns_file::FieldElement;
 use circom_witnesscalc::{deserialize_inputs};
 use circom_witnesscalc::graph::Operation;
-use circom_witnesscalc::storage::serialize_witnesscalc_vm;
+use circom_witnesscalc::storage::{serialize_witnesscalc_vm, CompiledCircuit};
 use circom_witnesscalc::vm::{build_component, disassemble_instruction, execute, ComponentTmpl, Function, InputStatus, OpCode, Template};
 
 struct Args {
@@ -384,10 +385,31 @@ fn main() {
 
     let sigs_num = circuit.c_producer.get_total_number_of_signals();
 
+    let io_map: TemplateInstanceIOMap = circuit.c_producer.get_io_map().iter()
+        .map(|(k, v)|(*k, v.iter()
+            .map(|x| IODef{
+                code: x.code,
+                offset: x.offset,
+                lengths: x.lengths.clone()
+            })
+            .collect()))
+        .collect();
+
+    let cs: CompiledCircuit = CompiledCircuit {
+        main_template_id,
+        templates: compiled_templates,
+        functions: compiled_functions,
+        signals_num: sigs_num,
+        constants,
+        inputs: circuit.c_producer.get_main_input_list().clone(),
+        witness_signals: witness_list,
+        io_map,
+    };
+
     if let Some(input_file) = args.inputs_file {
 
         let main_component = build_component(
-            &compiled_templates, main_template_id, main_component_signal_start);
+            &cs.templates, main_template_id, main_component_signal_start);
         let main_component = Rc::new(RefCell::new(main_component));
 
         if let Some(ref expected_signals) = args.expected_signals {
@@ -402,14 +424,14 @@ fn main() {
         let start = Instant::now();
         let io_map = circuit.c_producer.get_io_map();
         execute(
-            main_component, &compiled_templates, &compiled_functions,
-            &constants, &mut signals, io_map, args.expected_signals.as_ref());
+            main_component, &cs.templates, &cs.functions,
+            &cs.constants, &mut signals, io_map, args.expected_signals.as_ref());
 
         println!("Execution time: {:?}", start.elapsed());
 
         if let Some(witness_file) = args.witness_file {
-            let mut witness = Vec::with_capacity(witness_list.len());
-            for w in witness_list.iter() {
+            let mut witness = Vec::with_capacity(cs.witness_signals.len());
+            for w in cs.witness_signals.iter() {
                 witness.push(signals[*w].unwrap());
             }
 
@@ -425,10 +447,7 @@ fn main() {
     }
 
     let mut f = fs::File::create(&args.vm_out_file).unwrap();
-    serialize_witnesscalc_vm(
-        &mut f, main_template_id, &compiled_templates, &compiled_functions,
-        sigs_num, &constants,
-        circuit.c_producer.get_main_input_list()).unwrap();
+    serialize_witnesscalc_vm(&mut f, &cs).unwrap();
 }
 
 fn get_constants(circuit: &Circuit) -> Vec<Fr> {
