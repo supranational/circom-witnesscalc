@@ -7,7 +7,7 @@ use std::io::Write;
 use std::rc::Rc;
 use std::time::Instant;
 use ark_bn254::Fr;
-use code_producers::c_elements::{InputList, TemplateInstanceIOMap};
+use code_producers::c_elements::{InputList};
 use circom_witnesscalc::{Error};
 use circom_witnesscalc::Error::InputsUnmarshal;
 use circom_witnesscalc::storage::{deserialize_witnesscalc_vm};
@@ -152,13 +152,25 @@ fn main() {
     signals.resize(cs.signals_num, None);
     init_input_signals(&cs.inputs, &inputs, &mut signals);
 
-    // TODO
-    let io_map = TemplateInstanceIOMap::new();
     // TODO: pass expected signals
     execute(
         main_component, &cs.templates, &cs.functions, &cs.constants,
-        &mut signals, &io_map, None);
+        &mut signals, &cs.io_map, None);
     //
+
+    let mut witness = Vec::with_capacity(cs.witness_signals.len());
+    for w in cs.witness_signals.iter() {
+        witness.push(signals[*w].unwrap());
+    }
+
+    // let wtns_bytes = wtns_from_witness(witness);
+    // 
+    // {
+    //     let mut f = File::create(witness_file).unwrap();
+    //     f.write_all(&wtns_bytes).unwrap();
+    // }
+
+
     // let wtns_bytes = wtns_from_witness(witness);
     // TODO
     let wtns_bytes = vec![];

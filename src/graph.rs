@@ -365,7 +365,7 @@ pub fn optimize(nodes: &mut Vec<Node>, outputs: &mut [usize]) {
     montgomery_form(nodes);
 }
 
-pub fn evaluate(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<U256> {
+pub fn evaluate(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<Fr> {
     // assert_valid(nodes);
 
     // Evaluate the graph.
@@ -381,14 +381,8 @@ pub fn evaluate(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<U256>
         };
         values.push(value);
     }
-
-    // Convert from Montgomery form and return the outputs.
-    let mut out = vec![U256::ZERO; outputs.len()];
-    for i in 0..outputs.len() {
-        out[i] = U256::try_from(values[outputs[i]].into_bigint()).unwrap();
-    }
-
-    out
+    
+    outputs.iter().map(|&i| values[i]).collect()
 }
 
 /// Constant propagation

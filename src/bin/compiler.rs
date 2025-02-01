@@ -11,7 +11,6 @@ use std::time::Instant;
 use ark_bn254::Fr;
 use ark_ff::BigInt;
 use ark_ff::PrimeField;
-use ark_ff::BigInteger;
 use code_producers::components::{IODef, TemplateInstanceIOMap};
 use compiler::circuit_design::function::FunctionCode;
 use compiler::circuit_design::template::TemplateCode;
@@ -21,8 +20,7 @@ use compiler::intermediate_representation::ir_interface::{AddressType, ComputeBu
 use constraint_generation::{build_circuit, BuildConfig};
 use program_structure::error_definition::Report;
 use type_analysis::check_types::check_types;
-use wtns_file::FieldElement;
-use circom_witnesscalc::{deserialize_inputs};
+use circom_witnesscalc::{deserialize_inputs, wtns_from_witness};
 use circom_witnesscalc::graph::Operation;
 use circom_witnesscalc::storage::{serialize_witnesscalc_vm, CompiledCircuit};
 use circom_witnesscalc::vm::{build_component, disassemble_instruction, execute, ComponentTmpl, Function, InputStatus, OpCode, Template};
@@ -1903,26 +1901,6 @@ fn init_input_signals(
             }
         }
     }
-}
-
-fn fr_to_field_element(a: &Fr) -> FieldElement<32> {
-    let x: [u8; 32] = a.into_bigint().to_bytes_le().as_slice().try_into().unwrap();
-    x.into()
-}
-
-
-pub fn wtns_from_witness(witness: Vec<Fr>) -> Vec<u8> {
-    let vec_witness: Vec<FieldElement<32>> = witness.iter().map(fr_to_field_element).collect();
-    let mut buf = Vec::new();
-
-    let m: [u8; 32] = Fr::MODULUS.to_bytes_le().as_slice().try_into().unwrap();
-
-    let mut wtns_f = wtns_file::WtnsFile::from_vec(vec_witness, m.into());
-    wtns_f.version = 2;
-    // We write into the buffer, so we should not have any errors here.
-    // Panic in case of out of memory is fine.
-    wtns_f.write(&mut buf).unwrap();
-    buf
 }
 
 fn bigint_to_u64<const N: usize>(i: BigInt<N>) -> Option<u64> {
