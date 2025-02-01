@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 use std::num::TryFromIntError;
 use std::rc::Rc;
 use std::str::FromStr;
@@ -18,6 +18,7 @@ pub struct Component {
     pub number_of_inputs: usize,
 }
 
+#[cfg_attr(test, derive(Debug))]
 pub struct ComponentTmpl {
     pub symbol: String,
     pub sub_cmp_idx: usize,
@@ -46,6 +47,29 @@ impl TryInto<crate::proto::vm::ComponentTmpl> for &ComponentTmpl {
     }
 }
 
+impl TryFrom<&crate::proto::vm::ComponentTmpl> for ComponentTmpl {
+    type Error = ();
+
+    fn try_from(value: &crate::proto::vm::ComponentTmpl) -> Result<Self, Self::Error> {
+        Ok(ComponentTmpl {
+            symbol: value.symbol.clone(),
+            sub_cmp_idx: value.sub_cmp_idx.try_into()
+                .expect("sub_cmp_idx is too large for this platform"),
+            number_of_cmp: value.number_of_cmp.try_into()
+                .expect("number_of_cmp is too large for this platform"),
+            name_subcomponent: value.name_subcomponent.clone(),
+            signal_offset: value.signal_offset.try_into()
+                .expect("signal_offset is too large for this platform"),
+            signal_offset_jump: value.signal_offset_jump.try_into()
+                .expect("signal_offset_jump is too large for this platform"),
+            template_id: value.template_id.try_into()
+                .expect("template_id is too large for this platform"),
+            has_inputs: value.has_inputs,
+        })
+    }
+}
+
+#[cfg_attr(test, derive(Debug))]
 pub struct Template {
     pub name: String,
     pub code: Vec<u8>,
@@ -85,13 +109,16 @@ impl TryFrom<&crate::proto::vm::Template> for Template {
                 .iter()
                 .map(|x| TryInto::<usize>::try_into(*x))
                 .collect::<Result<Vec<usize>, TryFromIntError>>()?,
-            components: vec![],
+            components: value.components.iter()
+                .map(|x| ComponentTmpl::try_from(x).unwrap())
+                .collect::<Vec<ComponentTmpl>>(),
             var_stack_depth: value.var_stack_depth.try_into()?,
             number_of_inputs: value.number_of_inputs.try_into()?,
         })
     }
 }
 
+#[cfg_attr(test, derive(Debug))]
 pub struct Function {
     pub name: String,
     pub symbol: String,
@@ -740,6 +767,17 @@ pub fn build_component(
         number_of_inputs: compiled_templates[template_id].number_of_inputs,
     }
 }
+
+// pub fn print_component_tree(c: &Component, indent: usize, templates: &[Template]) {
+//     if indent == 0 {
+//         println!("Component tree:");
+//     }
+//     let indent_str = " ".repeat(indent);
+//     println!("{}{}", indent_str, templates[c.template_id].name);
+//     for sc in &c.subcomponents {
+//         print_component_tree(&sc.borrow(), indent + 2, templates);
+//     }
+// }
 
 pub fn execute(
     component: Rc<RefCell<Component>>, templates: &Vec<Template>,

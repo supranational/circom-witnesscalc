@@ -52,7 +52,7 @@ function test_circuit() {
 		echo -e "${RED}Inputs file not found at $inputs_path${NC}"
 		exit 1
 	fi
-	local circuit_graph_path="${workdir}/${circuit_name}_graph.bin"
+	local circuit_bytecode_path="${workdir}/${circuit_name}_bc.wcd"
 	local witness_path="${workdir}/${circuit_name}.wtns"
 	local proof_path="${workdir}/${circuit_name}_proof.json"
 	local public_signals_path="${workdir}/${circuit_name}_public.json"
@@ -60,7 +60,12 @@ function test_circuit() {
 	
 	# run commands from the project directory
 	pushd "${script_dir}" > /dev/null
-	time target/release/compiler "$circuit_path" "$circuit_graph_path" -l "$circomlib_path" -i "$inputs_path" -wtns "$witness_path"
+
+#	time target/release/compiler "$circuit_path" "$circuit_bytecode_path" -l "$circomlib_path" -i "$inputs_path" -wtns "$witness_path"
+
+	time target/release/compiler "$circuit_path" "$circuit_bytecode_path"
+	time target/release/calc-witness-vm "$circuit_bytecode_path" "$inputs_path" "$witness_path"
+
 	popd > /dev/null
 	
 	# run commands from the working directory

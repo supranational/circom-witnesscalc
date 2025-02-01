@@ -138,7 +138,9 @@ fn main() {
     let start = Instant::now();
     let cs =
         deserialize_witnesscalc_vm(std::io::Cursor::new(&vm_data)).unwrap();
-    println!("VM file read and parsed in {:?}.", start.elapsed());
+    println!(
+        "VM file read and parsed in {:?}. Templates: {}, functions: {}.",
+        start.elapsed(), cs.templates.len(), cs.functions.len());
 
     let start = Instant::now();
     let main_component_signals_start = 1;

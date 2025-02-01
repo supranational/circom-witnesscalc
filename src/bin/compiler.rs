@@ -420,10 +420,9 @@ fn main() {
 
         println!("Run VM");
         let start = Instant::now();
-        let io_map = circuit.c_producer.get_io_map();
         execute(
             main_component, &cs.templates, &cs.functions,
-            &cs.constants, &mut signals, io_map, args.expected_signals.as_ref());
+            &cs.constants, &mut signals, &cs.io_map, args.expected_signals.as_ref());
 
         println!("Execution time: {:?}", start.elapsed());
 
