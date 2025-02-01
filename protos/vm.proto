@@ -1,12 +1,8 @@
 syntax = "proto3";
 
-package vm.proto;
+package circom_witnesscalc.proto.vm;
 
-message InputSignalDescription {
-  string name = 1;
-  uint64 offset = 2;
-  uint64 len = 3;
-}
+import "protos/messages.proto";
 
 // Virtual Machine metadata
 message VmMd {
@@ -15,7 +11,7 @@ message VmMd {
   uint32 functions_num = 3;
   uint32 signals_num = 4;
   uint32 constants_num = 5;
-  repeated InputSignalDescription inputs = 6;
+  map<string, SignalDescription> inputs = 9;
   repeated uint32 witness_signals = 7;
   map<uint32, IoDefs> io_map = 8;
 }

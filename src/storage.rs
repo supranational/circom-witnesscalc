@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{Write, Read};
 use ark_bn254::Fr;
 use ark_ff::{PrimeField};
@@ -5,11 +6,12 @@ use ark_serialize::CanonicalDeserialize;
 use ark_serialize::CanonicalSerialize;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use code_producers::c_elements::InputList;
-use code_producers::components::{TemplateInstanceIOMap};
+use code_producers::components::{IODef, TemplateInstanceIOMap};
 use prost::Message;
 use crate::graph::{Operation, TresOperation, UnoOperation};
 use crate::InputSignalsInfo;
-use crate::proto::vm::{InputSignalDescription, IoDef, IoDefs};
+use crate::proto::SignalDescription;
+use crate::proto::vm::{IoDef, IoDefs};
 use crate::vm::{Function, Template};
 // format of the wtns.graph file:
 // + magic line: wtns.graph.001
@@ -205,13 +207,16 @@ pub fn serialize_witnesscalc_vm(
 
     let inputs_desc = cs.inputs.iter()
         .map(|(name, offset, len)| {
-            InputSignalDescription {
-                name: name.clone(),
-                // TODO make u32
-                offset: (*offset) as u64,
-                len: (*len) as u64,
-            }
-        }).collect::<Vec<InputSignalDescription>>();
+            (
+                name.clone(),
+                SignalDescription {
+                    offset: TryInto::<u32>::try_into(*offset)
+                        .expect("signal offset is too large"),
+                    len: TryInto::<u32>::try_into(*len)
+                        .expect("signals length is too large"),
+                },
+            )
+        }).collect::<HashMap<String, SignalDescription>>();
 
     w.write_all(WITNESSCALC_VM_MAGIC).unwrap();
 
@@ -353,7 +358,7 @@ fn read_message<R: Read, M: Message + Default>(rw: &mut WriteBackReader<R>) -> s
 }
 
 pub fn deserialize_witnesscalc_vm(
-    mut r: impl Read) -> std::io::Result<(Vec<Template>, Vec<Function>, usize, usize, Vec<Fr>, Vec<InputSignalDescription>)>{
+    mut r: impl Read) -> std::io::Result<CompiledCircuit>{
 
     let mut br = WriteBackReader::new(&mut r);
     let mut magic = [0u8; WITNESSCALC_VM_MAGIC.len()];
@@ -386,7 +391,47 @@ pub fn deserialize_witnesscalc_vm(
         constants.push(c);
     }
 
-    Ok((templates, functions, md.main_template_id as usize, md.signals_num as usize, constants, md.inputs))
+    Ok(CompiledCircuit{
+        main_template_id: md.main_template_id.try_into()
+            .expect("main template id too large for this architecture"),
+        templates,
+        functions,
+        signals_num: md.signals_num.try_into()
+            .expect("signals number too large for this architecture"),
+        constants,
+        inputs: md.inputs.iter()
+            .map(|(sig_name, sig_desc)| (
+                sig_name.clone(),
+                TryInto::<usize>::try_into(sig_desc.offset)
+                    .expect("signal offset is too large for this architecture"),
+                TryInto::<usize>::try_into(sig_desc.len)
+                    .expect("signals length is too large for this architecture"),
+            ))
+            .collect(),
+        witness_signals: md.witness_signals.iter()
+            .map(|x| TryInto::<usize>::try_into(*x)
+                .expect("witness signal index is too large for this architecture"))
+            .collect(),
+        io_map: md.io_map
+            .iter()
+            .map(|(tmpl_id, io_defs)| (
+                TryInto::<usize>::try_into(*tmpl_id)
+                    .expect("template index is too large for this architecture"),
+                io_defs.io_defs.iter()
+                    .map(|d| IODef {
+                        code: d.code.try_into()
+                            .expect("signal code is too large for this architecture"),
+                        offset: d.offset.try_into()
+                            .expect("signal offset is too large for this architecture"),
+                        lengths: d.lengths.iter()
+                            .map(|l| TryInto::<usize>::try_into(*l)
+                                .expect("signal length is too large for this architecture"))
+                            .collect(),
+                    })
+                    .collect(),
+            ))
+            .collect(),
+    })
 }
 
 pub fn deserialize_witnesscalc_graph(

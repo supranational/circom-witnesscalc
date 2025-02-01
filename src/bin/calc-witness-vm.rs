@@ -7,11 +7,10 @@ use std::io::Write;
 use std::rc::Rc;
 use std::time::Instant;
 use ark_bn254::Fr;
-use code_producers::c_elements::TemplateInstanceIOMap;
-use circom_witnesscalc::proto::vm;
+use code_producers::c_elements::{InputList, TemplateInstanceIOMap};
 use circom_witnesscalc::{Error};
 use circom_witnesscalc::Error::InputsUnmarshal;
-use circom_witnesscalc::storage::deserialize_witnesscalc_vm;
+use circom_witnesscalc::storage::{deserialize_witnesscalc_vm};
 use circom_witnesscalc::vm::{build_component, execute};
 
 struct Args {
@@ -133,12 +132,12 @@ fn main() {
     let inputs = deserialize_inputs(inputs_data.as_bytes()).unwrap();
     println!("number of input keys {}", inputs.len());
 
-    let (templates, functions, main_template_id, signals_num, constants, inputs_desc) =
-        deserialize_witnesscalc_vm(std::io::Cursor::new(vm_data)).unwrap();
+    let cs =
+        deserialize_witnesscalc_vm(std::io::Cursor::new(&vm_data)).unwrap();
 
     let main_component_signals_start = 1;
     let main_component = build_component(
-        &templates, main_template_id, main_component_signals_start);
+        &cs.templates, cs.main_template_id, main_component_signals_start);
     let main_component = Rc::new(RefCell::new(main_component));
 
     // let (nodes, signals, input_mapping): (Vec<Node>, Vec<usize>, InputSignalsInfo) =
@@ -150,15 +149,15 @@ fn main() {
     // let witness = graph::evaluate(&nodes, inputs_buffer.as_slice(), &signals);
     //
     let mut signals = Vec::new();
-    signals.resize(signals_num, None);
-    init_input_signals(&inputs_desc, &inputs, &mut signals);
+    signals.resize(cs.signals_num, None);
+    init_input_signals(&cs.inputs, &inputs, &mut signals);
 
     // TODO
     let io_map = TemplateInstanceIOMap::new();
     // TODO: pass expected signals
     execute(
-        main_component, &templates, &functions, &constants, &mut signals,
-        &io_map, None);
+        main_component, &cs.templates, &cs.functions, &cs.constants,
+        &mut signals, &io_map, None);
     //
     // let wtns_bytes = wtns_from_witness(witness);
     // TODO
@@ -176,27 +175,26 @@ fn main() {
 }
 
 fn init_input_signals(
-    inputs_desc: &[vm::InputSignalDescription],
+    inputs_desc: &InputList,
     inputs: &HashMap<String, Vec<Fr>>,
     signals: &mut [Option<Fr>],
 ) {
     signals[0] = Some(Fr::from(1u32));
 
-    // let input_list = circuit.c_producer.get_main_input_list();
-    for id in inputs_desc {
-        match inputs.get(&id.name) {
+    for (name, offset, len) in inputs_desc {
+        match inputs.get(name) {
             Some(values) => {
-                if values.len() != id.len as usize {
+                if values.len() != *len {
                     panic!(
                         "input signal {} has different length in inputs file, want {}, actual {}",
-                        id.name, id.len, values.len());
+                        name, len, values.len());
                 }
                 for (i, v) in values.iter().enumerate() {
-                    signals[id.offset as usize + i] = Some(*v);
+                    signals[*offset + i] = Some(*v);
                 }
             }
             None => {
-                panic!("input signal {} is not found in inputs file", id.name);
+                panic!("input signal {} is not found in inputs file", name);
             }
         }
     }
