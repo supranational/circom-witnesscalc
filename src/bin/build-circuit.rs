@@ -2430,8 +2430,6 @@ fn store_subcomponent_signals(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_calc_const_expression() {
         println!("OK");

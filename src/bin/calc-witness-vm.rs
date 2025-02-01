@@ -8,7 +8,7 @@ use std::rc::Rc;
 use std::time::Instant;
 use ark_bn254::Fr;
 use code_producers::c_elements::{InputList};
-use circom_witnesscalc::{Error};
+use circom_witnesscalc::{wtns_from_witness, Error};
 use circom_witnesscalc::Error::InputsUnmarshal;
 use circom_witnesscalc::storage::{deserialize_witnesscalc_vm};
 use circom_witnesscalc::vm::{build_component, execute};
@@ -127,63 +127,57 @@ fn main() {
 
     let vm_data = std::fs::read(&args.vm_file).expect("Failed to read vm file");
 
+    let start0 = Instant::now();
+
     let start = Instant::now();
 
     let inputs = deserialize_inputs(inputs_data.as_bytes()).unwrap();
-    println!("number of input keys {}", inputs.len());
+    println!("Inputs loaded in {:?}, number of input keys {}.", start.elapsed(), inputs.len());
 
+
+    let start = Instant::now();
     let cs =
         deserialize_witnesscalc_vm(std::io::Cursor::new(&vm_data)).unwrap();
+    println!("VM file read and parsed in {:?}.", start.elapsed());
 
+    let start = Instant::now();
     let main_component_signals_start = 1;
     let main_component = build_component(
         &cs.templates, cs.main_template_id, main_component_signals_start);
     let main_component = Rc::new(RefCell::new(main_component));
+    println!("Component tree built in {:?}.", start.elapsed());
 
-    // let (nodes, signals, input_mapping): (Vec<Node>, Vec<usize>, InputSignalsInfo) =
-    //     deserialize_witnesscalc_graph(std::io::Cursor::new(graph_data)).unwrap();
-    //
-    // let mut inputs_buffer = get_inputs_buffer(get_inputs_size(&nodes));
-    // populate_inputs(&inputs, &input_mapping, &mut inputs_buffer);
-    //
-    // let witness = graph::evaluate(&nodes, inputs_buffer.as_slice(), &signals);
-    //
+    let start = Instant::now();
     let mut signals = Vec::new();
     signals.resize(cs.signals_num, None);
     init_input_signals(&cs.inputs, &inputs, &mut signals);
+    println!("Signals initialized in {:?}.", start.elapsed());
 
+    let start = Instant::now();
     // TODO: pass expected signals
     execute(
         main_component, &cs.templates, &cs.functions, &cs.constants,
         &mut signals, &cs.io_map, None);
+    println!("VM execution done in {:?}.", start.elapsed());
     //
+
+    let start = Instant::now();
 
     let mut witness = Vec::with_capacity(cs.witness_signals.len());
     for w in cs.witness_signals.iter() {
         witness.push(signals[*w].unwrap());
     }
 
-    // let wtns_bytes = wtns_from_witness(witness);
-    // 
-    // {
-    //     let mut f = File::create(witness_file).unwrap();
-    //     f.write_all(&wtns_bytes).unwrap();
-    // }
+    let wtns_bytes = wtns_from_witness(witness);
 
-
-    // let wtns_bytes = wtns_from_witness(witness);
-    // TODO
-    let wtns_bytes = vec![];
-    //
-    let duration = start.elapsed();
-    println!("Witness generated in: {:?}", duration);
-    //
     {
         let mut f = File::create(&args.witness_file).unwrap();
         f.write_all(&wtns_bytes).unwrap();
     }
-    //
-    // println!("witness saved to {}", &args.witness_file);
+
+    println!("Witness created from signals in {:?}", start.elapsed());
+
+    println!("Total time {:?}", start0.elapsed());
 }
 
 fn init_input_signals(

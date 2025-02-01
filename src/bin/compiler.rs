@@ -1937,6 +1937,7 @@ fn mk_flags(input_status: InputStatus, is_mapped_signal_idx: bool) -> u8 {
 mod tests {
     use std::collections::{BTreeMap};
     use ark_ff::BigInteger256;
+    use ark_ff::BigInteger;
     use compiler::intermediate_representation::ir_interface::{InstrContext, StoreBucket, ValueBucket};
     use circom_witnesscalc::vm::{execute, Component};
     use super::*;
@@ -1986,6 +1987,7 @@ mod tests {
             value: 42,
         }));
         let val: u64 = assert_u64_value(&inst);
+        assert_eq!(val, 42);
     }
 
     #[test]
@@ -2374,9 +2376,6 @@ STORE(
         println!("{}", B::NUM_LIMBS);
 
         let x = B::from(3u32);
-        let y = B::from(5u32);
-        let x2: Fr = x.try_into().unwrap();
-        let y2: Fr = y.try_into().unwrap();
         println!("{:?}", x.to_bytes_le());
     }
 
@@ -2431,7 +2430,6 @@ STORE(
     // TODO: useless test for printing purposes. Maybe remove it.
     #[test]
     fn test_set_variable() {
-        let noop = OpCode::NoOp as u8;
         let code = vec![
             OpCode::Push8 as u8, 0, 0, 0, 0, 0, 0, 0, 0,
             OpCode::JumpIfFalse as u8, 9*2, 0x00, 0x00, 0x00,
