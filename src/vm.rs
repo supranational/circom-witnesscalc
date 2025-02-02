@@ -8,6 +8,7 @@ use ark_bn254::Fr;
 use ark_ff::{BigInt, One, PrimeField, Zero};
 use code_producers::c_elements::TemplateInstanceIOMap;
 use compiler::intermediate_representation::ir_interface::StatusInput;
+use lazy_static::lazy_static;
 use crate::graph::{Operation, UnoOperation};
 
 pub struct Component {
@@ -716,10 +717,16 @@ fn calc_mapped_signal_idx(
     sig_idx
 }
 
+lazy_static! {
+    static ref half_m: Fr = {
+        Fr::from_str("10944121435919637611123202872628637544274182200208017171849102093287904247808").unwrap()
+    };
+}
+
+
 pub fn u_lt(a: &Fr, b: &Fr) -> Fr {
-    let half_m = Fr::from_str("10944121435919637611123202872628637544274182200208017171849102093287904247808").unwrap();
-    let a_neg = &half_m < a;
-    let b_neg = &half_m < b;
+    let a_neg = &(*half_m) < a;
+    let b_neg = &(*half_m) < b;
 
     match (a_neg, b_neg) {
         (false, false) => Fr::from(a < b),
