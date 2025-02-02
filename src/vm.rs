@@ -716,7 +716,7 @@ fn calc_mapped_signal_idx(
     sig_idx
 }
 
-fn u_lt(a: &Fr, b: &Fr) -> Fr {
+pub fn u_lt(a: &Fr, b: &Fr) -> Fr {
     let half_m = Fr::from_str("10944121435919637611123202872628637544274182200208017171849102093287904247808").unwrap();
     let a_neg = &half_m < a;
     let b_neg = &half_m < b;

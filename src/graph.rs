@@ -112,12 +112,14 @@ impl Operation {
             Idiv => if b.is_zero() {
                 Fr::zero()
             } else {
-                Fr::new((Into::<U256>::into(a) / Into::<U256>::into(b)).into())
+                let x = fr_to_u256(&a) / fr_to_u256(&b);
+                u256_to_fr(&x)
             },
             Mod => if b.is_zero() {
                 Fr::zero()
             } else {
-                Fr::new((Into::<U256>::into(a) % Into::<U256>::into(b)).into())
+                let x = fr_to_u256(&a) % fr_to_u256(&b);
+                u256_to_fr(&x)
             },
             Eq => match a.cmp(&b) {
                 Ordering::Equal => Fr::one(),
@@ -127,10 +129,10 @@ impl Operation {
                 Ordering::Equal => Fr::zero(),
                 _ => Fr::one(),
             },
-            Lt => Fr::new(u_lt(&a.into(), &b.into()).into()),
-            Gt => Fr::new(u_gt(&a.into(), &b.into()).into()),
-            Leq => Fr::new(u_lte(&a.into(), &b.into()).into()),
-            Geq => Fr::new(u_gte(&a.into(), &b.into()).into()),
+            Lt => crate::vm::u_lt(&a, &b),
+            Gt => u256_to_fr(&u_gt(&fr_to_u256(&a), &fr_to_u256(&b))),
+            Leq => u256_to_fr(&u_lte(&fr_to_u256(&a), &fr_to_u256(&b))),
+            Geq => u256_to_fr(&u_gte(&fr_to_u256(&a), &fr_to_u256(&b))),
             Land => if a.is_zero() || b.is_zero() { Fr::zero() } else { Fr::one() },
             Lor => if a.is_zero() && b.is_zero() { Fr::zero() } else { Fr::one() },
             Shl => shl(a, b),
@@ -372,16 +374,16 @@ pub fn evaluate(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<Fr> {
     let mut values = Vec::with_capacity(nodes.len());
     for &node in nodes.iter() {
         let value = match node {
-            Node::Constant(c) => Fr::new(c.into()),
+            Node::Constant(c) => u256_to_fr(&c),
             Node::MontConstant(c) => c,
-            Node::Input(i) => Fr::new(inputs[i].into()),
+            Node::Input(i) => u256_to_fr(&inputs[i]),
             Node::Op(op, a, b) => op.eval_fr(values[a], values[b]),
             Node::UnoOp(op, a) => op.eval_fr(values[a]),
             Node::TresOp(op, a, b, c) => op.eval_fr(values[a], values[b], values[c]),
         };
         values.push(value);
     }
-    
+
     outputs.iter().map(|&i| values[i]).collect()
 }
 
@@ -600,7 +602,7 @@ pub fn montgomery_form(nodes: &mut [Node]) {
         use Node::*;
         use Operation::*;
         match node {
-            Constant(c) => *node = MontConstant(Fr::new((*c).into())),
+            Constant(c) => *node = MontConstant(u256_to_fr(c)),
             MontConstant(..) => (),
             Input(..) => (),
             Op(Mul | Div | Add | Sub | Idiv | Mod | Eq | Neq | Lt | Gt | Leq | Geq | Land | Lor | Shl | Shr | Bor | Band | Bxor , ..) => (),
@@ -623,10 +625,7 @@ fn shl(a: Fr, b: Fr) -> Fr {
     }
 
     let n = b.into_bigint().0[0] as u32;
-
-    let mut a = a.into_bigint();
-    a.muln(n);
-    Fr::from_bigint(a).unwrap()
+    Fr::from_bigint(a.into_bigint() << n).unwrap()
 }
 
 fn shr(a: Fr, b: Fr) -> Fr {
@@ -763,6 +762,13 @@ fn u_lt(a: &U256, b: &U256) -> U256 {
     }
 }
 
+fn fr_to_u256(x: &Fr) -> U256 {
+    U256::from_limbs(x.into_bigint().0)
+}
+
+fn u256_to_fr(x: &U256) -> Fr {
+    Fr::from_bigint(BigInt::new(x.into_limbs())).unwrap()
+}
 
 #[cfg(test)]
 mod tests {
