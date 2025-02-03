@@ -365,12 +365,12 @@ pub fn optimize(nodes: &mut Vec<Node>, outputs: &mut [usize]) {
     montgomery_form(nodes);
 }
 
-pub fn evaluate(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<U256> {
+pub fn evaluate(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<Fr> {
     // assert_valid(nodes);
 
     // Evaluate the graph.
     let mut values = Vec::with_capacity(nodes.len());
-    for (_, &node) in nodes.iter().enumerate() {
+    for &node in nodes.iter() {
         let value = match node {
             Node::Constant(c) => Fr::new(c.into()),
             Node::MontConstant(c) => c,
@@ -381,14 +381,8 @@ pub fn evaluate(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<U256>
         };
         values.push(value);
     }
-
-    // Convert from Montgomery form and return the outputs.
-    let mut out = vec![U256::ZERO; outputs.len()];
-    for i in 0..outputs.len() {
-        out[i] = U256::try_from(values[outputs[i]].into_bigint()).unwrap();
-    }
-
-    out
+    
+    outputs.iter().map(|&i| values[i]).collect()
 }
 
 /// Constant propagation
@@ -499,7 +493,7 @@ pub fn tree_shake(nodes: &mut Vec<Node>, outputs: &mut [usize]) {
 }
 
 /// Randomly evaluate the graph
-fn random_eval(nodes: &mut Vec<Node>) -> Vec<U256> {
+fn random_eval(nodes: &mut [Node]) -> Vec<U256> {
     let mut rng = rand::thread_rng();
     let mut values = Vec::with_capacity(nodes.len());
     let mut inputs = HashMap::new();
@@ -632,7 +626,7 @@ fn shl(a: Fr, b: Fr) -> Fr {
 
     let mut a = a.into_bigint();
     a.muln(n);
-    return Fr::from_bigint(a).unwrap();
+    Fr::from_bigint(a).unwrap()
 }
 
 fn shr(a: Fr, b: Fr) -> Fr {
@@ -676,8 +670,8 @@ fn bit_and(a: Fr, b: Fr) -> Fr {
     let a = a.into_bigint();
     let b = b.into_bigint();
     let mut c: [u64; 4] = [0; 4];
-    for i in 0..4 {
-        c[i] = a.0[i] & b.0[i];
+    for (i, item) in c.iter_mut().enumerate() {
+        *item = a.0[i] & b.0[i];
     }
     let mut d: BigInt<4> = BigInt::new(c);
     if d > Fr::MODULUS {
@@ -691,8 +685,8 @@ fn bit_or(a: Fr, b: Fr) -> Fr {
     let a = a.into_bigint();
     let b = b.into_bigint();
     let mut c: [u64; 4] = [0; 4];
-    for i in 0..4 {
-        c[i] = a.0[i] | b.0[i];
+    for (i, item) in c.iter_mut().enumerate() {
+        *item = a.0[i] | b.0[i];
     }
     let mut d: BigInt<4> = BigInt::new(c);
     if d > Fr::MODULUS {
@@ -706,8 +700,8 @@ fn bit_xor(a: Fr, b: Fr) -> Fr {
     let a = a.into_bigint();
     let b = b.into_bigint();
     let mut c: [u64; 4] = [0; 4];
-    for i in 0..4 {
-        c[i] = a.0[i] ^ b.0[i];
+    for (i, item) in c.iter_mut().enumerate() {
+        *item = a.0[i] ^ b.0[i];
     }
     let mut d: BigInt<4> = BigInt::new(c);
     if d > Fr::MODULUS {

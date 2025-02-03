@@ -27,7 +27,10 @@ fn main() -> Result<()> {
 
     // Generate protobuf bindings
     let empty_array: &[&Path] = &[];
+    println!("cargo:rerun-if-changed=protos/messages.proto");
     prost_build::compile_protos(&["protos/messages.proto"], empty_array)?;
+    println!("cargo:rerun-if-changed=protos/vm.proto");
+    prost_build::compile_protos(&["protos/vm.proto"], empty_array)?;
 
     // println!("cargo:rustc-link-arg=-Wl,-soname,libcircom_witnesscalc.so");
 

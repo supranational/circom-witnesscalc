@@ -5,6 +5,7 @@
 mod field;
 pub mod graph;
 pub mod storage;
+pub mod vm;
 
 use std::collections::HashMap;
 use std::ffi::{c_void, c_char, c_int, CStr};
@@ -13,13 +14,18 @@ use ruint::aliases::U256;
 use ruint::ParseError;
 use crate::graph::Node;
 use wtns_file::FieldElement;
-use crate::field::M;
 use crate::storage::deserialize_witnesscalc_graph;
+use ark_bn254::Fr;
+use ark_ff::{BigInteger, PrimeField};
 
 pub type InputSignalsInfo = HashMap<String, (usize, usize)>;
 
 pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/circom_witnesscalc.proto.rs"));
+
+    pub mod vm {
+        include!(concat!(env!("OUT_DIR"), "/circom_witnesscalc.proto.vm.rs"));
+    }
 }
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
@@ -109,10 +115,14 @@ pub unsafe extern "C" fn gw_calc_witness(
 }
 
 // create a wtns file bytes from witness (array of field elements)
-pub fn wtns_from_witness(witness: Vec<U256>) -> Vec<u8> {
-    let vec_witness: Vec<FieldElement<32>> = witness.iter().map(u256_to_field_element).collect();
+pub fn wtns_from_witness(witness: Vec<Fr>) -> Vec<u8> {
+    let vec_witness: Vec<FieldElement<32>> = witness
+        .iter()
+        .map(|a| TryInto::<[u8; 32]>::try_into(a.into_bigint().to_bytes_le().as_slice()).unwrap().into())
+        .collect();
     let mut buf = Vec::new();
-    let mut wtns_f = wtns_file::WtnsFile::from_vec(vec_witness, u256_to_field_element(&M));
+    let m: [u8; 32] = Fr::MODULUS.to_bytes_le().as_slice().try_into().unwrap();
+    let mut wtns_f = wtns_file::WtnsFile::from_vec(vec_witness, m.into());
     wtns_f.version = 2;
     // We write into the buffer, so we should not have any errors here.
     // Panic in case of out of memory is fine.
@@ -120,7 +130,7 @@ pub fn wtns_from_witness(witness: Vec<U256>) -> Vec<u8> {
     buf
 }
 
-pub fn calc_witness(inputs: &str, graph_data: &[u8]) -> Result<Vec<U256>, Error> {
+pub fn calc_witness(inputs: &str, graph_data: &[u8]) -> Result<Vec<Fr>, Error> {
 
     let inputs = deserialize_inputs(inputs.as_bytes())?;
 
@@ -165,12 +175,6 @@ fn populate_inputs(
     }
 }
 
-fn u256_to_field_element(a: &U256) -> FieldElement<32> {
-    let x: [u8; 32] = a.as_le_slice().try_into().unwrap();
-    x.into()
-}
-
-
 /// Allocates inputs vec with position 0 set to 1
 fn get_inputs_buffer(size: usize) -> Vec<U256> {
     let mut inputs = vec![U256::ZERO; size];
@@ -189,7 +193,6 @@ impl From<ParseError> for Error {
         Error::InputFieldNumberParseError(e)
     }
 }
-
 fn calc_len(vs: &Vec<serde_json::Value>) -> usize {
     let mut len = vs.len();
 

@@ -1,11 +1,20 @@
+use std::collections::HashMap;
+#[cfg(test)]
+use std::fmt::{Debug, Formatter};
 use std::io::{Write, Read};
 use ark_bn254::Fr;
 use ark_ff::{PrimeField};
+use ark_serialize::CanonicalDeserialize;
+use ark_serialize::CanonicalSerialize;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use code_producers::c_elements::InputList;
+use code_producers::components::{IODef, TemplateInstanceIOMap};
 use prost::Message;
 use crate::graph::{Operation, TresOperation, UnoOperation};
 use crate::InputSignalsInfo;
-
+use crate::proto::SignalDescription;
+use crate::proto::vm::{IoDef, IoDefs};
+use crate::vm::{Function, Template};
 // format of the wtns.graph file:
 // + magic line: wtns.graph.001
 // + 4 bytes unsigned LE 32-bit integer: number of nodes
@@ -14,6 +23,7 @@ use crate::InputSignalsInfo;
 // + 8 bytes unsigned LE 64-bit integer: offset of GraphMetadata message
 
 const WITNESSCALC_GRAPH_MAGIC: &[u8] = b"wtns.graph.001";
+const WITNESSCALC_VM_MAGIC: &[u8] = b"wtns.vm.001";
 
 const MAX_VARINT_LENGTH: usize = 10;
 
@@ -134,8 +144,9 @@ impl From<crate::proto::TresOp> for TresOperation {
     }
 }
 
+
 pub fn serialize_witnesscalc_graph<T: Write>(
-    mut w: T, nodes: &Vec<crate::graph::Node>, witness_signals: &Vec<usize>,
+    mut w: T, nodes: &Vec<crate::graph::Node>, witness_signals: &[usize],
     input_signals: &InputSignalsInfo) -> std::io::Result<()> {
 
     let mut ptr = 0usize;
@@ -182,6 +193,131 @@ pub fn serialize_witnesscalc_graph<T: Write>(
     Ok(())
 }
 
+pub struct CompiledCircuit {
+    pub main_template_id: usize,
+    pub templates: Vec<Template>,
+    pub functions: Vec<Function>,
+    pub signals_num: usize,
+    pub constants: Vec<Fr>,
+    pub inputs: InputList,
+    pub witness_signals: Vec<usize>,
+    pub io_map: TemplateInstanceIOMap,
+}
+
+#[cfg(test)]
+impl Debug for CompiledCircuit {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledCircuit")
+            .field("main_template_id", &self.main_template_id)
+            .field("templates", &self.templates)
+            .field("functions", &self.functions)
+            .field("signals_num", &self.signals_num)
+            .field("constants", &self.constants.iter().map(|x| x.to_string()).collect::<Vec<String>>())
+            .field("inputs", &self.inputs)
+            .field("witness_signals", &self.witness_signals)
+            .field(
+                "io_map",
+                &self.io_map.iter()
+                    .map( |(&x, y)|
+                        (
+                            x,
+                            y.iter().map(|z| (z.code, z.offset, z.lengths.clone())).collect::<Vec<(usize, usize, Vec<usize>)>>(),
+                        )
+                    )
+                    .collect::<Vec<(usize, Vec<(usize, usize, Vec<usize>)>)>>()
+            )
+            .finish()
+    }
+}
+
+pub fn serialize_witnesscalc_vm(
+    mut w: impl Write, cs: &CompiledCircuit) -> std::io::Result<()> {
+
+    let inputs_desc = cs.inputs.iter()
+        .map(|(name, offset, len)| {
+            (
+                name.clone(),
+                SignalDescription {
+                    offset: TryInto::<u32>::try_into(*offset)
+                        .expect("signal offset is too large"),
+                    len: TryInto::<u32>::try_into(*len)
+                        .expect("signals length is too large"),
+                },
+            )
+        }).collect::<HashMap<String, SignalDescription>>();
+
+    w.write_all(WITNESSCALC_VM_MAGIC).unwrap();
+
+    let io_map = cs.io_map.iter()
+        .map(|(tmpl_idx, io_list)| {
+            (
+                TryInto::<u32>::try_into(*tmpl_idx)
+                    .expect("io_map template index is too large"),
+                IoDefs{
+                    io_defs: io_list.iter()
+                        .map(|x| IoDef{
+                            code: x.code.try_into()
+                                .expect("signal code is too large"),
+                            offset: x.offset.try_into()
+                                .expect("signal offset is too large"),
+                            lengths: x.lengths.iter()
+                                .map(|l| TryInto::<u32>::try_into(*l)
+                                    .expect("signal length is too large"))
+                                .collect::<Vec<u32>>(),
+                        })
+                        .collect()
+                }
+            )
+        })
+        .collect();
+
+    let md = crate::proto::vm::VmMd {
+        main_template_id: cs.main_template_id.try_into()
+            .expect("main template id too large"),
+        templates_num: TryInto::<u32>::try_into(cs.templates.len())
+            .expect("too many templates"),
+        functions_num: TryInto::<u32>::try_into(cs.functions.len())
+            .expect("too many functions"),
+        signals_num: TryInto::<u32>::try_into(cs.signals_num)
+            .expect("too many signals"),
+        constants_num: TryInto::<u32>::try_into(cs.constants.len())
+            .expect("too many constants"),
+        inputs: inputs_desc,
+        witness_signals: cs.witness_signals.iter()
+            .map(|x| TryInto::<u32>::try_into(*x)
+                .expect("witness signal index is too large"))
+            .collect(),
+        io_map,
+    };
+
+    let mut buf = Vec::new();
+    md.encode_length_delimited(&mut buf)?;
+    w.write_all(&buf)?;
+    buf.clear();
+
+    for tmpl in &cs.templates {
+        let tmpl_pb: crate::proto::vm::Template = tmpl.try_into().unwrap();
+        assert_eq!(buf.len(), 0);
+        tmpl_pb.encode_length_delimited(&mut buf)?;
+        w.write_all(&buf)?;
+        buf.clear();
+    }
+
+    for func in &cs.functions {
+        let func_pb: crate::proto::vm::Function = func.try_into().unwrap();
+        assert_eq!(buf.len(), 0);
+        func_pb.encode_length_delimited(&mut buf)?;
+        w.write_all(&buf)?;
+        buf.clear();
+    }
+
+    for c in &cs.constants {
+        c.serialize_compressed(&mut w).unwrap();
+    }
+
+    Ok(())
+}
+
 fn read_message_length<R: Read>(rw: &mut WriteBackReader<R>) -> std::io::Result<usize> {
     let mut buf = [0u8; MAX_VARINT_LENGTH];
     let bytes_read = rw.read(&mut buf)?;
@@ -201,7 +337,7 @@ fn read_message_length<R: Read>(rw: &mut WriteBackReader<R>) -> std::io::Result<
     Ok(len_delimiter)
 }
 
-fn read_message<R: Read, M: Message + std::default::Default>(rw: &mut WriteBackReader<R>) -> std::io::Result<M> {
+fn read_message<R: Read, M: Message + Default>(rw: &mut WriteBackReader<R>) -> std::io::Result<M> {
     let ln = read_message_length(rw)?;
     let mut buf = vec![0u8; ln];
     let bytes_read = rw.read(&mut buf)?;
@@ -213,6 +349,83 @@ fn read_message<R: Read, M: Message + std::default::Default>(rw: &mut WriteBackR
     let msg = prost::Message::decode(&buf[..])?;
 
     Ok(msg)
+}
+
+pub fn deserialize_witnesscalc_vm(
+    mut r: impl Read) -> std::io::Result<CompiledCircuit>{
+
+    let mut br = WriteBackReader::new(&mut r);
+    let mut magic = [0u8; WITNESSCALC_VM_MAGIC.len()];
+
+    br.read_exact(&mut magic)?;
+
+    if !magic.eq(WITNESSCALC_VM_MAGIC) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "vm file does not look like a witnesscalc vm file"));
+    };
+
+    let md: crate::proto::vm::VmMd = read_message(&mut br)?;
+
+    let mut templates: Vec<Template> = Vec::with_capacity(md.templates_num as usize);
+    for _ in 0..md.templates_num {
+        let tmpl: crate::proto::vm::Template = read_message(&mut br)?;
+        templates.push(Template::try_from(&tmpl).unwrap());
+    }
+
+    let mut functions: Vec<Function> = Vec::with_capacity(md.functions_num as usize);
+    for _ in 0..md.functions_num {
+        let func: crate::proto::vm::Function = read_message(&mut br)?;
+        functions.push(Function::try_from(&func).unwrap());
+    }
+
+    let mut constants = Vec::with_capacity(md.constants_num as usize);
+    for _ in 0 .. md.constants_num {
+        let c: Fr = Fr::deserialize_compressed(&mut br).unwrap();
+        constants.push(c);
+    }
+
+    Ok(CompiledCircuit{
+        main_template_id: md.main_template_id.try_into()
+            .expect("main template id too large for this architecture"),
+        templates,
+        functions,
+        signals_num: md.signals_num.try_into()
+            .expect("signals number too large for this architecture"),
+        constants,
+        inputs: md.inputs.iter()
+            .map(|(sig_name, sig_desc)| (
+                sig_name.clone(),
+                TryInto::<usize>::try_into(sig_desc.offset)
+                    .expect("signal offset is too large for this architecture"),
+                TryInto::<usize>::try_into(sig_desc.len)
+                    .expect("signals length is too large for this architecture"),
+            ))
+            .collect(),
+        witness_signals: md.witness_signals.iter()
+            .map(|x| TryInto::<usize>::try_into(*x)
+                .expect("witness signal index is too large for this architecture"))
+            .collect(),
+        io_map: md.io_map
+            .iter()
+            .map(|(tmpl_id, io_defs)| (
+                TryInto::<usize>::try_into(*tmpl_id)
+                    .expect("template index is too large for this architecture"),
+                io_defs.io_defs.iter()
+                    .map(|d| IODef {
+                        code: d.code.try_into()
+                            .expect("signal code is too large for this architecture"),
+                        offset: d.offset.try_into()
+                            .expect("signal offset is too large for this architecture"),
+                        lengths: d.lengths.iter()
+                            .map(|l| TryInto::<usize>::try_into(*l)
+                                .expect("signal length is too large for this architecture"))
+                            .collect(),
+                    })
+                    .collect(),
+            ))
+            .collect(),
+    })
 }
 
 pub fn deserialize_witnesscalc_graph(
@@ -316,6 +529,7 @@ mod tests {
     use crate::graph::{Operation, TresOperation, UnoOperation};
     use core::str::FromStr;
     use byteorder::ByteOrder;
+    use crate::vm::ComponentTmpl;
     use super::*;
 
     #[test]
@@ -467,5 +681,108 @@ mod tests {
         };
 
         assert_eq!(metadata, metadata_want);
+    }
+
+    #[test]
+    fn test_fr_serialize() {
+        // Check that default Fr serializer packs the value in little-endian
+        let want = "000000f093f5e1439170b97948e833285d588181b64550b829a031e1724e6430";
+        let f = Fr::from_str("21888242871839275222246405745257275088548364400416034343698204186575808495616").unwrap();
+
+        let mut buf = Vec::new();
+        f.serialize_compressed(&mut buf).unwrap();
+        assert_eq!(hex::encode(&buf), want);
+
+        let want = "9488010000000000000000000000000000000000000000000000000000000000";
+        let f = Fr::from_str("100500").unwrap();
+
+        buf.clear();
+        f.serialize_compressed(&mut buf).unwrap();
+        assert_eq!(hex::encode(&buf), want);
+    }
+
+    #[test]
+    fn test_serialization() {
+
+        let mut buf: Vec<u8> = Vec::new();
+
+        let mut io_map = TemplateInstanceIOMap::new();
+        let io_list = vec![
+            IODef {
+                code: 1,
+                offset: 2,
+                lengths: vec![3, 4, 5],
+            },
+            IODef {
+                code: 6,
+                offset: 7,
+                lengths: vec![8, 9, 10],
+            },
+        ];
+        io_map.insert(100, io_list);
+
+        let cs = CompiledCircuit{
+            main_template_id: 2,
+            templates: vec![
+                Template{
+                    name: "tmpl1".to_string(),
+                    code: vec![1, 2, 3],
+                    line_numbers: vec![10, 20, 30],
+                    components: vec![
+                        ComponentTmpl{
+                            symbol: "sym1".to_string(),
+                            sub_cmp_idx: 1,
+                            number_of_cmp: 2,
+                            name_subcomponent: "sub1".to_string(),
+                            signal_offset: 3,
+                            signal_offset_jump: 4,
+                            template_id: 5,
+                            has_inputs: true,
+                        },
+                        ComponentTmpl{
+                            symbol: "sym2".to_string(),
+                            sub_cmp_idx: 10,
+                            number_of_cmp: 20,
+                            name_subcomponent: "sub2".to_string(),
+                            signal_offset: 30,
+                            signal_offset_jump: 40,
+                            template_id: 50,
+                            has_inputs: false,
+                        },
+                    ],
+                    var_stack_depth: 4,
+                    number_of_inputs: 5,
+                },
+                Template{
+                    name: "tmpl2".to_string(),
+                    code: vec![10, 20, 30],
+                    line_numbers: vec![100, 200, 300],
+                    components: vec![],
+                    var_stack_depth: 40,
+                    number_of_inputs: 50,
+                },
+            ],
+            functions: vec![
+                Function{
+                    name: "func1".to_string(),
+                    symbol: "sym1".to_string(),
+                    code: vec![1, 2, 3],
+                    line_numbers: vec![10, 20, 30],
+                },
+            ],
+            signals_num: 3,
+            constants: vec![Fr::from(100500)],
+            inputs: vec![("inp1".to_string(), 5, 10)],
+            witness_signals: vec![1, 2, 3],
+            io_map,
+        };
+        serialize_witnesscalc_vm(&mut buf, &cs).unwrap();
+
+        let cs2 = deserialize_witnesscalc_vm(&buf[..]).unwrap();
+
+        // println!("{:?}", cs);
+        // println!("{:?}", cs2);
+
+        assert_eq!(format!("{:?}", cs), format!("{:?}", cs2));
     }
 }

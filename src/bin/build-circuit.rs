@@ -758,7 +758,8 @@ fn process_instruction(
             // panic!("not implemented");
         }
         Instruction::Log(_) => {
-            panic!("not implemented");
+            // we are unable to log anything in witness graph
+            // panic!("not implemented");
         }
         Instruction::Loop(ref loop_bucket) => {
             while check_continue_condition(
@@ -1598,7 +1599,7 @@ fn load_n(
                         component_signal_start, signal_idx, i);
                     result.push(Var::Node(signal_node));
                 }
-                return result;
+                result
             }
             LocationRule::Mapped { .. } => {
                 panic!("mapped signals expect only on address type SubcmpSignal");
@@ -1662,7 +1663,7 @@ fn load_n(
                     component_signal_start, signal_idx, i);
                 result.push(Var::Node(signal_node));
             }
-            return result;
+            result
         }
         AddressType::Variable => {
             let location = if let LocationRule::Indexed { location, template_header } = &load_bucket.src {
@@ -2030,7 +2031,7 @@ fn init_input_signals(
         }
     }
 
-    return (inputs_info, signal_values);
+    (inputs_info, signal_values)
 }
 
 fn run_template(
@@ -2224,6 +2225,8 @@ fn main() {
     println!("functions len: {}", circuit.functions.len());
     println!("main header: {}", circuit.c_producer.main_header);
 
+    // The node indexes for each signal. For example in
+    // signal_node_idx[3] stored the node index for signal 3.
     let mut signal_node_idx: Vec<usize> =
         vec![usize::MAX; circuit.c_producer.total_number_of_signals];
 
@@ -2344,7 +2347,7 @@ fn store_subcomponent_signals(
     nodes: &mut Nodes, tmpl_vars: &mut Vec<Option<Var>>,
     signal_node_idx: &mut Vec<usize>,
     subcomponents: &mut Vec<Option<ComponentInstance>>,
-    io_map: &TemplateInstanceIOMap, src_node_idxs: &Vec<usize>, dest: &LocationRule,
+    io_map: &TemplateInstanceIOMap, src_node_idxs: &[usize], dest: &LocationRule,
     size: usize, templates: &Vec<TemplateCode>, functions: &Vec<FunctionCode>,
     print_debug: bool, call_stack: &Vec<String>, cmp: &ComponentInstance) {
 
@@ -2377,7 +2380,7 @@ fn store_subcomponent_signals(
         LocationRule::Mapped { ref signal_code, ref indexes } => {
             calc_mapped_signal_idx(
                 subcomponents, subcomponent_idx, io_map,
-                signal_code.clone(), indexes, nodes, tmpl_vars,
+                *signal_code, indexes, nodes, tmpl_vars,
                 cmp.signal_offset, signal_node_idx, print_debug, call_stack)
         }
     };
@@ -2427,8 +2430,6 @@ fn store_subcomponent_signals(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_calc_const_expression() {
         println!("OK");
