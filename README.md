@@ -99,3 +99,12 @@ CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=${CC} \
 CLANG_PATH=${CC} \
 cargo build --target x86_64-linux-android --release
 ```
+
+
+## Mobile wrappers. Releases with grapth version only
+| Wrapper      | Repository Link                         | Version |
+| ------------ |-----------------------------------------| ------- |
+| React Native | https://github.com/iden3/react-native-circom-witnesscalc | 0.0.1-alpha.4 |
+| Flutter      | https://github.com/iden3/circom-witnesscalc-flutter | 0.0.1-alpha.3 |
+| iOS          | https://github.com/iden3/circom-witnesscalc-swift | 0.0.1-alpha.3 |
+| Android      | https://github.com/iden3/circom-witnesscalc-android | 0.0.1-alpha.3 |
