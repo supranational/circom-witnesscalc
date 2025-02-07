@@ -1,13 +1,12 @@
-use std::{
-    collections::HashMap,
-    ops::{BitAnd, Shl, Shr},
-};
+use std::{collections::HashMap, ops::{BitAnd, Shl, Shr}, thread};
 use std::cmp::Ordering;
 use std::error::Error;
 use std::ops::{BitOr, BitXor, Deref};
+use std::sync::{mpsc, Arc};
+use std::time::Instant;
 use crate::field::M;
 use ark_bn254::Fr;
-use ark_ff::{BigInt, PrimeField, BigInteger, Zero, One};
+use ark_ff::{BigInt, PrimeField, BigInteger, Zero, One, Field};
 use rand::Rng;
 use ruint::aliases::U256;
 use serde::{Deserialize, Serialize};
@@ -109,6 +108,7 @@ impl Operation {
             Div => if b.is_zero() { Fr::zero() } else { a / b },
             Add => a + b,
             Sub => a - b,
+            Pow => a.pow(b.into_bigint()),
             Idiv => if b.is_zero() {
                 Fr::zero()
             } else {
@@ -140,8 +140,6 @@ impl Operation {
             Bor => bit_or(a, b),
             Band => bit_and(a, b),
             Bxor => bit_xor(a, b),
-            // TODO implement other operators
-            _ => unimplemented!("operator {:?} not implemented for Montgomery", self),
         }
     }
 }
@@ -370,6 +368,7 @@ pub fn optimize(nodes: &mut Vec<Node>, outputs: &mut [usize]) {
 pub fn evaluate(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<Fr> {
     // assert_valid(nodes);
 
+    let start = Instant::now();
     // Evaluate the graph.
     let mut values = Vec::with_capacity(nodes.len());
     for &node in nodes.iter() {
@@ -384,7 +383,79 @@ pub fn evaluate(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<Fr> {
         values.push(value);
     }
 
-    outputs.iter().map(|&i| values[i]).collect()
+    let r = outputs.iter().map(|&i| values[i]).collect();
+    println!("graph calculated in {:?}", start.elapsed());
+    r
+}
+
+pub fn evaluate_parallel(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<Fr> {
+    let start = Instant::now();
+    let inputs: Arc<[U256]> = Arc::from(inputs);
+    println!("total nodes: {}", nodes.len());
+    let mut nodes_splitted = 0;
+    let sz = outputs.len() / 4;
+
+    let mut outputs2 = Vec::new();
+    let mut subgraphs = Vec::new();
+
+    for (i, chunk) in outputs.chunks(sz).enumerate() {
+        let mut nodes = Vec::from(nodes);
+        let mut chunk = Vec::from(chunk);
+        tree_shake(&mut nodes, &mut chunk);
+        nodes_splitted += nodes.len();
+        println!("chunk #{}: {} nodes", i, nodes.len());
+
+        outputs2.push(chunk);
+        subgraphs.push(nodes);
+    }
+    println!("total nodes splitted: {}", nodes_splitted);
+    println!("graph splitted in {:?}", start.elapsed());
+    // assert_valid(nodes);
+
+    let start = Instant::now();
+
+    let mut handles = Vec::new();
+    let threads_num = subgraphs.len();
+    let (tx, rx) = mpsc::channel();
+    for (i, (nodes, outputs)) in subgraphs.into_iter().zip(outputs2).enumerate() {
+        let inputs = Arc::clone(&inputs);
+        let tx = tx.clone();
+        let handle = thread::spawn(move || {
+            let mut values = Vec::with_capacity(nodes.len());
+            for &node in nodes.iter() {
+                let value = match node {
+                    Node::Constant(c) => u256_to_fr(&c),
+                    Node::MontConstant(c) => c,
+                    Node::Input(i) => u256_to_fr(&inputs[i]),
+                    Node::Op(op, a, b) => op.eval_fr(values[a], values[b]),
+                    Node::UnoOp(op, a) => op.eval_fr(values[a]),
+                    Node::TresOp(op, a, b, c) => op.eval_fr(values[a], values[b], values[c]),
+                };
+                values.push(value);
+            }
+
+            let witness_signals: Vec<Fr> = outputs.iter().map(|&i| values[i]).collect();
+            tx.send((i, witness_signals)).unwrap();
+        });
+        handles.push(handle);
+    }
+
+    let mut final_results = vec![Vec::new(); threads_num];
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    for _ in 0..threads_num {
+        if let Ok((i, signals)) = rx.recv() {
+            final_results[i] = signals;
+        }
+    }
+
+    let r = final_results.into_iter().flatten().collect();
+    println!("graph calculated in parallel in {:?}", start.elapsed());
+
+    r
 }
 
 /// Constant propagation
@@ -897,5 +968,22 @@ mod tests {
         // let node = nodes[0];
         let node = nodes.get(0);
         println!("{:?}", node);
+    }
+
+    #[test]
+    fn test_pow() {
+        let a = uint!(21888242871839275222246405745257275088548364400416034343698204186575808495615_U256);
+        let b = uint!(21888_U256);
+        let c = Operation::Pow.eval(a, b);
+        let want = uint!(6741803673964058984617537840767809723100020752467791363717299927390655464193_U256);
+        assert_eq!(c, want);
+
+        let af = u256_to_fr(&a);
+        let bf = u256_to_fr(&b);
+
+        // let cf = af.pow(bf.into_bigint());
+        let cf = Operation::Pow.eval_fr(af, bf);
+        let wantf = u256_to_fr(&want);
+        assert_eq!(cf, wantf);
     }
 }
