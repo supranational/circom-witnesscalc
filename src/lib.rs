@@ -132,14 +132,21 @@ pub fn wtns_from_witness(witness: Vec<Fr>) -> Vec<u8> {
 
 pub fn calc_witness(inputs: &str, graph_data: &[u8]) -> Result<Vec<Fr>, Error> {
 
+    let start = std::time::Instant::now();
     let inputs = deserialize_inputs(inputs.as_bytes())?;
+    println!("Inputs loaded in {:?}", start.elapsed());
 
+    let start = std::time::Instant::now();
     let (nodes, signals, input_mapping): (Vec<Node>, Vec<usize>, InputSignalsInfo) =
         deserialize_witnesscalc_graph(std::io::Cursor::new(graph_data)).unwrap();
+    println!("Graph loaded in {:?}", start.elapsed());
 
+    let start = std::time::Instant::now();
     let mut inputs_buffer = get_inputs_buffer(get_inputs_size(&nodes));
     populate_inputs(&inputs, &input_mapping, &mut inputs_buffer);
+    println!("Inputs populated in {:?}", start.elapsed());
 
+    // graph::evaluate_parallel(&nodes, inputs_buffer.as_slice(), &signals);
     Ok(graph::evaluate(&nodes, inputs_buffer.as_slice(), &signals))
 }
 

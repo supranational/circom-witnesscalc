@@ -8,6 +8,7 @@ use ark_bn254::Fr;
 use ark_ff::{BigInt, One, PrimeField, Zero};
 use code_producers::c_elements::TemplateInstanceIOMap;
 use compiler::intermediate_representation::ir_interface::StatusInput;
+use lazy_static::lazy_static;
 use crate::graph::{Operation, UnoOperation};
 
 pub struct Component {
@@ -252,7 +253,16 @@ impl<'a, 'b> VM<'a, 'b> {
                 Frame::Component { component, ip, .. } => {
                     let component = component.borrow();
                     let template_id = component.template_id;
-                    let line_no = self.templates[template_id].line_numbers[*ip];
+                    let line_no = if *ip < self.templates[template_id].line_numbers.len() {
+                        self.templates[template_id].line_numbers[*ip]
+                    } else {
+                        self.templates[template_id].line_numbers
+                            .iter()
+                            .rev()
+                            .find(|&&x| x != usize::MAX)
+                            .copied()
+                            .unwrap_or(0)
+                    };
                     let tmpl_name = self.templates[template_id].name.clone();
                     println!("Component: {}:{}", tmpl_name, line_no);
                 }
@@ -329,29 +339,31 @@ pub enum OpCode {
     OpDiv          = 18,
     OpAdd          = 19,
     OpSub          = 20,
-    OpIntDiv       = 21,
-    OpMod          = 22,
-    OpShL          = 23,
-    OpShR          = 24,
-    OpLtE          = 25,
-    OpGtE          = 26,
-    OpLt           = 27,
-    OpGt           = 28,
-    OpEq           = 29,
-    OpNe           = 30,
-    OpBoolAnd      = 31,
-    OpBitOr        = 32,
-    OpBitAnd       = 33,
-    OpBitXor       = 34,
-    OpNeg          = 35,
-    OpToAddr       = 36,
-    OpMulAddr      = 37,
-    OpAddAddr      = 38,
-    CmpCall        = 39,
-    FnCall         = 40,
-    FnReturn       = 41,
+    OpPow          = 21,
+    OpIntDiv       = 22,
+    OpMod          = 23,
+    OpShL          = 24,
+    OpShR          = 25,
+    OpLtE          = 26,
+    OpGtE          = 27,
+    OpLt           = 28,
+    OpGt           = 29,
+    OpEq           = 30,
+    OpNe           = 31,
+    OpBoolOr       = 32,
+    OpBoolAnd      = 33,
+    OpBitOr        = 34,
+    OpBitAnd       = 35,
+    OpBitXor       = 36,
+    OpNeg          = 37,
+    OpToAddr       = 38,
+    OpMulAddr      = 39,
+    OpAddAddr      = 40,
+    CmpCall        = 41,
+    FnCall         = 42,
+    FnReturn       = 43,
     // TODO: Assert should accept an index of the string to print
-    Assert         = 42,
+    Assert         = 44,
 }
 
 fn read_instruction(code: &[u8], ip: usize) -> OpCode {
@@ -571,6 +583,9 @@ pub fn disassemble_instruction(
         OpCode::OpSub => {
             println!("OpSub");
         }
+        OpCode::OpPow => {
+            println!("OpPow");
+        }
         OpCode::OpIntDiv => {
             println!("OpIntDiv");
         }
@@ -600,6 +615,9 @@ pub fn disassemble_instruction(
         }
         OpCode::OpNe => {
             println!("OpNe");
+        }
+        OpCode::OpBoolOr => {
+            println!("OpBoolOr");
         }
         OpCode::OpBoolAnd => {
             println!("OpBoolAnd");
@@ -716,10 +734,16 @@ fn calc_mapped_signal_idx(
     sig_idx
 }
 
-fn u_lt(a: &Fr, b: &Fr) -> Fr {
-    let half_m = Fr::from_str("10944121435919637611123202872628637544274182200208017171849102093287904247808").unwrap();
-    let a_neg = &half_m < a;
-    let b_neg = &half_m < b;
+lazy_static! {
+    static ref half_m: Fr = {
+        Fr::from_str("10944121435919637611123202872628637544274182200208017171849102093287904247808").unwrap()
+    };
+}
+
+
+pub fn u_lt(a: &Fr, b: &Fr) -> Fr {
+    let a_neg = &(*half_m) < a;
+    let b_neg = &(*half_m) < b;
 
     match (a_neg, b_neg) {
         (false, false) => Fr::from(a < b),
@@ -1089,7 +1113,9 @@ pub fn execute(
                     let signal_code = read_u32(code, ip);
                     ip += size_of::<u32>();
 
-                    let indexes = vm.stack_u32.split_off(indexes_number as usize);
+                    let indexes_idx = vm.stack_u32.len() - indexes_number as usize;
+
+                    let indexes = vm.stack_u32.split_off(indexes_idx);
 
                     let subcmp_template_id = cmp.borrow()
                         .subcomponents[cmp_idx as usize].borrow()
@@ -1270,6 +1296,11 @@ pub fn execute(
                 let a = vm.stack.pop().unwrap();
                 vm.stack.push(Operation::Sub.eval_fr(a, b));
             }
+            OpCode::OpPow => {
+                let b = vm.stack.pop().unwrap();
+                let a = vm.stack.pop().unwrap();
+                vm.stack.push(Operation::Pow.eval_fr(a, b));
+            }
             OpCode::OpIntDiv => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
@@ -1322,6 +1353,11 @@ pub fn execute(
                     Ordering::Equal => Fr::zero(),
                     _ => Fr::one(),
                 });
+            }
+            OpCode::OpBoolOr => {
+                let b = vm.stack.pop().unwrap();
+                let a = vm.stack.pop().unwrap();
+                vm.stack.push(Operation::Lor.eval_fr(a, b));
             }
             OpCode::OpBoolAnd => {
                 let b = vm.stack.pop().unwrap();

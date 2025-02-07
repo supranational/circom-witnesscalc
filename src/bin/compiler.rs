@@ -91,7 +91,7 @@ fn u32_or_expression(
                 OperatorType::Add => two_op_fn(Operation::Add),
                 OperatorType::Sub => two_op_fn(Operation::Sub),
                 OperatorType::Pow => {todo!()}
-                OperatorType::IntDiv => {todo!()}
+                OperatorType::IntDiv => {two_op_fn(Operation::Idiv)}
                 OperatorType::Mod => two_op_fn(Operation::Mod),
                 OperatorType::ShiftL => {todo!()}
                 OperatorType::ShiftR => {todo!()}
@@ -1353,6 +1353,9 @@ fn expression_compute(
         OperatorType::Sub => {
             op2(OpCode::OpSub);
         }
+        OperatorType::Pow => {
+            op2(OpCode::OpPow);
+        }
         OperatorType::IntDiv => {
             op2(OpCode::OpIntDiv);
         }
@@ -1385,6 +1388,9 @@ fn expression_compute(
         }
         OperatorType::NotEq => {
             op2(OpCode::OpNe);
+        }
+        OperatorType::BoolOr => {
+            op2(OpCode::OpBoolOr);
         }
         OperatorType::BoolAnd => {
             op2(OpCode::OpBoolAnd);
@@ -1443,6 +1449,12 @@ fn fn_expression_compute(
         OperatorType::Sub => {
             op2(OpCode::OpSub);
         }
+        OperatorType::Pow => {
+            op2(OpCode::OpPow);
+        }
+        OperatorType::IntDiv => {
+            op2(OpCode::OpIntDiv);
+        }
         OperatorType::Mod => {
             op2(OpCode::OpMod);
         }
@@ -1472,6 +1484,9 @@ fn fn_expression_compute(
         }
         OperatorType::NotEq => {
             op2(OpCode::OpNe);
+        }
+        OperatorType::BoolOr => {
+            op2(OpCode::OpBoolOr);
         }
         OperatorType::BoolAnd => {
             op2(OpCode::OpBoolAnd);

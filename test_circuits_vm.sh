@@ -63,7 +63,7 @@ function test_circuit() {
 
 #	time target/release/compiler "$circuit_path" "$circuit_bytecode_path" -l "$circomlib_path" -i "$inputs_path" -wtns "$witness_path"
 
-	time target/release/compiler "$circuit_path" "$circuit_bytecode_path"
+	time target/release/compiler "$circuit_path" "$circuit_bytecode_path" -l "$circomlib_path"
 	time target/release/calc-witness-vm "$circuit_bytecode_path" "$inputs_path" "$witness_path"
 
 	popd > /dev/null
