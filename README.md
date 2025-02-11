@@ -101,7 +101,7 @@ cargo build --target x86_64-linux-android --release
 ```
 
 
-## Mobile wrappers. Releases with grapth version only
+## Mobile wrappers. Releases with graph version only
 | Wrapper      | Repository Link                         | Version |
 | ------------ |-----------------------------------------| ------- |
 | React Native | https://github.com/iden3/react-native-circom-witnesscalc | 0.0.1-alpha.4 |
