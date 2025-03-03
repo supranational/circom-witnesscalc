@@ -137,7 +137,7 @@ function test_circuit() {
 		exit 1
 	fi
 
-    if [ ! -f "$zkey_path" ]; then
+	if [ ! -f "$zkey_path" ]; then
 		snarkjs groth16 setup "${r1cs_path}" "$ptau_path" "${circuit_name}"_"${r1cs_md5}"_0000.zkey
 		local ENTROPY1=$(head -c 64 /dev/urandom | od -An -tx1 -v | tr -d ' \n')
 		snarkjs zkey contribute "${circuit_name}"_"${r1cs_md5}"_0000.zkey "${zkey_path}" --name="1st Contribution" -v -e="$ENTROPY1"

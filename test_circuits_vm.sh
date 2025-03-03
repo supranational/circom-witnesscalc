@@ -24,6 +24,52 @@ if [ ! -d "$workdir" ]; then
 fi
 
 ptau_path="${workdir}/$(basename $ptau_url)"
+
+print_usage() {
+    echo "Usage: $0 [-p <ptau_file_path>] [-h] [-l <inlcude_path>] [file1 ...]"
+    echo
+    echo "Options:"
+    echo "  -p <ptau_file_path>    Path to ptau file (if provided multiple times, last one is used)"
+    echo "                         If omitted, the default file will be downloaded from:"
+    echo "                         ${ptau_url}"
+    echo "  -l <include_path>      Path to include directory. Can be specified multiple times"
+    echo "  -h                     Print this usage and exit"
+    echo
+    echo "Positional Arguments:"
+    echo "  file1       Circom circuit file. May be multiple. If none provided, all circuits in test_circuits/ directory processed."
+    echo
+    echo "Examples:"
+    echo "  $0 test_circuits/circuit1.circom"
+}
+
+declare -a library_paths
+
+while getopts ":p:l:h" opt; do
+  case $opt in
+    h)
+        print_usage
+        exit 0
+        ;;
+    p)
+        ptau_path="$OPTARG"
+        ;;
+    l)
+        library_paths+=("$OPTARG")
+        ;;
+    :)
+        echo "Error: -$OPTARG requires a value" >&2;
+        exit 1
+        ;;
+    \?)
+        echo "Error: Invalid option -$OPTARG" >&2;
+        exit 1
+        ;;
+  esac
+done
+
+# Shift past the named options to access positional arguments
+shift $((OPTIND - 1))
+
 if [ ! -f "$ptau_path" ]; then
 	echo "Downloading $ptau_url to $ptau_path"
 	curl -L "$ptau_url" -o "$ptau_path"
@@ -32,11 +78,19 @@ fi
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "script dir ${script_dir}"
 
-circomlib_path="${script_dir}/test_deps/circomlib/circuits"
-if [ ! -d "$circomlib_path" ]; then
-	echo -e "${RED}circomlib not found at $circomlib_path${NC}"
-	exit 1
+if [ ${#library_paths} -eq 0 ]; then
+    library_paths+=("${script_dir}/test_deps/circomlib/circuits")
 fi
+
+declare -a include_args
+
+for arg in "${library_paths[@]}"; do
+    if [ ! -d "$arg" ]; then
+    	echo -e "${RED}include path not found at $arg${NC}"
+    	exit 1
+    fi
+    include_args+=("-l" "$arg")
+done
 
 pushd "${script_dir}" > /dev/null
 cargo build --release
@@ -57,26 +111,22 @@ function test_circuit() {
 	local proof_path="${workdir}/${circuit_name}_proof.json"
 	local public_signals_path="${workdir}/${circuit_name}_public.json"
 	local r1cs_path="${workdir}/${circuit_name}.r1cs"
-	
+
 	# run commands from the project directory
 	pushd "${script_dir}" > /dev/null
-
-#	time target/release/compiler "$circuit_path" "$circuit_bytecode_path" -l "$circomlib_path" -i "$inputs_path" -wtns "$witness_path"
-
-	time target/release/compiler "$circuit_path" "$circuit_bytecode_path" -l "$circomlib_path"
+	time target/release/compiler "$circuit_path" "$circuit_bytecode_path" "${include_args[@]}"
 	time target/release/calc-witness-vm "$circuit_bytecode_path" "$inputs_path" "$witness_path"
-
 	popd > /dev/null
 	
 	# run commands from the working directory
 	pushd "$workdir" > /dev/null
 	
-	circom -l "${circomlib_path}" --r1cs --wasm "$circuit_path"
+	circom "${include_args[@]}" --r1cs --wasm "$circuit_path"
 	local r1cs_md5=$(openssl dgst -hex -md5 "${r1cs_path}" | awk '{print $2}')
 	local zkey_path="${circuit_name}_${r1cs_md5}_final.zkey"
 	local vk_path="${workdir}/${circuit_name}_${r1cs_md5}_verification_key.json"
 
-  echo "Generate witness"
+	echo "Generate witness"
 	time node "${circuit_name}"_js/generate_witness.js "${circuit_name}"_js/"${circuit_name}".wasm "${inputs_path}" "${witness_path}2"
 	snarkjs wej "${witness_path}" "${witness_path}.json"
 	snarkjs wej "${witness_path}2" "${witness_path}2.json"
@@ -88,7 +138,7 @@ function test_circuit() {
 		exit 1
 	fi
 
-    if [ ! -f "$zkey_path" ]; then
+  if [ ! -f "$zkey_path" ]; then
 		snarkjs groth16 setup "${r1cs_path}" "$ptau_path" "${circuit_name}"_"${r1cs_md5}"_0000.zkey
 		local ENTROPY1=$(head -c 64 /dev/urandom | od -An -tx1 -v | tr -d ' \n')
 		snarkjs zkey contribute "${circuit_name}"_"${r1cs_md5}"_0000.zkey "${zkey_path}" --name="1st Contribution" -v -e="$ENTROPY1"
@@ -99,10 +149,10 @@ function test_circuit() {
 	fi
 	# export witness as text ints
 	# snarkjs wej witness.wtns witness.json
-	
+
 	snarkjs groth16 prove "${zkey_path}" "${witness_path}" "${proof_path}" "${public_signals_path}"
 	snarkjs groth16 verify "${vk_path}" "${public_signals_path}" "${proof_path}"
-	
+
 	popd > /dev/null
 }
 
