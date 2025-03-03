@@ -19,10 +19,11 @@ use compiler::intermediate_representation::InstructionList;
 use compiler::intermediate_representation::ir_interface::{AddressType, ComputeBucket, CreateCmpBucket, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, ObtainMeta, OperatorType, ReturnType, ValueType};
 use constraint_generation::{build_circuit, BuildConfig};
 use program_structure::error_definition::Report;
+use ruint::aliases::U256;
 use type_analysis::check_types::check_types;
 use circom_witnesscalc::{deserialize_inputs, wtns_from_witness};
 use circom_witnesscalc::graph::Operation;
-use circom_witnesscalc::storage::{serialize_witnesscalc_vm, CompiledCircuit};
+use circom_witnesscalc::storage::{serialize_witnesscalc_vm, CompiledCircuit, CompiledCircuit2};
 use circom_witnesscalc::vm::{build_component, disassemble_instruction, execute, ComponentTmpl, Function, InputStatus, OpCode, Template};
 
 struct Args {
@@ -359,11 +360,12 @@ fn main() {
         }
     }
 
+    let constants_fr = get_constants_fr(&circuit);
     let constants = get_constants(&circuit);
     let main_component_signal_start = 1usize;
     let start = Instant::now();
     let (compiled_templates, compiled_functions) =
-        compile(&circuit.templates, &circuit.functions, &constants);
+        compile(&circuit.templates, &circuit.functions, &constants_fr);
 
 
     if args.print_debug {
@@ -398,11 +400,22 @@ fn main() {
         templates: compiled_templates,
         functions: compiled_functions,
         signals_num: sigs_num,
-        constants,
+        constants: constants_fr,
         inputs: circuit.c_producer.get_main_input_list().clone(),
         witness_signals: witness_list,
         io_map,
     };
+
+    // let cs2: CompiledCircuit2 = CompiledCircuit2 {
+    //     main_template_id,
+    //     templates: compiled_templates,
+    //     functions: compiled_functions,
+    //     signals_num: sigs_num,
+    //     constants,
+    //     inputs: circuit.c_producer.get_main_input_list().clone(),
+    //     witness_signals: witness_list,
+    //     io_map,
+    // };
 
     if let Some(input_file) = args.inputs_file {
 
@@ -447,10 +460,18 @@ fn main() {
     serialize_witnesscalc_vm(&mut f, &cs).unwrap();
 }
 
-fn get_constants(circuit: &Circuit) -> Vec<Fr> {
+fn get_constants_fr(circuit: &Circuit) -> Vec<Fr> {
     let mut constants = Vec::new();
     for c in &circuit.c_producer.field_tracking {
         constants.push(Fr::from_str(c.as_str()).unwrap());
+    }
+    constants
+}
+
+fn get_constants(circuit: &Circuit) -> Vec<U256> {
+    let mut constants = Vec::new();
+    for c in &circuit.c_producer.field_tracking {
+        constants.push(U256::from_str_radix(c.as_str(), 10).unwrap());
     }
     constants
 }
@@ -886,7 +907,8 @@ fn statement(
             // todo!();
         }
         Instruction::Log(_) => {
-            todo!();
+            // TODO: maybe introduce new instruction for logging
+            // todo!();
         }
     }
 }

@@ -1,5 +1,5 @@
 [package]
-name = "circom_witnesscalc"
+name = "circom-witnesscalc"
 version = "0.2.0"
 edition = "2021"
 repository = "https://github.com/iden3/circom-witnesscalc"

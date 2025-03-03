@@ -10,11 +10,13 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use code_producers::c_elements::InputList;
 use code_producers::components::{IODef, TemplateInstanceIOMap};
 use prost::Message;
+use ruint::aliases::U256;
 use crate::graph::{Operation, TresOperation, UnoOperation};
 use crate::InputSignalsInfo;
 use crate::proto::SignalDescription;
 use crate::proto::vm::{IoDef, IoDefs};
 use crate::vm::{Function, Template};
+use crate::vm2::{Function as Function2};
 // format of the wtns.graph file:
 // + magic line: wtns.graph.001
 // + 4 bytes unsigned LE 32-bit integer: number of nodes
@@ -60,6 +62,9 @@ impl From<crate::proto::Node> for crate::graph::Node {
 impl From<&crate::graph::Node> for crate::proto::node::Node {
     fn from(node: &crate::graph::Node) -> Self {
         match node {
+            crate::graph::Node::Unknown => {
+                panic!("Unknown node serialization not implemented");
+            }
             crate::graph::Node::Input(i) => {
                 crate::proto::node::Node::Input (crate::proto::InputNode {
                     idx: *i as u32
@@ -199,6 +204,17 @@ pub struct CompiledCircuit {
     pub functions: Vec<Function>,
     pub signals_num: usize,
     pub constants: Vec<Fr>,
+    pub inputs: InputList,
+    pub witness_signals: Vec<usize>,
+    pub io_map: TemplateInstanceIOMap,
+}
+
+pub struct CompiledCircuit2 {
+    pub main_template_id: usize,
+    pub templates: Vec<Template>,
+    pub functions: Vec<Function2>,
+    pub signals_num: usize,
+    pub constants: Vec<U256>,
     pub inputs: InputList,
     pub witness_signals: Vec<usize>,
     pub io_map: TemplateInstanceIOMap,
@@ -428,6 +444,85 @@ pub fn deserialize_witnesscalc_vm(
     })
 }
 
+pub fn deserialize_witnesscalc_vm2(
+    mut r: impl Read) -> std::io::Result<CompiledCircuit2>{
+
+    let mut br = WriteBackReader::new(&mut r);
+    let mut magic = [0u8; WITNESSCALC_VM_MAGIC.len()];
+
+    br.read_exact(&mut magic)?;
+
+    if !magic.eq(WITNESSCALC_VM_MAGIC) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "vm file does not look like a witnesscalc vm file"));
+    };
+
+    let md: crate::proto::vm::VmMd = read_message(&mut br)?;
+
+    let mut templates: Vec<Template> = Vec::with_capacity(md.templates_num as usize);
+    for _ in 0..md.templates_num {
+        let tmpl: crate::proto::vm::Template = read_message(&mut br)?;
+        templates.push(Template::try_from(&tmpl).unwrap());
+    }
+
+    let mut functions: Vec<Function2> = Vec::with_capacity(md.functions_num as usize);
+    for _ in 0..md.functions_num {
+        let func: crate::proto::vm::Function = read_message(&mut br)?;
+        functions.push(Function2::try_from(&func).unwrap());
+    }
+
+    let mut constants = Vec::with_capacity(md.constants_num as usize);
+    for _ in 0 .. md.constants_num {
+        let mut buf = [0u8; 32];
+        br.read_exact(&mut buf)?;
+        let c = U256::from_le_slice(&buf);
+        constants.push(c);
+    }
+
+    Ok(CompiledCircuit2{
+        main_template_id: md.main_template_id.try_into()
+            .expect("main template id too large for this architecture"),
+        templates,
+        functions,
+        signals_num: md.signals_num.try_into()
+            .expect("signals number too large for this architecture"),
+        constants,
+        inputs: md.inputs.iter()
+            .map(|(sig_name, sig_desc)| (
+                sig_name.clone(),
+                TryInto::<usize>::try_into(sig_desc.offset)
+                    .expect("signal offset is too large for this architecture"),
+                TryInto::<usize>::try_into(sig_desc.len)
+                    .expect("signals length is too large for this architecture"),
+            ))
+            .collect(),
+        witness_signals: md.witness_signals.iter()
+            .map(|x| TryInto::<usize>::try_into(*x)
+                .expect("witness signal index is too large for this architecture"))
+            .collect(),
+        io_map: md.io_map
+            .iter()
+            .map(|(tmpl_id, io_defs)| (
+                TryInto::<usize>::try_into(*tmpl_id)
+                    .expect("template index is too large for this architecture"),
+                io_defs.io_defs.iter()
+                    .map(|d| IODef {
+                        code: d.code.try_into()
+                            .expect("signal code is too large for this architecture"),
+                        offset: d.offset.try_into()
+                            .expect("signal offset is too large for this architecture"),
+                        lengths: d.lengths.iter()
+                            .map(|l| TryInto::<usize>::try_into(*l)
+                                .expect("signal length is too large for this architecture"))
+                            .collect(),
+                    })
+                    .collect(),
+            ))
+            .collect(),
+    })
+}
+
 pub fn deserialize_witnesscalc_graph(
     r: impl Read) -> std::io::Result<(Vec<crate::graph::Node>, Vec<usize>, InputSignalsInfo)> {
 
@@ -441,8 +536,8 @@ pub fn deserialize_witnesscalc_graph(
             std::io::ErrorKind::InvalidData, "Invalid magic"));
     }
 
-    let mut nodes = Vec::new();
     let nodes_num = br.read_u64::<LittleEndian>()?;
+    let mut nodes = Vec::with_capacity(nodes_num as usize);
     for _ in 0..nodes_num {
         let n: crate::proto::Node = read_message(&mut br)?;
         let n2: crate::graph::Node = n.into();

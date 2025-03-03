@@ -2,10 +2,12 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 // #[allow(dead_code)]
-mod field;
+pub mod field;
 pub mod graph;
 pub mod storage;
 pub mod vm;
+// Implementation of VM based on U256 type
+pub mod vm2;
 
 use std::collections::HashMap;
 use std::ffi::{c_void, c_char, c_int, CStr};

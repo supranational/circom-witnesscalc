@@ -94,7 +94,7 @@ impl Operation {
             // TODO test with conner case when it is possible to get the number
             //      bigger then modulus
             Bxor => a.bitxor(b),
-            Idiv => a / b,
+            Idiv => if b == U256::ZERO { U256::ZERO } else { a / b },
         }
     }
 
@@ -235,6 +235,7 @@ impl From<&TresOperation> for crate::proto::TresOp {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Node {
+    Unknown,
     Input(usize),
     Constant(U256),
     #[serde(serialize_with = "ark_se", deserialize_with = "ark_de")]
@@ -242,6 +243,12 @@ pub enum Node {
     UnoOp(UnoOperation, usize),
     Op(Operation, usize, usize),
     TresOp(TresOperation, usize, usize, usize),
+}
+
+impl Default for Node {
+    fn default() -> Self {
+        Node::Unknown
+    }
 }
 
 // TODO remove pub from Vec<Node>
@@ -256,6 +263,7 @@ impl Nodes {
     pub fn to_const(&self, idx: NodeIdx) -> Result<U256, NodeConstErr> {
         let me = self.0.get(idx.0).ok_or(NodeConstErr::EmptyNode(idx))?;
         match me {
+            Node::Unknown => panic!("Unknown node"),
             Node::Constant(v) => Ok(*v),
             Node::UnoOp(op, a) => {
                 Ok(op.eval(
@@ -373,6 +381,7 @@ pub fn evaluate(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<Fr> {
     let mut values = Vec::with_capacity(nodes.len());
     for &node in nodes.iter() {
         let value = match node {
+            Node::Unknown => panic!("Unknown node"),
             Node::Constant(c) => u256_to_fr(&c),
             Node::MontConstant(c) => c,
             Node::Input(i) => u256_to_fr(&inputs[i]),
@@ -424,6 +433,7 @@ pub fn evaluate_parallel(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> 
             let mut values = Vec::with_capacity(nodes.len());
             for &node in nodes.iter() {
                 let value = match node {
+                    Node::Unknown => panic!("Unknown node"),
                     Node::Constant(c) => u256_to_fr(&c),
                     Node::MontConstant(c) => c,
                     Node::Input(i) => u256_to_fr(&inputs[i]),
@@ -576,6 +586,8 @@ fn random_eval(nodes: &mut [Node]) -> Vec<U256> {
     for node in nodes.iter() {
         use Operation::*;
         let value = match node {
+            Node::Unknown => panic!("Unknown node"),
+
             // Constants evaluate to themselves
             Node::Constant(c) => *c,
 
@@ -673,6 +685,7 @@ pub fn montgomery_form(nodes: &mut [Node]) {
         use Node::*;
         use Operation::*;
         match node {
+            Unknown => panic!("Unknown node"),
             Constant(c) => *node = MontConstant(u256_to_fr(c)),
             MontConstant(..) => (),
             Input(..) => (),
@@ -833,11 +846,11 @@ fn u_lt(a: &U256, b: &U256) -> U256 {
     }
 }
 
-fn fr_to_u256(x: &Fr) -> U256 {
+pub fn fr_to_u256(x: &Fr) -> U256 {
     U256::from_limbs(x.into_bigint().0)
 }
 
-fn u256_to_fr(x: &U256) -> Fr {
+pub fn u256_to_fr(x: &U256) -> Fr {
     Fr::from_bigint(BigInt::new(x.into_limbs())).unwrap()
 }
 
