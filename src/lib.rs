@@ -6,8 +6,6 @@ pub mod field;
 pub mod graph;
 pub mod storage;
 pub mod vm;
-// Implementation of VM based on U256 type
-pub mod vm2;
 
 use std::collections::HashMap;
 use std::ffi::{c_void, c_char, c_int, CStr};
@@ -99,7 +97,7 @@ pub unsafe extern "C" fn gw_calc_witness(
         }
     };
 
-    let witness_data = wtns_from_witness(witness);
+    let witness_data = wtns_from_fr_witness(witness);
 
     unsafe {
         *wtns_len = witness_data.len();
@@ -117,14 +115,26 @@ pub unsafe extern "C" fn gw_calc_witness(
 }
 
 // create a wtns file bytes from witness (array of field elements)
-pub fn wtns_from_witness(witness: Vec<Fr>) -> Vec<u8> {
+pub fn wtns_from_fr_witness(witness: Vec<Fr>) -> Vec<u8> {
     let vec_witness: Vec<FieldElement<32>> = witness
         .iter()
         .map(|a| TryInto::<[u8; 32]>::try_into(a.into_bigint().to_bytes_le().as_slice()).unwrap().into())
         .collect();
+    wtns_from_witness(vec_witness)
+}
+
+pub fn wtns_from_u256_witness(witness: Vec<U256>) -> Vec<u8> {
+    let vec_witness: Vec<FieldElement<32>> = witness
+        .iter()
+        .map(|a| TryInto::<[u8; 32]>::try_into(a.as_le_slice()).unwrap().into())
+        .collect();
+    wtns_from_witness(vec_witness)
+}
+
+pub fn wtns_from_witness(witness: Vec<FieldElement<32>>) -> Vec<u8> {
     let mut buf = Vec::new();
     let m: [u8; 32] = Fr::MODULUS.to_bytes_le().as_slice().try_into().unwrap();
-    let mut wtns_f = wtns_file::WtnsFile::from_vec(vec_witness, m.into());
+    let mut wtns_f = wtns_file::WtnsFile::from_vec(witness, m.into());
     wtns_f.version = 2;
     // We write into the buffer, so we should not have any errors here.
     // Panic in case of out of memory is fine.

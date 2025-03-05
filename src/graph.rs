@@ -129,7 +129,7 @@ impl Operation {
                 Ordering::Equal => Fr::zero(),
                 _ => Fr::one(),
             },
-            Lt => crate::vm::u_lt(&a, &b),
+            Lt => u256_to_fr(&u_lt(&fr_to_u256(&a), &fr_to_u256(&b))),
             Gt => u256_to_fr(&u_gt(&fr_to_u256(&a), &fr_to_u256(&b))),
             Leq => u256_to_fr(&u_lte(&fr_to_u256(&a), &fr_to_u256(&b))),
             Geq => u256_to_fr(&u_gte(&fr_to_u256(&a), &fr_to_u256(&b))),
@@ -334,7 +334,6 @@ impl std::fmt::Display for NodeConstErr {
 }
 
 impl Error for NodeConstErr {}
-
 
 fn compute_shl_uint(a: U256, b: U256) -> U256 {
     debug_assert!(b.lt(&U256::from(256)));

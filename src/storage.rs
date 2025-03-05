@@ -4,8 +4,6 @@ use std::fmt::{Debug, Formatter};
 use std::io::{Write, Read};
 use ark_bn254::Fr;
 use ark_ff::{PrimeField};
-use ark_serialize::CanonicalDeserialize;
-use ark_serialize::CanonicalSerialize;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use code_producers::c_elements::InputList;
 use code_producers::components::{IODef, TemplateInstanceIOMap};
@@ -16,7 +14,6 @@ use crate::InputSignalsInfo;
 use crate::proto::SignalDescription;
 use crate::proto::vm::{IoDef, IoDefs};
 use crate::vm::{Function, Template};
-use crate::vm2::{Function as Function2};
 // format of the wtns.graph file:
 // + magic line: wtns.graph.001
 // + 4 bytes unsigned LE 32-bit integer: number of nodes
@@ -203,17 +200,6 @@ pub struct CompiledCircuit {
     pub templates: Vec<Template>,
     pub functions: Vec<Function>,
     pub signals_num: usize,
-    pub constants: Vec<Fr>,
-    pub inputs: InputList,
-    pub witness_signals: Vec<usize>,
-    pub io_map: TemplateInstanceIOMap,
-}
-
-pub struct CompiledCircuit2 {
-    pub main_template_id: usize,
-    pub templates: Vec<Template>,
-    pub functions: Vec<Function2>,
-    pub signals_num: usize,
     pub constants: Vec<U256>,
     pub inputs: InputList,
     pub witness_signals: Vec<usize>,
@@ -328,7 +314,7 @@ pub fn serialize_witnesscalc_vm(
     }
 
     for c in &cs.constants {
-        c.serialize_compressed(&mut w).unwrap();
+        w.write_all(c.as_le_slice())?;
     }
 
     Ok(())
@@ -397,90 +383,13 @@ pub fn deserialize_witnesscalc_vm(
 
     let mut constants = Vec::with_capacity(md.constants_num as usize);
     for _ in 0 .. md.constants_num {
-        let c: Fr = Fr::deserialize_compressed(&mut br).unwrap();
-        constants.push(c);
-    }
-
-    Ok(CompiledCircuit{
-        main_template_id: md.main_template_id.try_into()
-            .expect("main template id too large for this architecture"),
-        templates,
-        functions,
-        signals_num: md.signals_num.try_into()
-            .expect("signals number too large for this architecture"),
-        constants,
-        inputs: md.inputs.iter()
-            .map(|(sig_name, sig_desc)| (
-                sig_name.clone(),
-                TryInto::<usize>::try_into(sig_desc.offset)
-                    .expect("signal offset is too large for this architecture"),
-                TryInto::<usize>::try_into(sig_desc.len)
-                    .expect("signals length is too large for this architecture"),
-            ))
-            .collect(),
-        witness_signals: md.witness_signals.iter()
-            .map(|x| TryInto::<usize>::try_into(*x)
-                .expect("witness signal index is too large for this architecture"))
-            .collect(),
-        io_map: md.io_map
-            .iter()
-            .map(|(tmpl_id, io_defs)| (
-                TryInto::<usize>::try_into(*tmpl_id)
-                    .expect("template index is too large for this architecture"),
-                io_defs.io_defs.iter()
-                    .map(|d| IODef {
-                        code: d.code.try_into()
-                            .expect("signal code is too large for this architecture"),
-                        offset: d.offset.try_into()
-                            .expect("signal offset is too large for this architecture"),
-                        lengths: d.lengths.iter()
-                            .map(|l| TryInto::<usize>::try_into(*l)
-                                .expect("signal length is too large for this architecture"))
-                            .collect(),
-                    })
-                    .collect(),
-            ))
-            .collect(),
-    })
-}
-
-pub fn deserialize_witnesscalc_vm2(
-    mut r: impl Read) -> std::io::Result<CompiledCircuit2>{
-
-    let mut br = WriteBackReader::new(&mut r);
-    let mut magic = [0u8; WITNESSCALC_VM_MAGIC.len()];
-
-    br.read_exact(&mut magic)?;
-
-    if !magic.eq(WITNESSCALC_VM_MAGIC) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "vm file does not look like a witnesscalc vm file"));
-    };
-
-    let md: crate::proto::vm::VmMd = read_message(&mut br)?;
-
-    let mut templates: Vec<Template> = Vec::with_capacity(md.templates_num as usize);
-    for _ in 0..md.templates_num {
-        let tmpl: crate::proto::vm::Template = read_message(&mut br)?;
-        templates.push(Template::try_from(&tmpl).unwrap());
-    }
-
-    let mut functions: Vec<Function2> = Vec::with_capacity(md.functions_num as usize);
-    for _ in 0..md.functions_num {
-        let func: crate::proto::vm::Function = read_message(&mut br)?;
-        functions.push(Function2::try_from(&func).unwrap());
-    }
-
-    let mut constants = Vec::with_capacity(md.constants_num as usize);
-    for _ in 0 .. md.constants_num {
         let mut buf = [0u8; 32];
         br.read_exact(&mut buf)?;
         let c = U256::from_le_slice(&buf);
         constants.push(c);
     }
 
-    Ok(CompiledCircuit2{
+    Ok(CompiledCircuit {
         main_template_id: md.main_template_id.try_into()
             .expect("main template id too large for this architecture"),
         templates,
@@ -615,6 +524,32 @@ impl<R: Read> Write for WriteBackReader<R> {
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+pub fn init_input_signals(
+    inputs_desc: &InputList,
+    inputs: &HashMap<String, Vec<U256>>,
+    signals: &mut [Option<U256>],
+) {
+    signals[0] = Some(U256::from(1u64));
+
+    for (name, offset, len) in inputs_desc {
+        match inputs.get(name) {
+            Some(values) => {
+                if values.len() != *len {
+                    panic!(
+                        "input signal {} has different length in inputs file, want {}, actual {}",
+                        name, len, values.len());
+                }
+                for (i, v) in values.iter().enumerate() {
+                    signals[*offset + i] = Some(*v);
+                }
+            }
+            None => {
+                panic!("input signal {} is not found in inputs file", name);
+            }
+        }
     }
 }
 
@@ -779,24 +714,6 @@ mod tests {
     }
 
     #[test]
-    fn test_fr_serialize() {
-        // Check that default Fr serializer packs the value in little-endian
-        let want = "000000f093f5e1439170b97948e833285d588181b64550b829a031e1724e6430";
-        let f = Fr::from_str("21888242871839275222246405745257275088548364400416034343698204186575808495616").unwrap();
-
-        let mut buf = Vec::new();
-        f.serialize_compressed(&mut buf).unwrap();
-        assert_eq!(hex::encode(&buf), want);
-
-        let want = "9488010000000000000000000000000000000000000000000000000000000000";
-        let f = Fr::from_str("100500").unwrap();
-
-        buf.clear();
-        f.serialize_compressed(&mut buf).unwrap();
-        assert_eq!(hex::encode(&buf), want);
-    }
-
-    #[test]
     fn test_serialization() {
 
         let mut buf: Vec<u8> = Vec::new();
@@ -816,7 +733,7 @@ mod tests {
         ];
         io_map.insert(100, io_list);
 
-        let cs = CompiledCircuit{
+        let cs = CompiledCircuit {
             main_template_id: 2,
             templates: vec![
                 Template{
@@ -866,7 +783,7 @@ mod tests {
                 },
             ],
             signals_num: 3,
-            constants: vec![Fr::from(100500)],
+            constants: vec![U256::from(100500)],
             inputs: vec![("inp1".to_string(), 5, 10)],
             witness_signals: vec![1, 2, 3],
             io_map,
