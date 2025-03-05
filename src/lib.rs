@@ -97,7 +97,7 @@ pub unsafe extern "C" fn gw_calc_witness(
         }
     };
 
-    let witness_data = wtns_from_fr_witness(witness);
+    let witness_data = wtns_from_u256_witness(witness);
 
     unsafe {
         *wtns_len = witness_data.len();
@@ -115,14 +115,6 @@ pub unsafe extern "C" fn gw_calc_witness(
 }
 
 // create a wtns file bytes from witness (array of field elements)
-pub fn wtns_from_fr_witness(witness: Vec<Fr>) -> Vec<u8> {
-    let vec_witness: Vec<FieldElement<32>> = witness
-        .iter()
-        .map(|a| TryInto::<[u8; 32]>::try_into(a.into_bigint().to_bytes_le().as_slice()).unwrap().into())
-        .collect();
-    wtns_from_witness(vec_witness)
-}
-
 pub fn wtns_from_u256_witness(witness: Vec<U256>) -> Vec<u8> {
     let vec_witness: Vec<FieldElement<32>> = witness
         .iter()
@@ -131,7 +123,7 @@ pub fn wtns_from_u256_witness(witness: Vec<U256>) -> Vec<u8> {
     wtns_from_witness(vec_witness)
 }
 
-pub fn wtns_from_witness(witness: Vec<FieldElement<32>>) -> Vec<u8> {
+fn wtns_from_witness(witness: Vec<FieldElement<32>>) -> Vec<u8> {
     let mut buf = Vec::new();
     let m: [u8; 32] = Fr::MODULUS.to_bytes_le().as_slice().try_into().unwrap();
     let mut wtns_f = wtns_file::WtnsFile::from_vec(witness, m.into());
@@ -142,7 +134,7 @@ pub fn wtns_from_witness(witness: Vec<FieldElement<32>>) -> Vec<u8> {
     buf
 }
 
-pub fn calc_witness(inputs: &str, graph_data: &[u8]) -> Result<Vec<Fr>, Error> {
+pub fn calc_witness(inputs: &str, graph_data: &[u8]) -> Result<Vec<U256>, Error> {
 
     let start = std::time::Instant::now();
     let inputs = deserialize_inputs(inputs.as_bytes())?;

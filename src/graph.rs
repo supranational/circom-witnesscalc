@@ -372,7 +372,7 @@ pub fn optimize(nodes: &mut Vec<Node>, outputs: &mut [usize]) {
     montgomery_form(nodes);
 }
 
-pub fn evaluate(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<Fr> {
+pub fn evaluate(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<U256> {
     // assert_valid(nodes);
 
     let start = Instant::now();
@@ -381,12 +381,12 @@ pub fn evaluate(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<Fr> {
     for &node in nodes.iter() {
         let value = match node {
             Node::Unknown => panic!("Unknown node"),
-            Node::Constant(c) => u256_to_fr(&c),
-            Node::MontConstant(c) => c,
-            Node::Input(i) => u256_to_fr(&inputs[i]),
-            Node::Op(op, a, b) => op.eval_fr(values[a], values[b]),
-            Node::UnoOp(op, a) => op.eval_fr(values[a]),
-            Node::TresOp(op, a, b, c) => op.eval_fr(values[a], values[b], values[c]),
+            Node::Constant(c) => c,
+            Node::MontConstant(c) => fr_to_u256(&c),
+            Node::Input(i) => inputs[i],
+            Node::Op(op, a, b) => op.eval(values[a], values[b]),
+            Node::UnoOp(op, a) => op.eval(values[a]),
+            Node::TresOp(op, a, b, c) => op.eval(values[a], values[b], values[c]),
         };
         values.push(value);
     }

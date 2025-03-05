@@ -2,7 +2,7 @@ use std::env;
 use std::fs::File;
 use std::io::Write;
 use std::time::Instant;
-use circom_witnesscalc::{calc_witness, wtns_from_fr_witness};
+use circom_witnesscalc::{calc_witness, wtns_from_u256_witness};
 
 struct Args {
     graph_file: String,
@@ -35,7 +35,7 @@ fn main() {
     let start = Instant::now();
 
     let witness = calc_witness(&inputs_data, &graph_data).unwrap();
-    let wtns_bytes = wtns_from_fr_witness(witness);
+    let wtns_bytes = wtns_from_u256_witness(witness);
 
     let duration = start.elapsed();
     println!("Witness generated in: {:?}", duration);
