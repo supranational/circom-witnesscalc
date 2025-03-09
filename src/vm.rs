@@ -3,16 +3,14 @@ use std::cmp::Ordering;
 use std::fmt::{Debug, Display};
 use std::num::TryFromIntError;
 use std::rc::Rc;
-use std::str::FromStr;
-use ark_bn254::Fr;
-use ark_ff::{BigInt, One, PrimeField, Zero};
 use code_producers::c_elements::TemplateInstanceIOMap;
 use compiler::intermediate_representation::ir_interface::StatusInput;
-use lazy_static::lazy_static;
+use ruint::aliases::U256;
+use crate::field::M;
 use crate::graph::{Operation, UnoOperation};
 
 pub struct Component {
-    pub vars: Vec<Option<Fr>>,
+    pub vars: Vec<Option<U256>>,
     pub signals_start: usize,
     pub template_id: usize,
     pub subcomponents: Vec<Rc<RefCell<Component>>>,
@@ -20,6 +18,98 @@ pub struct Component {
 }
 
 #[cfg_attr(test, derive(Debug))]
+#[derive(Clone)]
+pub struct Function {
+    pub name: String,
+    pub symbol: String,
+    pub code: Vec<u8>,
+    pub line_numbers: Vec<usize>,
+}
+
+impl TryInto<crate::proto::vm::Function> for &Function {
+    type Error = TryFromIntError;
+
+    fn try_into(self) -> Result<crate::proto::vm::Function, Self::Error> {
+        Ok(crate::proto::vm::Function{
+            name: self.name.clone(),
+            symbol: self.symbol.clone(),
+            code: self.code.clone(),
+            line_numbers: self.line_numbers.iter()
+                .map(|x| TryInto::try_into(*x))
+                .collect::<Result<Vec<u64>, TryFromIntError>>()?,
+        })
+    }
+}
+
+impl TryFrom<&crate::proto::vm::Function> for Function {
+    type Error = TryFromIntError;
+
+    fn try_from(value: &crate::proto::vm::Function) -> Result<Self, Self::Error> {
+        Ok(Function{
+            name: value.name.clone(),
+            symbol: value.symbol.clone(),
+            code: value.code.clone(),
+            line_numbers: value.line_numbers
+                .iter()
+                .map(|x| TryInto::<usize>::try_into(*x))
+                .collect::<Result<Vec<usize>, TryFromIntError>>()?,
+        })
+    }
+}
+
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone)]
+pub struct Template {
+    pub name: String,
+    pub code: Vec<u8>,
+    pub line_numbers: Vec<usize>,
+    pub components: Vec<ComponentTmpl>,
+    pub var_stack_depth: usize,
+    pub number_of_inputs: usize,
+}
+
+impl TryInto<crate::proto::vm::Template> for &Template {
+    type Error = TryFromIntError;
+
+    fn try_into(self) -> Result<crate::proto::vm::Template, Self::Error> {
+        Ok(crate::proto::vm::Template{
+            name:self.name.clone(),
+            code: self.code.clone(),
+            line_numbers: self.line_numbers.iter()
+                .map(|x| TryInto::try_into(*x))
+                .collect::<Result<Vec<u64>, TryFromIntError>>()?,
+            components: self.components.iter()
+                .map(TryInto::<crate::proto::vm::ComponentTmpl>::try_into)
+                .collect::<Result<Vec<_>, _>>()?,
+            var_stack_depth: self.var_stack_depth.try_into()?,
+            number_of_inputs: self.number_of_inputs.try_into()?,
+        })
+    }
+}
+
+impl TryFrom<&crate::proto::vm::Template> for Template {
+    type Error = TryFromIntError;
+
+    fn try_from(value: &crate::proto::vm::Template) -> Result<Self, Self::Error> {
+        Ok(Template{
+            name: value.name.clone(),
+            code: value.code.clone(),
+            line_numbers: value.line_numbers
+                .iter()
+                .map(|x| TryInto::<usize>::try_into(*x))
+                .collect::<Result<Vec<usize>, TryFromIntError>>()?,
+            components: value.components.iter()
+                .map(|x| ComponentTmpl::try_from(x).unwrap())
+                .collect::<Vec<ComponentTmpl>>(),
+            var_stack_depth: value.var_stack_depth.try_into()?,
+            number_of_inputs: value.number_of_inputs.try_into()?,
+        })
+    }
+}
+
+
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone)]
 pub struct ComponentTmpl {
     pub symbol: String,
     pub sub_cmp_idx: usize,
@@ -70,94 +160,6 @@ impl TryFrom<&crate::proto::vm::ComponentTmpl> for ComponentTmpl {
     }
 }
 
-#[cfg_attr(test, derive(Debug))]
-pub struct Template {
-    pub name: String,
-    pub code: Vec<u8>,
-    pub line_numbers: Vec<usize>,
-    pub components: Vec<ComponentTmpl>,
-    pub var_stack_depth: usize,
-    pub number_of_inputs: usize,
-}
-
-impl TryInto<crate::proto::vm::Template> for &Template {
-    type Error = TryFromIntError;
-
-    fn try_into(self) -> Result<crate::proto::vm::Template, Self::Error> {
-        Ok(crate::proto::vm::Template{
-            name:self.name.clone(),
-            code: self.code.clone(),
-            line_numbers: self.line_numbers.iter()
-                .map(|x| TryInto::try_into(*x))
-                .collect::<Result<Vec<u64>, TryFromIntError>>()?,
-            components: self.components.iter()
-                .map(TryInto::<crate::proto::vm::ComponentTmpl>::try_into)
-                .collect::<Result<Vec<_>, _>>()?,
-            var_stack_depth: self.var_stack_depth.try_into()?,
-            number_of_inputs: self.number_of_inputs.try_into()?,
-        })
-    }
-}
-
-impl TryFrom<&crate::proto::vm::Template> for Template {
-    type Error = TryFromIntError;
-
-    fn try_from(value: &crate::proto::vm::Template) -> Result<Self, Self::Error> {
-        Ok(Template{
-            name: value.name.clone(),
-            code: value.code.clone(),
-            line_numbers: value.line_numbers
-                .iter()
-                .map(|x| TryInto::<usize>::try_into(*x))
-                .collect::<Result<Vec<usize>, TryFromIntError>>()?,
-            components: value.components.iter()
-                .map(|x| ComponentTmpl::try_from(x).unwrap())
-                .collect::<Vec<ComponentTmpl>>(),
-            var_stack_depth: value.var_stack_depth.try_into()?,
-            number_of_inputs: value.number_of_inputs.try_into()?,
-        })
-    }
-}
-
-#[cfg_attr(test, derive(Debug))]
-pub struct Function {
-    pub name: String,
-    pub symbol: String,
-    pub code: Vec<u8>,
-    pub line_numbers: Vec<usize>,
-}
-
-impl TryInto<crate::proto::vm::Function> for &Function {
-    type Error = TryFromIntError;
-
-    fn try_into(self) -> Result<crate::proto::vm::Function, Self::Error> {
-        Ok(crate::proto::vm::Function{
-            name: self.name.clone(),
-            symbol: self.symbol.clone(),
-            code: self.code.clone(),
-            line_numbers: self.line_numbers.iter()
-                .map(|x| TryInto::try_into(*x))
-                .collect::<Result<Vec<u64>, TryFromIntError>>()?,
-        })
-    }
-}
-
-impl TryFrom<&crate::proto::vm::Function> for Function {
-    type Error = TryFromIntError;
-
-    fn try_from(value: &crate::proto::vm::Function) -> Result<Self, Self::Error> {
-        Ok(Function{
-            name: value.name.clone(),
-            symbol: value.symbol.clone(),
-            code: value.code.clone(),
-            line_numbers: value.line_numbers
-                .iter()
-                .map(|x| TryInto::<usize>::try_into(*x))
-                .collect::<Result<Vec<usize>, TryFromIntError>>()?,
-        })
-    }
-}
-
 enum Frame<'a, 'b> {
     Component {
         ip: usize,
@@ -166,7 +168,7 @@ enum Frame<'a, 'b> {
     },
     Function {
         ip: usize,
-        vars: Vec<Option<Fr>>,
+        vars: Vec<Option<U256>>,
         code: &'a [u8],
         function: &'b Function,
         return_num: usize,
@@ -199,11 +201,11 @@ impl Frame<'_, '_> {
 
 struct VM<'a, 'b> {
     templates: &'a Vec<Template>,
-    signals: &'a mut [Option<Fr>],
-    constants: &'a Vec<Fr>,
-    stack: Vec<Fr>,
+    signals: &'a mut [Option<U256>],
+    constants: &'a Vec<U256>,
+    stack: Vec<U256>,
     stack_u32: Vec<u32>,
-    expected_signals: Option<&'a Vec<Fr>>,
+    expected_signals: Option<&'a Vec<U256>>,
     call_frames: Vec<Frame<'a, 'b>>,
 }
 
@@ -229,7 +231,11 @@ impl<'a, 'b> VM<'a, 'b> {
         if self.signals[sig_idx].is_some() {
             panic!("Signal already set");
         }
-        self.signals[sig_idx] = Some(self.stack.pop().unwrap());
+        let v = self.stack.pop().unwrap();
+        if v > M {
+            panic!("v = {}", v);
+        }
+        self.signals[sig_idx] = Some(v);
         self.assert_signal(sig_idx);
     }
 
@@ -272,6 +278,13 @@ impl<'a, 'b> VM<'a, 'b> {
                 }
             }
         }
+    }
+
+    fn push_stack(&mut self, v: U256) {
+        if v > M {
+            panic!("v = {}", v);
+        }
+        self.stack.push(v);
     }
 }
 
@@ -734,36 +747,6 @@ fn calc_mapped_signal_idx(
     sig_idx
 }
 
-lazy_static! {
-    static ref half_m: Fr = {
-        Fr::from_str("10944121435919637611123202872628637544274182200208017171849102093287904247808").unwrap()
-    };
-}
-
-
-pub fn u_lt(a: &Fr, b: &Fr) -> Fr {
-    let a_neg = &(*half_m) < a;
-    let b_neg = &(*half_m) < b;
-
-    match (a_neg, b_neg) {
-        (false, false) => Fr::from(a < b),
-        (true, false) => Fr::one(),
-        (false, true) => Fr::zero(),
-        (true, true) => Fr::from(a < b),
-    }
-}
-
-fn bigint_to_u64<const N: usize>(i: BigInt<N>) -> Option<u64> {
-    let z = BigInt::<N>::from(0u32);
-    let max = BigInt::<N>::from(u64::MAX);
-
-    if i < z || i > max {
-        return None;
-    }
-
-    Some(i.0[0])
-}
-
 pub fn build_component(
     compiled_templates: &[Template],
     template_id: usize, signals_start: usize) -> Component {
@@ -805,9 +788,9 @@ pub fn build_component(
 
 pub fn execute(
     component: Rc<RefCell<Component>>, templates: &Vec<Template>,
-    functions: &[Function], constants: &Vec<Fr>,
-    signals: &mut [Option<Fr>], io_map: &TemplateInstanceIOMap,
-    expected_signals: Option<&Vec<Fr>>) {
+    functions: &[Function], constants: &Vec<U256>,
+    signals: &mut [Option<U256>], io_map: &TemplateInstanceIOMap,
+    expected_signals: Option<&Vec<U256>>) {
 
     let mut vm = VM {
         templates,
@@ -941,13 +924,13 @@ pub fn execute(
             OpCode::GetConstant8 => {
                 let const_idx = read_usize(code, ip);
                 ip += size_of::<usize>();
-                vm.stack.push(vm.constants[const_idx]);
+                vm.push_stack(vm.constants[const_idx]);
             }
             OpCode::Push8 => {
                 let val = read_usize(code, ip);
                 ip += size_of::<usize>();
-                let val = Fr::from(val as u64);
-                vm.stack.push(val);
+                let val = U256::from(val as u64);
+                vm.push_stack(val);
             }
             OpCode::Push4 => {
                 let val = read_u32(code, ip);
@@ -986,7 +969,11 @@ pub fn execute(
                     if vars[var_idx].is_none() {
                         panic!("Variable not set");
                     }
-                    vm.stack.push(vars[var_idx].unwrap());
+                    let v = vars[var_idx].unwrap();
+                    if v > M {
+                        panic!("v = {}", v);
+                    }
+                    vm.stack.push(v);
                 }
             }
             OpCode::GetVariable => {
@@ -1016,7 +1003,11 @@ pub fn execute(
                     if vars[i].is_none() {
                         panic!("Variable not set");
                     }
-                    vm.stack.push(vars[i].unwrap());
+                    let v = vars[i].unwrap();
+                    if v > M {
+                        panic!("v = {}", v);
+                    }
+                    vm.stack.push(v);
                 }
             }
             OpCode::SetVariable4 => {
@@ -1039,7 +1030,7 @@ pub fn execute(
                 }
 
                 let last_frame = vm.call_frames.last_mut().unwrap();
-                let vars: &mut Vec<Option<Fr>> = match last_frame {
+                let vars: &mut Vec<Option<U256>> = match last_frame {
                     Frame::Component { component, .. } => {
                         &mut component.borrow_mut().vars
                     }
@@ -1073,7 +1064,7 @@ pub fn execute(
                 }
 
                 let last_frame = vm.call_frames.last_mut().unwrap();
-                let vars: &mut Vec<Option<Fr>> = match last_frame {
+                let vars: &mut Vec<Option<U256>> = match last_frame {
                     Frame::Component { component, .. } => {
                         &mut component.borrow_mut().vars
                     }
@@ -1143,7 +1134,7 @@ pub fn execute(
                 }
 
                 for sig_idx in sig_start..sig_end {
-                    vm.stack.push(vm.signals[sig_idx].expect("Subcomponent signal is not set"));
+                    vm.push_stack(vm.signals[sig_idx].expect("Subcomponent signal is not set"));
                 }
             }
             OpCode::SetSubSignal => {
@@ -1276,7 +1267,7 @@ pub fn execute(
             OpCode::OpMul => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
-                vm.stack.push(a * b);
+                vm.push_stack(Operation::Mul.eval(a, b));
             }
             OpCode::OpDiv => {
                 let b = vm.stack.pop().unwrap();
@@ -1284,104 +1275,101 @@ pub fn execute(
                 if b.is_zero() {
                     panic!("Division by zero");
                 }
-                vm.stack.push(a / b);
+                vm.push_stack(Operation::Div.eval(a, b));
             }
             OpCode::OpAdd => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
-                vm.stack.push(a + b);
+                vm.push_stack(Operation::Add.eval(a, b));
             }
             OpCode::OpSub => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
-                vm.stack.push(Operation::Sub.eval_fr(a, b));
+                vm.push_stack(Operation::Sub.eval(a, b));
             }
             OpCode::OpPow => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
-                vm.stack.push(Operation::Pow.eval_fr(a, b));
+                vm.push_stack(Operation::Pow.eval(a, b));
             }
             OpCode::OpIntDiv => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
-                vm.stack.push(Operation::Idiv.eval_fr(a, b));
+                vm.push_stack(Operation::Idiv.eval(a, b));
             }
             OpCode::OpMod => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
-                vm.stack.push(Operation::Mod.eval_fr(a, b));
+                vm.push_stack(Operation::Mod.eval(a, b));
             }
             OpCode::OpShL => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
-                vm.stack.push(Operation::Shl.eval_fr(a, b));
+                vm.push_stack(Operation::Shl.eval(a, b));
             }
             OpCode::OpShR => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
-                vm.stack.push(Operation::Shr.eval_fr(a, b));
+                vm.push_stack(Operation::Shr.eval(a, b));
             }
             OpCode::OpLtE => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
-                vm.stack.push(Operation::Leq.eval_fr(a, b));
+                vm.push_stack(Operation::Leq.eval(a, b));
             }
             OpCode::OpGtE => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
-                vm.stack.push(Operation::Geq.eval_fr(a, b));
+                vm.push_stack(Operation::Geq.eval(a, b));
             }
             OpCode::OpLt => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
-                vm.stack.push(u_lt(&a, &b));
+                vm.push_stack(Operation::Lt.eval(a, b));
             }
             OpCode::OpGt => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
-                vm.stack.push(Operation::Gt.eval_fr(a, b));
+                vm.push_stack(Operation::Gt.eval(a, b));
             }
             OpCode::OpEq => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
-                vm.stack.push(Operation::Eq.eval_fr(a, b));
+                vm.push_stack(Operation::Eq.eval(a, b));
             }
             OpCode::OpNe => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
-                vm.stack.push(match a.cmp(&b) {
-                    Ordering::Equal => Fr::zero(),
-                    _ => Fr::one(),
-                });
+                vm.push_stack(Operation::Neq.eval(a, b));
             }
             OpCode::OpBoolOr => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
-                vm.stack.push(Operation::Lor.eval_fr(a, b));
+                vm.push_stack(Operation::Lor.eval(a, b));
             }
             OpCode::OpBoolAnd => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
-                vm.stack.push(Operation::Land.eval_fr(a, b));
+                vm.push_stack(Operation::Land.eval(a, b));
             }
             OpCode::OpBitOr => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
-                vm.stack.push(Operation::Bor.eval_fr(a, b));
+                vm.push_stack(Operation::Bor.eval(a, b));
             }
             OpCode::OpBitAnd => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
-                vm.stack.push(Operation::Band.eval_fr(a, b));
+                vm.push_stack(Operation::Band.eval(a, b));
             }
             OpCode::OpBitXor => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
-                vm.stack.push(Operation::Bxor.eval_fr(a, b));
+                vm.push_stack(Operation::Bxor.eval(a, b));
             }
             OpCode::OpNeg => {
                 let a = vm.stack.pop().unwrap();
-                vm.stack.push(UnoOperation::Neg.eval_fr(a));
+                vm.push_stack(UnoOperation::Neg.eval(a));
             }
             OpCode::GetSelfSignal4 => {
                 let sig_idx = read_u32(code, ip);
@@ -1404,7 +1392,7 @@ pub fn execute(
                 }
 
                 for sig_idx in sig_start..sig_end {
-                    vm.stack.push(vm.signals[sig_idx].expect("Signal is not set"));
+                    vm.push_stack(vm.signals[sig_idx].expect("Signal is not set"));
                 }
             }
             OpCode::GetSelfSignal => {
@@ -1430,14 +1418,12 @@ pub fn execute(
                 }
 
                 for sig_idx in sig_start..sig_end {
-                    vm.stack.push(vm.signals[sig_idx].expect("Signal is not set"));
+                    vm.push_stack(vm.signals[sig_idx].expect("Signal is not set"));
                 }
             }
             OpCode::OpToAddr => {
                 let f = vm.stack.pop().unwrap();
-                let f = bigint_to_u64(f.into_bigint())
-                    .expect("Value is too large for address");
-                let f: u32 = f.try_into()
+                let f = TryInto::<u32>::try_into(f)
                     .expect("Value is too large for address");
                 vm.stack_u32.push(f);
             }
@@ -1596,4 +1582,10 @@ pub fn execute(
             vm.print_stack_u32();
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn ok() {}
 }

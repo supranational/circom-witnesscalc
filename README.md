@@ -28,7 +28,7 @@ To create a circuit graph file from a Circom 2 program, run the following comman
 # Using compiled binary
 ./build-circuit <path_to_circuit.circom> <path_to_circuit_graph.bin> [-l <path_to_circom_libs/>]* [-i <inputs_file.json>] [-print-unoptimized]
 # Or using `cargo` from the root of the repository
-cargo run --package circom_witnesscalc --bin build-circuit <path_to_circuit.circom> <path_to_circuit_graph.bin> [-l <path_to_circom_libs/>]* [-i <inputs_file.json>] [-print-unoptimized]
+cargo run --package circom-witnesscalc --bin build-circuit <path_to_circuit.circom> <path_to_circuit_graph.bin> [-l <path_to_circom_libs/>]* [-i <inputs_file.json>] [-print-unoptimized]
 ```
 
 Optional flags:
@@ -45,7 +45,7 @@ To generate a witness file from a circuit graph and inputs, run the following co
 # Using compiled binary
 ./calc-witness <path_to_circuit_graph.bin> <path_to_inputs.json> <path_to_output_witness.wtns>
 # Or using `cargo` from the root of the repository
-cargo run --package circom_witnesscalc --bin calc-witness <path_to_circuit_graph.bin> <path_to_inputs.json> <path_to_output_witness.wtns>
+cargo run --package circom-witnesscalc --bin calc-witness <path_to_circuit_graph.bin> <path_to_inputs.json> <path_to_output_witness.wtns>
 ```
 
 ## Run circuits tests

@@ -2,21 +2,21 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 // #[allow(dead_code)]
-mod field;
+pub mod field;
 pub mod graph;
 pub mod storage;
 pub mod vm;
 
 use std::collections::HashMap;
-use std::ffi::{c_void, c_char, c_int, CStr};
+use std::ffi::{c_char, c_int, c_void, CStr};
 use std::slice::from_raw_parts;
 use ruint::aliases::U256;
 use ruint::ParseError;
 use crate::graph::Node;
 use wtns_file::FieldElement;
-use crate::storage::deserialize_witnesscalc_graph;
 use ark_bn254::Fr;
 use ark_ff::{BigInteger, PrimeField};
+use crate::storage::proto_deserializer::deserialize_witnesscalc_graph_from_bytes;
 
 pub type InputSignalsInfo = HashMap<String, (usize, usize)>;
 
@@ -97,7 +97,7 @@ pub unsafe extern "C" fn gw_calc_witness(
         }
     };
 
-    let witness_data = wtns_from_witness(witness);
+    let witness_data = wtns_from_u256_witness(witness);
 
     unsafe {
         *wtns_len = witness_data.len();
@@ -115,14 +115,18 @@ pub unsafe extern "C" fn gw_calc_witness(
 }
 
 // create a wtns file bytes from witness (array of field elements)
-pub fn wtns_from_witness(witness: Vec<Fr>) -> Vec<u8> {
+pub fn wtns_from_u256_witness(witness: Vec<U256>) -> Vec<u8> {
     let vec_witness: Vec<FieldElement<32>> = witness
         .iter()
-        .map(|a| TryInto::<[u8; 32]>::try_into(a.into_bigint().to_bytes_le().as_slice()).unwrap().into())
+        .map(|a| TryInto::<[u8; 32]>::try_into(a.as_le_slice()).unwrap().into())
         .collect();
+    wtns_from_witness(vec_witness)
+}
+
+fn wtns_from_witness(witness: Vec<FieldElement<32>>) -> Vec<u8> {
     let mut buf = Vec::new();
     let m: [u8; 32] = Fr::MODULUS.to_bytes_le().as_slice().try_into().unwrap();
-    let mut wtns_f = wtns_file::WtnsFile::from_vec(vec_witness, m.into());
+    let mut wtns_f = wtns_file::WtnsFile::from_vec(witness, m.into());
     wtns_f.version = 2;
     // We write into the buffer, so we should not have any errors here.
     // Panic in case of out of memory is fine.
@@ -130,7 +134,7 @@ pub fn wtns_from_witness(witness: Vec<Fr>) -> Vec<u8> {
     buf
 }
 
-pub fn calc_witness(inputs: &str, graph_data: &[u8]) -> Result<Vec<Fr>, Error> {
+pub fn calc_witness(inputs: &str, graph_data: &[u8]) -> Result<Vec<U256>, Error> {
 
     let start = std::time::Instant::now();
     let inputs = deserialize_inputs(inputs.as_bytes())?;
@@ -138,7 +142,7 @@ pub fn calc_witness(inputs: &str, graph_data: &[u8]) -> Result<Vec<Fr>, Error> {
 
     let start = std::time::Instant::now();
     let (nodes, signals, input_mapping): (Vec<Node>, Vec<usize>, InputSignalsInfo) =
-        deserialize_witnesscalc_graph(std::io::Cursor::new(graph_data)).unwrap();
+        deserialize_witnesscalc_graph_from_bytes(graph_data).unwrap();
     println!("Graph loaded in {:?}", start.elapsed());
 
     let start = std::time::Instant::now();
@@ -284,7 +288,7 @@ mod tests {
     use std::collections::HashMap;
     use prost::Message;
     use ruint::aliases::U256;
-    use ruint::{uint};
+    use ruint::uint;
     use crate::flatten_array;
     use crate::proto::InputNode;
 

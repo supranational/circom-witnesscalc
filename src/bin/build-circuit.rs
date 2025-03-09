@@ -2314,6 +2314,7 @@ fn evaluate_unoptimized(nodes: &Nodes, inputs: &[U256], signal_node_idx: &Vec<us
     println!("<node idx> <value> <signal indexes> <witness indexes> <node descr>");
     for (node_idx, &node) in nodes.iter().enumerate() {
         let value = match node {
+            Node::Unknown => { panic!("unknown node value") }
             Node::Constant(c) => c,
             Node::MontConstant(_) => { panic!("no montgomery constant expected in unoptimized graph") }
             Node::Input(i) => inputs[i],

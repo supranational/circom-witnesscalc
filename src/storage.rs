@@ -1,16 +1,13 @@
 use std::collections::HashMap;
 #[cfg(test)]
 use std::fmt::{Debug, Formatter};
-use std::io::{Write, Read};
-use ark_bn254::Fr;
-use ark_ff::{PrimeField};
-use ark_serialize::CanonicalDeserialize;
-use ark_serialize::CanonicalSerialize;
+use std::io::{Error, ErrorKind, Read, Write};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use code_producers::c_elements::InputList;
 use code_producers::components::{IODef, TemplateInstanceIOMap};
 use prost::Message;
-use crate::graph::{Operation, TresOperation, UnoOperation};
+use ruint::aliases::U256;
+use crate::graph::{Node, Operation, TresOperation, UnoOperation};
 use crate::InputSignalsInfo;
 use crate::proto::SignalDescription;
 use crate::proto::vm::{IoDef, IoDefs};
@@ -22,34 +19,36 @@ use crate::vm::{Function, Template};
 // + protobuf serialized GraphMetadata
 // + 8 bytes unsigned LE 64-bit integer: offset of GraphMetadata message
 
+pub mod proto_deserializer;
+
 const WITNESSCALC_GRAPH_MAGIC: &[u8] = b"wtns.graph.001";
 const WITNESSCALC_VM_MAGIC: &[u8] = b"wtns.vm.001";
 
 const MAX_VARINT_LENGTH: usize = 10;
 
-impl From<crate::proto::Node> for crate::graph::Node {
+impl From<crate::proto::Node> for Node {
     fn from(value: crate::proto::Node) -> Self {
         match value.node.unwrap() {
             crate::proto::node::Node::Input(input_node) => {
-                crate::graph::Node::Input(input_node.idx as usize)
+                Node::Input(input_node.idx as usize)
             }
             crate::proto::node::Node::Constant(constant_node) => {
                 let i = constant_node.value.unwrap();
-                crate::graph::Node::MontConstant(Fr::from_le_bytes_mod_order(i.value_le.as_slice()))
+                Node::Constant(U256::from_le_slice(i.value_le.as_slice()))
             }
             crate::proto::node::Node::UnoOp(uno_op_node) => {
                 let op = crate::proto::UnoOp::try_from(uno_op_node.op).unwrap();
-                crate::graph::Node::UnoOp(op.into(), uno_op_node.a_idx as usize)
+                Node::UnoOp(op.into(), uno_op_node.a_idx as usize)
             }
             crate::proto::node::Node::DuoOp(duo_op_node) => {
                 let op = crate::proto::DuoOp::try_from(duo_op_node.op).unwrap();
-                crate::graph::Node::Op(
+                Node::Op(
                     op.into(), duo_op_node.a_idx as usize,
                     duo_op_node.b_idx as usize)
             }
             crate::proto::node::Node::TresOp(tres_op_node) => {
                 let op = crate::proto::TresOp::try_from(tres_op_node.op).unwrap();
-                crate::graph::Node::TresOp(
+                Node::TresOp(
                     op.into(), tres_op_node.a_idx as usize,
                     tres_op_node.b_idx as usize, tres_op_node.c_idx as usize)
             }
@@ -57,32 +56,37 @@ impl From<crate::proto::Node> for crate::graph::Node {
     }
 }
 
-impl From<&crate::graph::Node> for crate::proto::node::Node {
-    fn from(node: &crate::graph::Node) -> Self {
+impl From<&Node> for crate::proto::node::Node {
+    fn from(node: &Node) -> Self {
         match node {
-            crate::graph::Node::Input(i) => {
+            Node::Unknown => {
+                panic!("Unknown node serialization not implemented");
+            }
+            Node::Input(i) => {
                 crate::proto::node::Node::Input (crate::proto::InputNode {
                     idx: *i as u32
                 })
             }
-            crate::graph::Node::Constant(_) => {
-                panic!("We are not supposed to write Constant to the witnesscalc graph. All Constant should be converted to MontConstant.");
+            Node::Constant(c) => {
+                let i = crate::proto::BigUInt { value_le: c.to_le_bytes_vec() };
+                crate::proto::node::Node::Constant(
+                    crate::proto::ConstantNode { value: Some(i) })
             }
-            crate::graph::Node::UnoOp(op, a) => {
+            Node::UnoOp(op, a) => {
                 let op = crate::proto::UnoOp::from(op);
                 crate::proto::node::Node::UnoOp(
                     crate::proto::UnoOpNode {
                         op: op as i32,
                         a_idx: *a as u32 })
             }
-            crate::graph::Node::Op(op, a, b) => {
+            Node::Op(op, a, b) => {
                 crate::proto::node::Node::DuoOp(
                     crate::proto::DuoOpNode {
                         op: crate::proto::DuoOp::from(op) as i32,
                         a_idx: *a as u32,
                         b_idx: *b as u32 })
             }
-            crate::graph::Node::TresOp(op, a, b, c) => {
+            Node::TresOp(op, a, b, c) => {
                 crate::proto::node::Node::TresOp(
                     crate::proto::TresOpNode {
                         op: crate::proto::TresOp::from(op) as i32,
@@ -90,7 +94,7 @@ impl From<&crate::graph::Node> for crate::proto::node::Node {
                         b_idx: *b as u32,
                         c_idx: *c as u32 })
             }
-            crate::graph::Node::MontConstant(c) => {
+            Node::MontConstant(c) => {
                 let bi = Into::<num_bigint::BigUint>::into(*c);
                 let i = crate::proto::BigUInt { value_le: bi.to_bytes_le() };
                 crate::proto::node::Node::Constant(
@@ -144,9 +148,8 @@ impl From<crate::proto::TresOp> for TresOperation {
     }
 }
 
-
 pub fn serialize_witnesscalc_graph<T: Write>(
-    mut w: T, nodes: &Vec<crate::graph::Node>, witness_signals: &[usize],
+    mut w: T, nodes: &Vec<Node>, witness_signals: &[usize],
     input_signals: &InputSignalsInfo) -> std::io::Result<()> {
 
     let mut ptr = 0usize;
@@ -198,7 +201,7 @@ pub struct CompiledCircuit {
     pub templates: Vec<Template>,
     pub functions: Vec<Function>,
     pub signals_num: usize,
-    pub constants: Vec<Fr>,
+    pub constants: Vec<U256>,
     pub inputs: InputList,
     pub witness_signals: Vec<usize>,
     pub io_map: TemplateInstanceIOMap,
@@ -312,7 +315,7 @@ pub fn serialize_witnesscalc_vm(
     }
 
     for c in &cs.constants {
-        c.serialize_compressed(&mut w).unwrap();
+        w.write_all(c.as_le_slice())?;
     }
 
     Ok(())
@@ -381,11 +384,13 @@ pub fn deserialize_witnesscalc_vm(
 
     let mut constants = Vec::with_capacity(md.constants_num as usize);
     for _ in 0 .. md.constants_num {
-        let c: Fr = Fr::deserialize_compressed(&mut br).unwrap();
+        let mut buf = [0u8; 32];
+        br.read_exact(&mut buf)?;
+        let c = U256::from_le_slice(&buf);
         constants.push(c);
     }
 
-    Ok(CompiledCircuit{
+    Ok(CompiledCircuit {
         main_template_id: md.main_template_id.try_into()
             .expect("main template id too large for this architecture"),
         templates,
@@ -428,6 +433,10 @@ pub fn deserialize_witnesscalc_vm(
     })
 }
 
+// This function is unused, but it is a reference implementation of
+// wtns.graph.001 file format deserialization. There is another replacement
+// for this function — deserialize_witnesscalc_graph_from_bytes, but it
+// implements custom protobuf deserialization and may be not fully compatible.
 pub fn deserialize_witnesscalc_graph(
     r: impl Read) -> std::io::Result<(Vec<crate::graph::Node>, Vec<usize>, InputSignalsInfo)> {
 
@@ -437,15 +446,15 @@ pub fn deserialize_witnesscalc_graph(
     br.read_exact(&mut magic)?;
 
     if !magic.eq(WITNESSCALC_GRAPH_MAGIC) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData, "Invalid magic"));
+        return Err(Error::new(
+            ErrorKind::InvalidData, "Invalid magic"));
     }
 
-    let mut nodes = Vec::new();
     let nodes_num = br.read_u64::<LittleEndian>()?;
+    let mut nodes = Vec::with_capacity(nodes_num as usize);
     for _ in 0..nodes_num {
         let n: crate::proto::Node = read_message(&mut br)?;
-        let n2: crate::graph::Node = n.into();
+        let n2: Node = n.into();
         nodes.push(n2);
     }
 
@@ -523,6 +532,32 @@ impl<R: Read> Write for WriteBackReader<R> {
     }
 }
 
+pub fn init_input_signals(
+    inputs_desc: &InputList,
+    inputs: &HashMap<String, Vec<U256>>,
+    signals: &mut [Option<U256>],
+) {
+    signals[0] = Some(U256::from(1u64));
+
+    for (name, offset, len) in inputs_desc {
+        match inputs.get(name) {
+            Some(values) => {
+                if values.len() != *len {
+                    panic!(
+                        "input signal {} has different length in inputs file, want {}, actual {}",
+                        name, len, values.len());
+                }
+                for (i, v) in values.iter().enumerate() {
+                    signals[*offset + i] = Some(*v);
+                }
+            }
+            None => {
+                panic!("input signal {} is not found in inputs file", name);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -530,6 +565,8 @@ mod tests {
     use core::str::FromStr;
     use byteorder::ByteOrder;
     use crate::vm::ComponentTmpl;
+    use ark_bn254::Fr;
+    use crate::storage::proto_deserializer::deserialize_witnesscalc_graph_from_bytes;
     use super::*;
 
     #[test]
@@ -565,29 +602,29 @@ mod tests {
         let nodes = vec![
             crate::proto::Node {
                 node: Some(
-                    crate::proto::node::Node::from(&crate::graph::Node::Input(0))
+                    crate::proto::node::Node::from(&Node::Input(0))
                 )
             },
             crate::proto::Node {
                 node: Some(
                     crate::proto::node::Node::from(
-                        &crate::graph::Node::MontConstant(
+                        &Node::MontConstant(
                             Fr::from_str("1").unwrap()))
                 )
             },
             crate::proto::Node {
                 node: Some(
-                    crate::proto::node::Node::from(&crate::graph::Node::UnoOp(UnoOperation::Id, 4))
+                    crate::proto::node::Node::from(&Node::UnoOp(UnoOperation::Id, 4))
                 )
             },
             crate::proto::Node {
                 node: Some(
-                    crate::proto::node::Node::from(&crate::graph::Node::Op(Operation::Mul, 5, 6))
+                    crate::proto::node::Node::from(&Node::Op(Operation::Mul, 5, 6))
                 )
             },
             crate::proto::Node {
                 node: Some(
-                    crate::proto::node::Node::from(&crate::graph::Node::TresOp(TresOperation::TernCond, 7, 8, 9))
+                    crate::proto::node::Node::from(&Node::TresOp(TresOperation::TernCond, 7, 8, 9))
                 )
             },
         ];
@@ -639,11 +676,12 @@ mod tests {
     #[test]
     fn test_deserialize_inputs() {
         let nodes = vec![
-            crate::graph::Node::Input(0),
-            crate::graph::Node::MontConstant(Fr::from_str("1").unwrap()),
-            crate::graph::Node::UnoOp(UnoOperation::Id, 4),
-            crate::graph::Node::Op(Operation::Mul, 5, 6),
-            crate::graph::Node::TresOp(TresOperation::TernCond, 7, 8, 9),
+            Node::Input(0),
+            Node::Constant(U256::from_str("1").unwrap()),
+            Node::Constant(U256::from_str("0").unwrap()),
+            Node::UnoOp(UnoOperation::Id, 4),
+            Node::Op(Operation::Mul, 5, 6),
+            Node::TresOp(TresOperation::TernCond, 7, 8, 9),
         ];
 
         let witness_signals = vec![4, 1];
@@ -659,6 +697,13 @@ mod tests {
 
         let (nodes_res, witness_signals_res, input_signals_res) =
             deserialize_witnesscalc_graph(&mut reader).unwrap();
+
+        assert_eq!(nodes, nodes_res);
+        assert_eq!(input_signals, input_signals_res);
+        assert_eq!(witness_signals, witness_signals_res);
+
+        let (nodes_res, witness_signals_res, input_signals_res) =
+            deserialize_witnesscalc_graph_from_bytes(&tmp).unwrap();
 
         assert_eq!(nodes, nodes_res);
         assert_eq!(input_signals, input_signals_res);
@@ -684,24 +729,6 @@ mod tests {
     }
 
     #[test]
-    fn test_fr_serialize() {
-        // Check that default Fr serializer packs the value in little-endian
-        let want = "000000f093f5e1439170b97948e833285d588181b64550b829a031e1724e6430";
-        let f = Fr::from_str("21888242871839275222246405745257275088548364400416034343698204186575808495616").unwrap();
-
-        let mut buf = Vec::new();
-        f.serialize_compressed(&mut buf).unwrap();
-        assert_eq!(hex::encode(&buf), want);
-
-        let want = "9488010000000000000000000000000000000000000000000000000000000000";
-        let f = Fr::from_str("100500").unwrap();
-
-        buf.clear();
-        f.serialize_compressed(&mut buf).unwrap();
-        assert_eq!(hex::encode(&buf), want);
-    }
-
-    #[test]
     fn test_serialization() {
 
         let mut buf: Vec<u8> = Vec::new();
@@ -721,7 +748,7 @@ mod tests {
         ];
         io_map.insert(100, io_list);
 
-        let cs = CompiledCircuit{
+        let cs = CompiledCircuit {
             main_template_id: 2,
             templates: vec![
                 Template{
@@ -771,7 +798,7 @@ mod tests {
                 },
             ],
             signals_num: 3,
-            constants: vec![Fr::from(100500)],
+            constants: vec![U256::from(100500)],
             inputs: vec![("inp1".to_string(), 5, 10)],
             witness_signals: vec![1, 2, 3],
             io_map,

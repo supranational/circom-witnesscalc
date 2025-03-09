@@ -1,16 +1,12 @@
 use std::{env, fs};
 use std::path::PathBuf;
 use core::convert::TryInto;
-use core::str::FromStr;
 use std::cell::RefCell;
 use std::collections::{HashMap};
 use std::fs::File;
 use std::io::Write;
 use std::rc::Rc;
 use std::time::Instant;
-use ark_bn254::Fr;
-use ark_ff::BigInt;
-use ark_ff::PrimeField;
 use code_producers::components::{IODef, TemplateInstanceIOMap};
 use compiler::circuit_design::function::FunctionCode;
 use compiler::circuit_design::template::TemplateCode;
@@ -19,11 +15,12 @@ use compiler::intermediate_representation::InstructionList;
 use compiler::intermediate_representation::ir_interface::{AddressType, ComputeBucket, CreateCmpBucket, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, ObtainMeta, OperatorType, ReturnType, ValueType};
 use constraint_generation::{build_circuit, BuildConfig};
 use program_structure::error_definition::Report;
+use ruint::aliases::U256;
 use type_analysis::check_types::check_types;
-use circom_witnesscalc::{deserialize_inputs, wtns_from_witness};
+use circom_witnesscalc::{deserialize_inputs, wtns_from_u256_witness};
 use circom_witnesscalc::graph::Operation;
-use circom_witnesscalc::storage::{serialize_witnesscalc_vm, CompiledCircuit};
-use circom_witnesscalc::vm::{build_component, disassemble_instruction, execute, ComponentTmpl, Function, InputStatus, OpCode, Template};
+use circom_witnesscalc::storage::{serialize_witnesscalc_vm, CompiledCircuit, init_input_signals};
+use circom_witnesscalc::vm::{Function, Template, execute, build_component, ComponentTmpl, InputStatus, disassemble_instruction, OpCode};
 
 struct Args {
     circuit_file: String,
@@ -32,7 +29,7 @@ struct Args {
     link_libraries: Vec<PathBuf>,
     print_debug: bool,
     witness_file: Option<String>,
-    expected_signals: Option<Vec<Fr>>,
+    expected_signals: Option<Vec<U256>>,
 }
 
 #[derive(Debug)]
@@ -42,13 +39,13 @@ enum CompilationError {
 
 enum U32OrExpression {
     U32(u32),
-    BigInt(Fr),
+    BigInt(U256),
     Expression,
 }
 
 fn u32_or_expression(
     inst: &InstructionPointer,
-    constants: &[Fr]) -> Result<U32OrExpression, CompilationError> {
+    constants: &[U256]) -> Result<U32OrExpression, CompilationError> {
 
     match **inst {
         Instruction::Value(ref value) => {
@@ -82,7 +79,7 @@ fn u32_or_expression(
                     U32OrExpression::BigInt(v) => v,
                     U32OrExpression::Expression => { return Ok(U32OrExpression::Expression) }
                 };
-                Ok(U32OrExpression::BigInt(op.eval_fr(a, b)))
+                Ok(U32OrExpression::BigInt(op.eval(a, b)))
             };
 
             match compute_bucket.op {
@@ -114,7 +111,7 @@ fn u32_or_expression(
                     match u32_or_expression(&compute_bucket.stack[0], constants)? {
                         U32OrExpression::U32(_) => panic!("expected big integer value"),
                         U32OrExpression::BigInt(v) => {
-                            let v = bigint_to_u64(v.into_bigint())
+                            let v = bigint_to_u64(v)
                                 .expect("value is too large for stack_u32");
                             let v: u32 = v.try_into()
                                 .expect("value is too large for stack_u32");
@@ -176,7 +173,7 @@ fn parse_args() -> Args {
     let mut inputs_file: Option<String> = None;
     let mut witness_file: Option<String> = None;
     let mut print_debug = false;
-    let mut expected_signals: Option<Vec<Fr>> = None;
+    let mut expected_signals: Option<Vec<U256>> = None;
 
     let usage = |err_msg: &str| -> String {
         eprintln!("{}", err_msg);
@@ -252,12 +249,12 @@ fn parse_args() -> Args {
 }
 
 
-fn load_signals_txt(file_name: &str) -> Vec<Fr> {
+fn load_signals_txt(file_name: &str) -> Vec<U256> {
     let content = fs::read_to_string(file_name)
         .expect("failed to read signals file");
     let mut signals = Vec::new();
     for line in content.lines() {
-        let signal = Fr::from_str(line)
+        let signal = U256::from_str_radix(line, 10)
             .expect("failed to parse signal");
         signals.push(signal);
     }
@@ -365,7 +362,6 @@ fn main() {
     let (compiled_templates, compiled_functions) =
         compile(&circuit.templates, &circuit.functions, &constants);
 
-
     if args.print_debug {
         for (i, t) in compiled_templates.iter().enumerate() {
             println!("Compiled template #{}: {}", i, t.name);
@@ -406,33 +402,40 @@ fn main() {
 
     if let Some(input_file) = args.inputs_file {
 
-        let main_component = build_component(
-            &cs.templates, main_template_id, main_component_signal_start);
-        let main_component = Rc::new(RefCell::new(main_component));
-
         if let Some(ref expected_signals) = args.expected_signals {
             assert_eq!(expected_signals.len(), sigs_num);
         }
 
-        let mut signals = Vec::new();
-        signals.resize(sigs_num, None);
-        init_input_signals(&circuit, input_file, &mut signals);
-
         println!("Run VM");
         let start = Instant::now();
+
+        let main_component = build_component(
+            &cs.templates, main_template_id, main_component_signal_start);
+        let main_component = Rc::new(RefCell::new(main_component));
+
+        let mut signals2 = Vec::new();
+        signals2.resize(sigs_num, None);
+
+        let inputs_data = fs::read(&input_file)
+            .expect("Failed to read input file");
+        let inputs = deserialize_inputs(&inputs_data)
+            .unwrap();
+        let input_list = circuit.c_producer.get_main_input_list();
+        init_input_signals(input_list, &inputs, &mut signals2);
+
         execute(
-            main_component, &cs.templates, &cs.functions,
-            &cs.constants, &mut signals, &cs.io_map, args.expected_signals.as_ref());
+            main_component, &cs.templates, &cs.functions, &cs.constants,
+            &mut signals2, &cs.io_map, args.expected_signals.as_ref());
 
         println!("Execution time: {:?}", start.elapsed());
 
         if let Some(witness_file) = args.witness_file {
             let mut witness = Vec::with_capacity(cs.witness_signals.len());
             for w in cs.witness_signals.iter() {
-                witness.push(signals[*w].unwrap());
+                witness.push(signals2[*w].unwrap());
             }
 
-            let wtns_bytes = wtns_from_witness(witness);
+            let wtns_bytes = wtns_from_u256_witness(witness);
 
             {
                 let mut f = File::create(witness_file).unwrap();
@@ -447,10 +450,10 @@ fn main() {
     serialize_witnesscalc_vm(&mut f, &cs).unwrap();
 }
 
-fn get_constants(circuit: &Circuit) -> Vec<Fr> {
+fn get_constants(circuit: &Circuit) -> Vec<U256> {
     let mut constants = Vec::new();
     for c in &circuit.c_producer.field_tracking {
-        constants.push(Fr::from_str(c.as_str()).unwrap());
+        constants.push(U256::from_str_radix(c.as_str(), 10).unwrap());
     }
     constants
 }
@@ -492,7 +495,7 @@ fn patch_jump(code: &mut [u8], jump_offset_addr: usize, to: usize) {
 }
 
 fn store_subsignal(
-    code: &mut Vec<u8>, dest: &LocationRule, constants: &[Fr],
+    code: &mut Vec<u8>, dest: &LocationRule, constants: &[U256],
     components: &mut Vec<ComponentTmpl>, line_numbers: &mut Vec<usize>,
     line_no: usize, cmp_address: &InstructionPointer,
     input_information: &InputInformation, signals_num: u32) {
@@ -592,7 +595,7 @@ fn store_subsignal(
 
 // After statement execution, there should not be side-effect on the stack
 fn statement(
-    inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[Fr],
+    inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[U256],
     line_numbers: &mut Vec<usize>, components: &mut Vec<ComponentTmpl>,
     fn_registry: &mut FnRegistry) {
 
@@ -886,13 +889,14 @@ fn statement(
             // todo!();
         }
         Instruction::Log(_) => {
-            todo!();
+            // TODO: maybe introduce new instruction for logging
+            // todo!();
         }
     }
 }
 
 fn fn_statement(
-    inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[Fr],
+    inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[U256],
     line_numbers: &mut Vec<usize>, fn_registry: &mut FnRegistry) {
 
     // println!("function statement: {}", inst.to_string());
@@ -1112,7 +1116,7 @@ fn assert_64() {
 }
 
 fn expression_load(
-    lb: &LoadBucket, code: &mut Vec<u8>, constants: &[Fr],
+    lb: &LoadBucket, code: &mut Vec<u8>, constants: &[U256],
     line_numbers: &mut Vec<usize>,
     components: &mut Vec<ComponentTmpl>) -> usize {
 
@@ -1288,7 +1292,7 @@ fn expression_load(
 }
 
 fn fn_expression_load(
-    lb: &LoadBucket, code: &mut Vec<u8>, constants: &[Fr],
+    lb: &LoadBucket, code: &mut Vec<u8>, constants: &[U256],
     line_numbers: &mut Vec<usize>) -> usize {
 
     assert!(matches!(lb.address_type, AddressType::Variable));
@@ -1327,7 +1331,7 @@ fn fn_expression_load(
 }
 
 fn expression_compute(
-    cb: &ComputeBucket, code: &mut Vec<u8>, constants: &[Fr],
+    cb: &ComputeBucket, code: &mut Vec<u8>, constants: &[U256],
     line_numbers: &mut Vec<usize>,
     components: &mut Vec<ComponentTmpl>) -> usize {
 
@@ -1422,7 +1426,7 @@ fn expression_compute(
 }
 
 fn fn_expression_compute(
-    cb: &ComputeBucket, code: &mut Vec<u8>, constants: &[Fr],
+    cb: &ComputeBucket, code: &mut Vec<u8>, constants: &[U256],
     line_numbers: &mut Vec<usize>) -> usize {
 
     // two operand operations
@@ -1519,7 +1523,7 @@ fn fn_expression_compute(
 }
 
 fn expression_compute_u32(
-    cb: &ComputeBucket, code: &mut Vec<u8>, constants: &[Fr],
+    cb: &ComputeBucket, code: &mut Vec<u8>, constants: &[U256],
     line_numbers: &mut Vec<usize>, components: &mut Vec<ComponentTmpl>) {
 
     match cb.op {
@@ -1555,7 +1559,7 @@ fn expression_compute_u32(
 }
 
 fn fn_expression_compute_u32(
-    cb: &ComputeBucket, code: &mut Vec<u8>, constants: &[Fr],
+    cb: &ComputeBucket, code: &mut Vec<u8>, constants: &[U256],
     line_numbers: &mut Vec<usize>) {
 
     match cb.op {
@@ -1590,7 +1594,7 @@ fn fn_expression_compute_u32(
 // After expression execution, the value of the expression should be on the stack.
 // Return the number of values put on the stack.
 fn expression(
-    inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[Fr],
+    inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[U256],
     line_numbers: &mut Vec<usize>,
     components: &mut Vec<ComponentTmpl>) -> usize {
 
@@ -1635,7 +1639,7 @@ fn expression(
 }
 
 fn fn_expression(
-    inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[Fr],
+    inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[U256],
     line_numbers: &mut Vec<usize>) -> usize {
 
     match **inst {
@@ -1679,7 +1683,7 @@ fn fn_expression(
 
 // After expression execution_u32, the value of the expression should be on the stack_u32
 fn expression_u32(
-    inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[Fr],
+    inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[U256],
     line_numbers: &mut Vec<usize>, components: &mut Vec<ComponentTmpl>) {
 
     // println!("expression: {}", inst.to_string());
@@ -1716,7 +1720,7 @@ fn expression_u32(
 }
 
 fn fn_expression_u32(
-    inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[Fr],
+    inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[U256],
     line_numbers: &mut Vec<usize>) {
 
     match **inst {
@@ -1754,7 +1758,7 @@ fn fn_expression_u32(
 }
 
 fn block(
-    inst_list: &InstructionList, code: &mut Vec<u8>, constants: &[Fr],
+    inst_list: &InstructionList, code: &mut Vec<u8>, constants: &[U256],
     line_numbers: &mut Vec<usize>, components: &mut Vec<ComponentTmpl>,
     fn_registry: &mut FnRegistry) {
 
@@ -1765,7 +1769,7 @@ fn block(
 }
 
 fn fn_block(
-    inst_list: &InstructionList, code: &mut Vec<u8>, constants: &[Fr],
+    inst_list: &InstructionList, code: &mut Vec<u8>, constants: &[U256],
     line_numbers: &mut Vec<usize>, fn_registry: &mut FnRegistry) {
 
     for inst in inst_list {
@@ -1775,7 +1779,7 @@ fn fn_block(
 }
 
 fn compile_template(
-    tmpl_code: &TemplateCode, constants: &[Fr],
+    tmpl_code: &TemplateCode, constants: &[U256],
     fn_registry: &mut FnRegistry) -> Template {
 
     // println!("Compile template {}", tmpl_code.name);
@@ -1800,7 +1804,7 @@ fn compile_template(
 }
 
 fn compile_function(
-    fn_code: &FunctionCode, constants: &[Fr],
+    fn_code: &FunctionCode, constants: &[U256],
     fn_registry: &mut FnRegistry) -> Function {
 
     // println!("Compile function {}", fn_code.name);
@@ -1853,7 +1857,7 @@ impl FnRegistry {
 fn compile(
     templates: &[TemplateCode],
     functions: &Vec<FunctionCode>,
-    constants: &[Fr],
+    constants: &[U256],
 ) -> (Vec<Template>, Vec<Function>) {
 
     let mut fn_registry = FnRegistry::new();
@@ -1887,45 +1891,14 @@ fn compile(
     (compiled_templates, compiled_functions)
 }
 
-fn init_input_signals(
-    circuit: &Circuit,
-    input_file: String,
-    signals: &mut [Option<Fr>],
-) {
-    signals[0] = Some(Fr::from(1u32));
-
-    let inputs_data = fs::read(input_file).expect("Failed to read input file");
-    let inputs = deserialize_inputs(&inputs_data).unwrap();
-
-    let input_list = circuit.c_producer.get_main_input_list();
-    for (name, offset, len) in input_list {
-        match inputs.get(name) {
-            Some(values) => {
-                if values.len() != *len {
-                    panic!(
-                        "input signal {} has different length in inputs file, want {}, actual {}",
-                        name, *len, values.len());
-                }
-                for (i, v) in values.iter().enumerate() {
-                    signals[offset + i] = Some(Fr::from_str(v.to_string().as_str()).unwrap());
-                }
-            }
-            None => {
-                panic!("input signal {} is not found in inputs file", name);
-            }
+fn bigint_to_u64(i: U256) -> Option<u64> {
+    let ls = i.as_limbs();
+    for i in 1..ls.len() {
+        if ls[i] != 0 {
+            return None;
         }
     }
-}
-
-fn bigint_to_u64<const N: usize>(i: BigInt<N>) -> Option<u64> {
-    let z = BigInt::<N>::from(0u32);
-    let max = BigInt::<N>::from(u64::MAX);
-
-    if i < z || i > max {
-        return None;
-    }
-
-    Some(i.0[0])
+    return Some(ls[0]);
 }
 
 fn disassemble(
@@ -1950,10 +1923,9 @@ fn mk_flags(input_status: InputStatus, is_mapped_signal_idx: bool) -> u8 {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap};
-    use ark_ff::BigInteger256;
-    use ark_ff::BigInteger;
     use compiler::intermediate_representation::ir_interface::{InstrContext, StoreBucket, ValueBucket};
-    use circom_witnesscalc::vm::{execute, Component};
+    use ruint::__private::ruint_macro::uint;
+    use circom_witnesscalc::vm::{Function, Template, execute, Component};
     use super::*;
 
     fn assert_u64_value(inst: &InstructionPointer) -> u64 {
@@ -2263,8 +2235,8 @@ mod tests {
             &inst, &mut code, &constants, &mut line_numbers, &mut components,
             &mut FnRegistry::new());
 
-        let var1 = Some(Fr::from(2));
-        let var2 = Some(Fr::from(1));
+        let var1 = Some(U256::from(2));
+        let var2 = Some(U256::from(1));
         let c = Component{
             vars: vec![None, var1, var2],
             signals_start: 0,
@@ -2282,7 +2254,7 @@ mod tests {
             number_of_inputs: 0,
         }];
 
-        let mut signals = vec![None, None, Some(Fr::from(8))];
+        let mut signals = vec![None, None, Some(U256::from(8))];
 
         let functions = vec![];
 
@@ -2298,7 +2270,7 @@ mod tests {
             &mut signals, &io_map, None);
         println!("{:?}", component.borrow().vars);
         assert_eq!(
-            &vec![None, Some(Fr::from(10u64)), var2],
+            &vec![None, Some(U256::from(10u64)), var2],
             &component.borrow().vars);
     }
 
@@ -2376,30 +2348,12 @@ STORE(
     }
 
     #[test]
-    fn ok() {
-        type B = BigInteger256;
-
-        let a = Fr::from(5u64);
-
-        let b: B = a.into_bigint();
-        let x = a.into_bigint().to_bytes_le();
-        let a2: Fr = b.try_into().unwrap();
-        println!("{:?}", x);
-        println!("{:?}", b.0);
-        println!("{}", a2 - a2);
-        println!("{}", B::NUM_LIMBS);
-
-        let x = B::from(3u32);
-        println!("{:?}", x.to_bytes_le());
-    }
-
-    #[test]
     fn test_bigint_to_u64() {
-        let mut i = BigInteger256::from(u64::MAX);
+        let mut i = U256::from(u64::MAX);
         let j = bigint_to_u64(i);
         assert!(matches!(j, Some(u64::MAX)));
 
-        i.mul2();
+        i = i * uint!(2_U256);
         let j = bigint_to_u64(i);
         assert!(matches!(j, None));
     }
