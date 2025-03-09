@@ -8,15 +8,15 @@ pub mod storage;
 pub mod vm;
 
 use std::collections::HashMap;
-use std::ffi::{c_void, c_char, c_int, CStr};
+use std::ffi::{c_char, c_int, c_void, CStr};
 use std::slice::from_raw_parts;
 use ruint::aliases::U256;
 use ruint::ParseError;
 use crate::graph::Node;
 use wtns_file::FieldElement;
-use crate::storage::deserialize_witnesscalc_graph;
 use ark_bn254::Fr;
 use ark_ff::{BigInteger, PrimeField};
+use crate::storage::proto_deserializer::deserialize_witnesscalc_graph_from_bytes;
 
 pub type InputSignalsInfo = HashMap<String, (usize, usize)>;
 
@@ -142,7 +142,7 @@ pub fn calc_witness(inputs: &str, graph_data: &[u8]) -> Result<Vec<U256>, Error>
 
     let start = std::time::Instant::now();
     let (nodes, signals, input_mapping): (Vec<Node>, Vec<usize>, InputSignalsInfo) =
-        deserialize_witnesscalc_graph(std::io::Cursor::new(graph_data)).unwrap();
+        deserialize_witnesscalc_graph_from_bytes(graph_data).unwrap();
     println!("Graph loaded in {:?}", start.elapsed());
 
     let start = std::time::Instant::now();
@@ -288,7 +288,7 @@ mod tests {
     use std::collections::HashMap;
     use prost::Message;
     use ruint::aliases::U256;
-    use ruint::{uint};
+    use ruint::uint;
     use crate::flatten_array;
     use crate::proto::InputNode;
 
