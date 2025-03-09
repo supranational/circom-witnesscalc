@@ -4,7 +4,6 @@ use compiler::intermediate_representation::ir_interface::{AddressType, CallBucke
 use constraint_generation::{build_circuit, BuildConfig};
 use program_structure::error_definition::Report;
 use ruint::aliases::U256;
-use ruint::uint;
 use std::collections::HashMap;
 use std::{env, fmt, fs};
 use std::error::Error;
@@ -15,11 +14,9 @@ use compiler::circuit_design::function::FunctionCode;
 use lazy_static::lazy_static;
 use type_analysis::check_types::check_types;
 use circom_witnesscalc::{deserialize_inputs, InputSignalsInfo};
+use circom_witnesscalc::field::M;
 use circom_witnesscalc::graph::{optimize, Node, Operation, UnoOperation, TresOperation, Nodes, NodeConstErr, NodeIdx};
 use circom_witnesscalc::storage::serialize_witnesscalc_graph;
-
-pub const M: U256 =
-    uint!(21888242871839275222246405745257275088548364400416034343698204186575808495617_U256);
 
 // if instruction pointer is a store to the signal, return the signal index
 // and the src instruction to store to the signal
