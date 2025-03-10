@@ -965,15 +965,15 @@ pub fn execute(
                     panic!("Variable is not set as {}", var_end-1);
                 }
 
-                for var_idx in var_start..var_end {
-                    if vars[var_idx].is_none() {
+                for var in vars.iter().take(var_end).skip(var_start) {
+                    if var.is_none() {
                         panic!("Variable not set");
                     }
-                    let v = vars[var_idx].unwrap();
-                    if v > M {
-                        panic!("v = {}", v);
+                    let var = var.unwrap();
+                    if var > M {
+                        panic!("var = {}", var);
                     }
-                    vm.stack.push(v);
+                    vm.stack.push(var);
                 }
             }
             OpCode::GetVariable => {
@@ -999,15 +999,15 @@ pub fn execute(
                         vars.len(), var_idx, vars_number);
                 }
 
-                for i in var_idx..var_idx+vars_number {
-                    if vars[i].is_none() {
+                for var in vars.iter().skip(var_idx).take(vars_number) {
+                    if var.is_none() {
                         panic!("Variable not set");
                     }
-                    let v = vars[i].unwrap();
-                    if v > M {
-                        panic!("v = {}", v);
+                    let var = var.unwrap();
+                    if var > M {
+                        panic!("v = {}", var);
                     }
-                    vm.stack.push(v);
+                    vm.stack.push(var);
                 }
             }
             OpCode::SetVariable4 => {
