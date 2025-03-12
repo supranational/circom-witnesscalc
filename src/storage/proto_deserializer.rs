@@ -51,11 +51,11 @@ pub fn deserialize_witnesscalc_graph_from_bytes(
 #[repr(u8)]
 #[derive(Debug)]
 enum WireType {
-    VARINT = 0,
+    Varint = 0,
     I64 = 1,
-    LEN = 2,
-    SGROUP = 3,
-    EGROUP = 4,
+    Len = 2,
+    SGroup = 3,
+    EGroup = 4,
     I32 = 5,
 }
 
@@ -64,11 +64,11 @@ impl TryFrom<u8> for WireType {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            0 => Ok(WireType::VARINT),
+            0 => Ok(WireType::Varint),
             1 => Ok(WireType::I64),
-            2 => Ok(WireType::LEN),
-            3 => Ok(WireType::SGROUP),
-            4 => Ok(WireType::EGROUP),
+            2 => Ok(WireType::Len),
+            3 => Ok(WireType::SGroup),
+            4 => Ok(WireType::EGroup),
             5 => Ok(WireType::I32),
             _ => Err(()),
         }
@@ -86,7 +86,7 @@ pub fn decode_node(bytes: &[u8]) -> Result<Node, Error> {
 
     let (field_number, wire_type, tag_size) = read_tag(bytes)?;
 
-    if !matches!(wire_type, WireType::LEN) {
+    if !matches!(wire_type, WireType::Len) {
         return Err(Error::new(
             ErrorKind::InvalidData,
             format!(
@@ -131,7 +131,7 @@ fn decode_input_node(bytes: &[u8]) -> Result<Node, Error> {
         ));
     }
 
-    if !matches!(wire_type, WireType::VARINT) {
+    if !matches!(wire_type, WireType::Varint) {
         return Err(Error::new(
             ErrorKind::InvalidData,
             "Expected length-delimited field for InputNode",
@@ -165,7 +165,7 @@ fn decode_big_uint(bytes: &[u8]) -> Result<U256, Error> {
             "Expected field number 1 for BigUInt",
         ));
     }
-    if !matches!(wire_type, WireType::LEN) {
+    if !matches!(wire_type, WireType::Len) {
         return Err(Error::new(
             ErrorKind::InvalidData,
             "Expected length-delimited field for BigUInt",
@@ -201,7 +201,7 @@ fn decode_uno_op_node(bytes: &[u8]) -> Result<Node, Error> {
         let (field_number, wire_type, tag_size) = read_tag(&bytes[offset..])?;
         offset += tag_size;
 
-        if !matches!(wire_type, WireType::VARINT) {
+        if !matches!(wire_type, WireType::Varint) {
             return Err(Error::new(
                 ErrorKind::InvalidData,
                 "Expected varint as DuoOpNode field",
@@ -251,7 +251,7 @@ fn decode_duo_op_node(bytes: &[u8]) -> Result<Node, Error> {
         let (field_number, wire_type, tag_size) = read_tag(&bytes[offset..])?;
         offset += tag_size;
 
-        if !matches!(wire_type, WireType::VARINT) {
+        if !matches!(wire_type, WireType::Varint) {
             return Err(Error::new(
                 ErrorKind::InvalidData,
                 "Expected varint as DuoOpNode field",
@@ -322,7 +322,7 @@ fn decode_tres_op_node(bytes: &[u8]) -> Result<Node, Error> {
         let (field_number, wire_type, tag_size) = read_tag(&bytes[offset..])?;
         offset += tag_size;
 
-        if !matches!(wire_type, WireType::VARINT) {
+        if !matches!(wire_type, WireType::Varint) {
             return Err(Error::new(
                 ErrorKind::InvalidData,
                 "Expected varint as TresOpNode field",
@@ -377,7 +377,7 @@ fn decode_constant_node(bytes: &[u8]) -> Result<Node, Error> {
         ));
     }
 
-    if !matches!(wire_type, WireType::LEN) {
+    if !matches!(wire_type, WireType::Len) {
         return Err(Error::new(
             ErrorKind::InvalidData,
             "Expected length-delimited field for ConstantNode",
@@ -484,7 +484,7 @@ pub fn decode_varint_u32(bytes: &[u8]) -> Result<(u32, usize), Error> {
     if fifth_byte > 0x0F {
         return Err(Error::new(
             ErrorKind::InvalidData,
-            format!("Varint value exceeds u32::MAX"),
+            "Varint value exceeds u32::MAX",
         ));
     }
 

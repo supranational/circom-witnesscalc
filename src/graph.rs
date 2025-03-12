@@ -233,8 +233,9 @@ impl From<&TresOperation> for crate::proto::TresOp {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Node {
+    #[default]
     Unknown,
     Input(usize),
     Constant(U256),
@@ -243,12 +244,6 @@ pub enum Node {
     UnoOp(UnoOperation, usize),
     Op(Operation, usize, usize),
     TresOp(TresOperation, usize, usize, usize),
-}
-
-impl Default for Node {
-    fn default() -> Self {
-        Node::Unknown
-    }
 }
 
 // TODO remove pub from Vec<Node>
@@ -291,7 +286,7 @@ impl Nodes {
         self.0.push(n);
         NodeIdx(self.0.len() - 1)
     }
-    
+
     pub fn get(&self, idx: NodeIdx) -> Option<&Node> {
         self.0.get(idx.0)
     }
@@ -616,7 +611,7 @@ fn random_eval(nodes: &mut [Node]) -> Vec<U256> {
 }
 
 /// Value numbering
-pub fn value_numbering(nodes: &mut Vec<Node>, outputs: &mut [usize]) {
+pub fn value_numbering(nodes: &mut [Node], outputs: &mut [usize]) {
     assert_valid(nodes);
 
     // Evaluate the graph in random field elements.
@@ -657,7 +652,7 @@ pub fn value_numbering(nodes: &mut Vec<Node>, outputs: &mut [usize]) {
 }
 
 /// Probabilistic constant determination
-pub fn constants(nodes: &mut Vec<Node>) {
+pub fn constants(nodes: &mut [Node]) {
     assert_valid(nodes);
 
     // Evaluate the graph in random field elements.

@@ -209,12 +209,12 @@ struct VM<'a, 'b> {
     call_frames: Vec<Frame<'a, 'b>>,
 }
 
-impl<'a, 'b> VM<'a, 'b> {
+impl VM<'_, '_> {
     fn assert_signal(&self, sig_idx: usize) {
         if let Some(expected_signals) = self.expected_signals {
             let cmp = expected_signals[sig_idx].cmp(&self.signals[sig_idx].unwrap());
             match cmp {
-                Ordering::Equal => return,
+                Ordering::Equal => (),
                 _ => {
                     self.print_stack_trace();
                     panic!(
@@ -437,9 +437,9 @@ impl From<&StatusInput> for InputStatus {
     }
 }
 
-impl Into<u8> for InputStatus {
-    fn into(self) -> u8 {
-        self as u8
+impl From<InputStatus> for u8 {
+    fn from(status: InputStatus) -> u8 {
+        status as u8
     }
 }
 
@@ -464,80 +464,80 @@ pub fn disassemble_instruction(
             println!("NoOp")
         }
         OpCode::SetSelfSignal4 => {
-            let sig_idx = read_u32(&code, ip);
+            let sig_idx = read_u32(code, ip);
             ip += size_of::<u32>();
 
-            let sigs_number = read_u32(&code, ip);
+            let sigs_number = read_u32(code, ip);
             ip += size_of::<u32>();
 
             println!("SetSelfSignal4 [{},{}]", sig_idx, sigs_number);
         }
         OpCode::SetSelfSignal => {
-            let sigs_number = read_u32(&code, ip);
+            let sigs_number = read_u32(code, ip);
             ip += size_of::<u32>();
 
             println!("SetSelfSignal [{}]", sigs_number);
         }
         OpCode::GetConstant8 => {
-            let const_idx = read_usize(&code, ip);
+            let const_idx = read_usize(code, ip);
             ip += size_of::<usize>();
 
             println!("GetConstant8 [{}]", const_idx);
         }
         OpCode::Push8 => {
-            let val = read_usize(&code, ip);
+            let val = read_usize(code, ip);
             ip += size_of::<usize>();
 
             println!("Push8 [{}]", val);
         }
         OpCode::Push4 => {
-            let val = read_u32(&code, ip);
+            let val = read_u32(code, ip);
             ip += size_of::<u32>();
 
             println!("Push4 [{}]", val);
         }
         OpCode::GetVariable4 => {
-            let var_idx = read_u32(&code, ip);
+            let var_idx = read_u32(code, ip);
             ip += size_of::<u32>();
 
-            let vars_number = read_u32(&code, ip);
+            let vars_number = read_u32(code, ip);
             ip += size_of::<u32>();
 
             println!("GetVariable4 [{},{}]", var_idx, vars_number);
         }
         OpCode::GetVariable => {
-            let vars_number = read_u32(&code, ip);
+            let vars_number = read_u32(code, ip);
             ip += size_of::<u32>();
 
             println!("GetVariable [{}]", vars_number);
         }
         OpCode::SetVariable4 => {
-            let var_idx = read_u32(&code, ip);
+            let var_idx = read_u32(code, ip);
             ip += size_of::<u32>();
 
-            let vars_num = read_u32(&code, ip);
+            let vars_num = read_u32(code, ip);
             ip += size_of::<u32>();
 
             println!("SetVariable4 [{},{}]", var_idx, vars_num);
         }
         OpCode::SetVariable => {
-            let vars_num = read_u32(&code, ip);
+            let vars_num = read_u32(code, ip);
             ip += size_of::<u32>();
 
             println!("SetVariable [{}]", vars_num);
         }
         OpCode::GetSubSignal => {
-            let sigs_number = read_u32(&code, ip);
+            let sigs_number = read_u32(code, ip);
             ip += size_of::<u32>();
 
             let flags: u8 = code[ip];
             ip += 1;
 
             if flags & 0b1000_0000 != 0 {
-                let indexes_number = read_u32(&code, ip);
+                let indexes_number = read_u32(code, ip);
                 ip += size_of::<u32>();
 
-                let signal_code = read_u32(&code, ip);
+                let signal_code = read_u32(code, ip);
                 ip += size_of::<u32>();
 
                 println!(
@@ -549,7 +549,7 @@ pub fn disassemble_instruction(
             }
         }
         OpCode::SetSubSignal => {
-            let sigs_number = read_u32(&code, ip);
+            let sigs_number = read_u32(code, ip);
             ip += size_of::<u32>();
 
             let flags = code[ip];
@@ -558,10 +558,10 @@ pub fn disassemble_instruction(
             let (input_status, is_mapped_signal_idx) = unpack_flags(flags);
 
             if is_mapped_signal_idx {
-                let indexes_number = read_u32(&code, ip);
+                let indexes_number = read_u32(code, ip);
                 ip += size_of::<u32>();
 
-                let signal_code = read_u32(&code, ip);
+                let signal_code = read_u32(code, ip);
                 ip += size_of::<u32>();
 
                 println!(
@@ -573,13 +573,13 @@ pub fn disassemble_instruction(
             }
         }
         OpCode::JumpIfFalse => {
-            let offset = read_i32(&code, ip);
+            let offset = read_i32(code, ip);
             ip += size_of::<i32>();
 
             println!("JumpIfFalse [{} -> {:x}]", offset, ip as i64 + offset as i64);
         }
         OpCode::Jump => {
-            let offset = read_i32(&code, ip);
+            let offset = read_i32(code, ip);
             ip += size_of::<i32>();
 
             println!("Jump [{} -> {:x}]", offset, ip as i64 + offset as i64);
@@ -648,16 +648,16 @@ pub fn disassemble_instruction(
             println!("OpNeg");
         }
         OpCode::GetSelfSignal4 => {
-            let sig_idx = read_u32(&code, ip);
+            let sig_idx = read_u32(code, ip);
             ip += size_of::<u32>();
 
-            let sigs_number = read_u32(&code, ip);
+            let sigs_number = read_u32(code, ip);
             ip += size_of::<u32>();
 
             println!("GetSelfSignal4 [{},{}]", sig_idx, sigs_number);
         }
         OpCode::GetSelfSignal => {
-            let sigs_number = read_u32(&code, ip);
+            let sigs_number = read_u32(code, ip);
             ip += size_of::<u32>();
 
             println!("GetSelfSignal [{}]", sigs_number);
@@ -672,19 +672,19 @@ pub fn disassemble_instruction(
             println!("OpAddAddr");
         }
         OpCode::CmpCall => {
-            let cmp_idx = read_u32(&code, ip);
+            let cmp_idx = read_u32(code, ip);
             ip += size_of::<u32>();
 
             println!("CmpCall [{}]", cmp_idx);
         }
         OpCode::FnCall => {
-            let fn_idx = read_u32(&code, ip);
+            let fn_idx = read_u32(code, ip);
             ip += size_of::<u32>();
 
-            let args_num = read_u32(&code, ip);
+            let args_num = read_u32(code, ip);
             ip += size_of::<u32>();
 
-            let return_num = read_u32(&code, ip);
+            let return_num = read_u32(code, ip);
             ip += size_of::<u32>();
 
             let fn_name = &functions[fn_idx as usize].name;
@@ -693,7 +693,7 @@ pub fn disassemble_instruction(
                 "FnCall [{}:{},{},{}]", fn_idx, fn_name, args_num, return_num);
         }
         OpCode::FnReturn => {
-            let return_num = read_u32(&code, ip);
+            let return_num = read_u32(code, ip);
             ip += size_of::<u32>();
 
             println!("FnReturn [{}]", return_num);
@@ -710,7 +710,7 @@ fn calc_mapped_signal_idx(
     template_id: usize, io_map: &TemplateInstanceIOMap,
     signal_code: u32, indexes: &[u32]) -> u32 {
 
-    let signals = io_map.get(&template_id).expect(format!("template not found: {}", template_id).as_str());
+    let signals = io_map.get(&template_id).unwrap_or_else(|| panic!("template not found: {}", template_id));
     let def = &signals[signal_code as usize];
     let mut sig_idx: u32 = def.offset.try_into()
         .expect("Signal index is too large");
