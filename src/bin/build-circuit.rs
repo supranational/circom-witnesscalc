@@ -14,7 +14,6 @@ use compiler::circuit_design::function::FunctionCode;
 use lazy_static::lazy_static;
 use type_analysis::check_types::check_types;
 use circom_witnesscalc::{deserialize_inputs, InputSignalsInfo};
-use circom_witnesscalc::field::M;
 use circom_witnesscalc::graph::{optimize, Node, Operation, UnoOperation, TresOperation, Nodes, NodeConstErr, NodeIdx};
 use circom_witnesscalc::storage::serialize_witnesscalc_graph;
 
@@ -1691,7 +1690,8 @@ fn load_n(
 }
 
 fn build_unary_op_var(
-    compute_bucket: &ComputeBucket,
+    op: UnoOperation,
+    stack: &Vec<InstructionPointer>,
     nodes: &mut Nodes,
     vars: &mut Vec<Option<Var>>,
     component_signal_start: usize,
@@ -1701,42 +1701,17 @@ fn build_unary_op_var(
     print_debug: bool,
     call_stack: &Vec<String>,
 ) -> Var {
-    assert_eq!(compute_bucket.stack.len(), 1);
+    assert_eq!(stack.len(), 1);
     let a = calc_expression(
-        &compute_bucket.stack[0], nodes, vars, component_signal_start,
+        &stack[0], nodes, vars, component_signal_start,
         signal_node_idx, subcomponents, io_map, print_debug, call_stack);
 
     match &a {
         Var::Value(ref a) => {
-            Var::Value(match compute_bucket.op {
-                OperatorType::ToAddress => a.clone(),
-                OperatorType::PrefixSub => if a.clone() == U256::ZERO { U256::ZERO } else { M - a }
-                _ => {
-                    todo!(
-                        "unary operator not implemented: {}",
-                        compute_bucket.op.to_string()
-                    );
-                }
-            })
+            Var::Value(op.eval(a.clone()))
         }
         Var::Node(node_idx) => {
-            let node = Node::UnoOp(match compute_bucket.op {
-                OperatorType::PrefixSub => UnoOperation::Neg,
-                OperatorType::ToAddress => {
-                    nodes.to_const(NodeIdx(*node_idx)).unwrap_or_else(|e| {
-                        panic!(
-                            "ToAddress argument is not a constant: {}: {}",
-                            e.to_string(), call_stack.join(" -> "));
-                    });
-                    UnoOperation::Id
-                }
-                _ => {
-                    todo!(
-                        "operator not implemented: {}",
-                        compute_bucket.op.to_string()
-                    );
-                }
-            }, *node_idx);
+            let node = Node::UnoOp(op, *node_idx);
             Var::Node(nodes.push(node).0)
         }
     }
@@ -1744,7 +1719,8 @@ fn build_unary_op_var(
 
 // Create a Var from operation on two arguments a anb b
 fn build_binary_op_var(
-    compute_bucket: &ComputeBucket,
+    op: Operation,
+    stack: &Vec<InstructionPointer>,
     nodes: &mut Nodes,
     vars: &mut Vec<Option<Var>>,
     component_signal_start: usize,
@@ -1754,12 +1730,12 @@ fn build_binary_op_var(
     print_debug: bool,
     call_stack: &Vec<String>,
 ) -> Var {
-    assert_eq!(compute_bucket.stack.len(), 2);
+    assert_eq!(stack.len(), 2);
     let a = calc_expression(
-        &compute_bucket.stack[0], nodes, vars, component_signal_start,
+        &stack[0], nodes, vars, component_signal_start,
         signal_node_idx, subcomponents, io_map, print_debug, call_stack);
     let b = calc_expression(
-        &compute_bucket.stack[1], nodes, vars, component_signal_start,
+        &stack[1], nodes, vars, component_signal_start,
         signal_node_idx, subcomponents, io_map, print_debug, call_stack);
 
     let mut node_idx = |v: &Var| match v {
@@ -1771,73 +1747,10 @@ fn build_binary_op_var(
 
     match (&a, &b) {
         (Var::Value(ref a), Var::Value(ref b)) => {
-            Var::Value(match compute_bucket.op {
-                OperatorType::Mul => Operation::Mul.eval(a.clone(), b.clone()),
-                OperatorType::Div => if b.clone() == U256::ZERO {
-                    // as we are simulating a circuit execution with signals
-                    // values all equal to 0, just return 0 here in case of
-                    // division by zero
-                    U256::ZERO
-                } else {
-                    a.mul_mod(b.inv_mod(M).unwrap(), M)
-                },
-                OperatorType::Add => a.add_mod(b.clone(), M),
-                OperatorType::Sub => a.add_mod(M - b, M),
-                OperatorType::Pow => Operation::Pow.eval(a.clone(), b.clone()),
-                OperatorType::IntDiv => Operation::Idiv.eval(a.clone(), b.clone()),
-                OperatorType::Mod => Operation::Mod.eval(a.clone(), b.clone()),
-                OperatorType::ShiftL => Operation::Shl.eval(a.clone(), b.clone()),
-                OperatorType::ShiftR => Operation::Shr.eval(a.clone(), b.clone()),
-                OperatorType::LesserEq => Operation::Leq.eval(a.clone(), b.clone()),
-                OperatorType::GreaterEq => Operation::Geq.eval(a.clone(), b.clone()),
-                OperatorType::Lesser => if a < b { U256::from(1) } else { U256::ZERO }
-                OperatorType::Greater => Operation::Gt.eval(a.clone(), b.clone()),
-                OperatorType::Eq(1) => Operation::Eq.eval(a.clone(), b.clone()),
-                OperatorType::NotEq => U256::from(a != b),
-                OperatorType::BoolAnd => Operation::Land.eval(a.clone(), b.clone()),
-                OperatorType::BitOr => Operation::Bor.eval(a.clone(), b.clone()),
-                OperatorType::BitAnd => Operation::Band.eval(a.clone(), b.clone()),
-                OperatorType::BitXor => Operation::Bxor.eval(a.clone(), b.clone()),
-                OperatorType::MulAddress => a * b,
-                OperatorType::AddAddress => a + b,
-                _ => {
-                    todo!(
-                        "operator not implemented: {}",
-                        compute_bucket.op.to_string()
-                    );
-                }
-            })
+            Var::Value(op.eval(a.clone(), b.clone()))
         }
         _ => {
-            let node = Node::Op(match compute_bucket.op {
-                OperatorType::Mul => Operation::Mul,
-                OperatorType::Div => Operation::Div,
-                OperatorType::Add => Operation::Add,
-                OperatorType::Sub => Operation::Sub,
-                OperatorType::Pow => Operation::Pow,
-                OperatorType::IntDiv => Operation::Idiv,
-                OperatorType::Mod => Operation::Mod,
-                OperatorType::ShiftL => Operation::Shl,
-                OperatorType::ShiftR => Operation::Shr,
-                OperatorType::LesserEq => Operation::Leq,
-                OperatorType::GreaterEq => Operation::Geq,
-                OperatorType::Lesser => Operation::Lt,
-                OperatorType::Greater => Operation::Gt,
-                OperatorType::Eq(1) => Operation::Eq,
-                OperatorType::NotEq => Operation::Neq,
-                OperatorType::BoolAnd => Operation::Land,
-                OperatorType::BitOr => Operation::Bor,
-                OperatorType::BitAnd => Operation::Band,
-                OperatorType::BitXor => Operation::Bxor,
-                OperatorType::MulAddress => Operation::Mul,
-                OperatorType::AddAddress => Operation::Add,
-                _ => {
-                    todo!(
-                        "operator not implemented: {}",
-                        compute_bucket.op.to_string()
-                    );
-                }
-            }, node_idx(&a), node_idx(&b));
+            let node = Node::Op(op, node_idx(&a), node_idx(&b));
             Var::Node(nodes.push(node).0)
         }
     }
@@ -1870,33 +1783,28 @@ fn calc_expression(
             assert_eq!(r.len(), 1);
             r[0].clone()
         },
-        Instruction::Compute(ref compute_bucket) => match compute_bucket.op {
-            OperatorType::Mul | OperatorType::Div | OperatorType::Add
-            | OperatorType::Sub | OperatorType::Pow | OperatorType::IntDiv
-            | OperatorType::Mod | OperatorType::ShiftL | OperatorType::ShiftR
-            | OperatorType::LesserEq | OperatorType::GreaterEq
-            | OperatorType::Lesser | OperatorType::Greater | OperatorType::Eq(1)
-            | OperatorType::NotEq | OperatorType::BoolAnd | OperatorType::BitOr
-            | OperatorType::BitAnd | OperatorType::BitXor
-            | OperatorType::MulAddress | OperatorType::AddAddress => {
+        Instruction::Compute(ref compute_bucket) => {
+            // try duo operation
+            if let Ok(op) = Operation::try_from(compute_bucket.op) {
                 build_binary_op_var(
-                    compute_bucket, nodes, vars, component_signal_start,
-                    signal_node_idx, subcomponents, io_map, print_debug,
-                    call_stack)
+                    op, &compute_bucket.stack, nodes, vars,
+                    component_signal_start, signal_node_idx, subcomponents,
+                    io_map, print_debug, call_stack)
             }
-            OperatorType::ToAddress | OperatorType::PrefixSub => {
+
+            // try uno operation
+            else if let Ok(op) = UnoOperation::try_from(compute_bucket.op) {
                 build_unary_op_var(
-                    compute_bucket, nodes, vars, component_signal_start,
-                    signal_node_idx, subcomponents, io_map, print_debug,
-                    call_stack)
+                    op, &compute_bucket.stack, nodes, vars,
+                    component_signal_start, signal_node_idx, subcomponents,
+                    io_map, print_debug, call_stack)
             }
-            _ => {
-                todo!(
-                    "operator not implemented: {}",
-                    compute_bucket.op.to_string()
-                );
+
+            else {
+                panic!("Unsupported operator type: {}", compute_bucket.op.to_string());
             }
-        },
+
+        }
         _ => {
             panic!(
                 "instruction evaluation is not supported: {}",

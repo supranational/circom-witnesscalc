@@ -109,6 +109,8 @@ impl From<crate::proto::UnoOp> for UnoOperation {
         match value {
             crate::proto::UnoOp::Neg => UnoOperation::Neg,
             crate::proto::UnoOp::Id => UnoOperation::Id,
+            crate::proto::UnoOp::Lnot => UnoOperation::Lnot,
+            crate::proto::UnoOp::Bnot => UnoOperation::Bnot,
         }
     }
 }
