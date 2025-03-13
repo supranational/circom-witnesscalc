@@ -612,10 +612,14 @@ fn process_instruction(
                         call_stack);
                     assert_eq!(node_idxs.len(), store_bucket.context.size);
 
+                    let dest = SignalDestination {
+                        cmp_address,
+                        input_information,
+                        dest: &store_bucket.dest,
+                    };
+
                     store_subcomponent_signals(
-                        ctx, cmp_address, input_information, &node_idxs,
-                        &store_bucket.dest, store_bucket.context.size,
-                        print_debug, call_stack, cmp);
+                        ctx, &node_idxs, print_debug, call_stack, cmp, &dest);
                 }
             };
         }
@@ -889,10 +893,14 @@ fn store_function_return_results_into_subsignal(
         }
     }
 
+    let dest = SignalDestination {
+        cmp_address,
+        input_information,
+        dest: &final_data.dest,
+    };
+
     store_subcomponent_signals(
-        ctx, cmp_address, input_information, &src_node_idxs,
-        &final_data.dest, final_data.context.size, print_debug,
-        call_stack, cmp);
+        ctx, &src_node_idxs, print_debug, call_stack, cmp, &dest);
 }
 
 fn store_function_return_results(
@@ -2183,14 +2191,19 @@ fn evaluate_unoptimized(nodes: &Nodes, inputs: &[U256], signal_node_idx: &Vec<us
     }
 }
 
+struct SignalDestination<'a> {
+    cmp_address: &'a InstructionPointer,
+    input_information: &'a InputInformation,
+    dest: &'a LocationRule,
+}
+
 fn store_subcomponent_signals(
-    ctx: &mut BuildCircuitContext, cmp_address: &InstructionPointer,
-    input_information: &InputInformation, src_node_idxs: &[usize],
-    dest: &LocationRule, size: usize, print_debug: bool,
-    call_stack: &Vec<String>, cmp: &mut ComponentInstance) {
+    ctx: &mut BuildCircuitContext, src_node_idxs: &[usize], print_debug: bool,
+    call_stack: &Vec<String>, cmp: &mut ComponentInstance,
+    dst: &SignalDestination) {
 
     let input_status: &StatusInput;
-    if let InputInformation::Input { ref status } = input_information {
+    if let InputInformation::Input { ref status } = dst.input_information {
         input_status = status;
     } else {
         panic!("incorrect input information for subcomponent signal");
@@ -2198,11 +2211,11 @@ fn store_subcomponent_signals(
 
     let subcomponent_idx =
         calc_expression(
-            cmp_address, ctx.nodes, cmp, ctx.signal_node_idx, ctx.io_map,
+            dst.cmp_address, ctx.nodes, cmp, ctx.signal_node_idx, ctx.io_map,
             print_debug, call_stack)
         .must_const_usize(ctx.nodes, call_stack);
 
-    let (signal_idx, template_header) = match dest {
+    let (signal_idx, template_header) = match dst.dest {
         LocationRule::Indexed {
             ref location,
             ref template_header,
@@ -2226,24 +2239,24 @@ fn store_subcomponent_signals(
     let signal_offset = sub_cmp.signal_offset;
 
     if print_debug {
-        let location = match dest {
+        let location = match dst.dest {
             LocationRule::Indexed { .. } => "Indexed",
             LocationRule::Mapped { .. } => "Mapped",
         };
         println!(
             "Store subcomponent signal (location: {}, template: {}, subcomponent idx: {}, num: {}): {} + {} = {}",
-            location, template_header, subcomponent_idx, size, signal_offset,
-            signal_idx, signal_offset + signal_idx);
+            location, template_header, subcomponent_idx, src_node_idxs.len(),
+            signal_offset, signal_idx, signal_offset + signal_idx);
     }
 
     let signal_idx = signal_offset + signal_idx;
-    for i in 0..size {
+    for i in 0..src_node_idxs.len() {
         if ctx.signal_node_idx[signal_idx + i] != usize::MAX {
             panic!("subcomponent signal is already set");
         }
         ctx.signal_node_idx[signal_idx + i] = src_node_idxs[i];
     }
-    sub_cmp.number_of_inputs -= size;
+    sub_cmp.number_of_inputs -= src_node_idxs.len();
 
     let run_component = match input_status {
         StatusInput::Last => {
