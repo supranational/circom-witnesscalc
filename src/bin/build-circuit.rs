@@ -20,7 +20,7 @@ use circom_witnesscalc::storage::serialize_witnesscalc_graph;
 // if instruction pointer is a store to the signal, return the signal index
 // and the src instruction to store to the signal
 fn try_signal_store<'a>(
-    cmp_ctx: &mut ComponentContext,
+    cmp: &mut ComponentInstance,
     inst: &'a InstructionPointer,
     nodes: &mut Nodes,
     component_signal_start: usize,
@@ -44,7 +44,7 @@ fn try_signal_store<'a>(
             }
             let signal_idx =
                 calc_expression(
-                    location, nodes, cmp_ctx, component_signal_start,
+                    location, nodes, cmp, component_signal_start,
                     signal_node_idx, io_map, print_debug, call_stack)
                 .must_const_usize(nodes, call_stack);
 
@@ -89,7 +89,7 @@ fn var_from_value_instruction_n(
 fn operator_argument_instruction_n(
     inst: &InstructionPointer,
     nodes: &mut Nodes,
-    cmp_ctx: &mut ComponentContext,
+    cmp: &mut ComponentInstance,
     signal_node_idx: &mut Vec<usize>,
     component_signal_start: usize,
     size: usize,
@@ -103,7 +103,7 @@ fn operator_argument_instruction_n(
         // operator_argument_instruction implements much more cases than
         // this function, so we can use it here is size == 1
         return vec![operator_argument_instruction(
-            cmp_ctx, inst, nodes, signal_node_idx, component_signal_start,
+            cmp, inst, nodes, signal_node_idx, component_signal_start,
             io_map, print_debug, call_stack)];
     }
 
@@ -120,9 +120,9 @@ fn operator_argument_instruction_n(
                         }
                         let signal_idx =
                             calc_expression(
-                                location, nodes, cmp_ctx,
-                                component_signal_start, signal_node_idx, io_map,
-                                print_debug, call_stack)
+                                location, nodes, cmp, component_signal_start,
+                                signal_node_idx, io_map, print_debug,
+                                call_stack)
                             .must_const_usize(nodes, call_stack);
                         let mut result = Vec::with_capacity(size);
                         for i in 0..size {
@@ -142,7 +142,7 @@ fn operator_argument_instruction_n(
                 AddressType::SubcmpSignal { ref cmp_address, .. } => {
                     let subcomponent_idx =
                         calc_expression(
-                            cmp_address, nodes, cmp_ctx, component_signal_start,
+                            cmp_address, nodes, cmp, component_signal_start,
                             signal_node_idx, io_map, print_debug, call_stack)
                         .must_const_usize(nodes, call_stack);
 
@@ -152,9 +152,9 @@ fn operator_argument_instruction_n(
                             ref template_header,
                         } => {
                             let signal_idx = calc_expression(
-                                location, nodes, cmp_ctx,
-                                component_signal_start, signal_node_idx, io_map,
-                                print_debug, call_stack);
+                                location, nodes, cmp, component_signal_start,
+                                signal_node_idx, io_map, print_debug,
+                                call_stack);
                             let signal_idx = signal_idx.to_const_usize(nodes)
                                 .unwrap_or_else(|e| panic!(
                                     "can't calculate const usize signal index: {}: {}",
@@ -164,12 +164,12 @@ fn operator_argument_instruction_n(
                         }
                         LocationRule::Mapped { ref signal_code, ref indexes } => {
                             calc_mapped_signal_idx(
-                                cmp_ctx, subcomponent_idx, io_map, *signal_code,
+                                cmp, subcomponent_idx, io_map, *signal_code,
                                 indexes, nodes, component_signal_start,
                                 signal_node_idx, print_debug, call_stack)
                         }
                     };
-                    let signal_offset = cmp_ctx.subcomponents[subcomponent_idx]
+                    let signal_offset = cmp.subcomponents[subcomponent_idx]
                         .as_ref()
                         .unwrap()
                         .signal_offset;
@@ -207,12 +207,12 @@ fn operator_argument_instruction_n(
                     };
                     let var_idx =
                         calc_expression(
-                            location, nodes, cmp_ctx, component_signal_start,
+                            location, nodes, cmp, component_signal_start,
                             signal_node_idx, io_map, print_debug, call_stack)
                         .must_const_usize(nodes, call_stack);
                     let mut result = Vec::with_capacity(size);
                     for i in 0..size {
-                        match cmp_ctx.vars[var_idx+i] {
+                        match cmp.vars[var_idx+i] {
                             Some(Var::Node(idx)) => {
                                 result.push(idx);
                             },
@@ -235,7 +235,7 @@ fn operator_argument_instruction_n(
 
 
 fn operator_argument_instruction(
-    cmp_ctx: &mut ComponentContext,
+    cmp: &mut ComponentInstance,
     inst: &InstructionPointer,
     nodes: &mut Nodes,
     signal_node_idx: &mut Vec<usize>,
@@ -257,9 +257,9 @@ fn operator_argument_instruction(
                         }
                         let signal_idx =
                             calc_expression(
-                                location, nodes, cmp_ctx,
-                                component_signal_start, signal_node_idx, io_map,
-                                print_debug, call_stack)
+                                location, nodes, cmp, component_signal_start,
+                                signal_node_idx, io_map, print_debug,
+                                call_stack)
                             .must_const_usize(nodes, call_stack);
                         let signal_idx = component_signal_start + signal_idx;
                         let signal_node = signal_node_idx[signal_idx];
@@ -275,7 +275,7 @@ fn operator_argument_instruction(
                 } => {
                     let subcomponent_idx =
                         calc_expression(
-                            cmp_address, nodes, cmp_ctx, component_signal_start,
+                            cmp_address, nodes, cmp, component_signal_start,
                             signal_node_idx, io_map, print_debug, call_stack)
                         .must_const_usize(nodes, call_stack);
 
@@ -286,7 +286,7 @@ fn operator_argument_instruction(
                         } => {
                             let signal_idx =
                                 calc_expression(
-                                    location, nodes, cmp_ctx,
+                                    location, nodes, cmp,
                                     component_signal_start, signal_node_idx,
                                     io_map, print_debug, call_stack)
                                 .must_const_usize(nodes, call_stack);
@@ -295,13 +295,13 @@ fn operator_argument_instruction(
                         }
                         LocationRule::Mapped { ref signal_code, ref indexes } => {
                             calc_mapped_signal_idx(
-                                cmp_ctx, subcomponent_idx, io_map, *signal_code,
+                                cmp, subcomponent_idx, io_map, *signal_code,
                                 indexes, nodes, component_signal_start,
                                 signal_node_idx, print_debug, call_stack)
                         }
                     };
 
-                    let signal_offset = cmp_ctx.subcomponents[subcomponent_idx]
+                    let signal_offset = cmp.subcomponents[subcomponent_idx]
                         .as_ref().unwrap().signal_offset;
 
                     if print_debug {
@@ -321,11 +321,11 @@ fn operator_argument_instruction(
                         LocationRule::Indexed { ref location, .. } => {
                             let var_idx =
                                 calc_expression(
-                                    location, nodes, cmp_ctx,
+                                    location, nodes, cmp,
                                     component_signal_start, signal_node_idx,
                                     io_map, print_debug, call_stack)
                                 .must_const_usize(nodes, call_stack);
-                            match cmp_ctx.vars[var_idx] {
+                            match cmp.vars[var_idx] {
                                 Some(Var::Node(idx)) => idx,
                                 Some(Var::Value(ref v)) => {
                                     nodes.push(Node::Constant(*v)).0
@@ -342,7 +342,7 @@ fn operator_argument_instruction(
         }
         Instruction::Compute(ref compute_bucket) => {
             let node = node_from_compute_bucket(
-                cmp_ctx, compute_bucket, nodes, signal_node_idx,
+                cmp, compute_bucket, nodes, signal_node_idx,
                 component_signal_start, io_map, print_debug, call_stack);
             nodes.push(node).0
         }
@@ -404,7 +404,7 @@ lazy_static! {
 }
 
 fn node_from_compute_bucket(
-    cmp_ctx: &mut ComponentContext,
+    cmp: &mut ComponentInstance,
     compute_bucket: &ComputeBucket,
     nodes: &mut Nodes,
     signal_node_idx: &mut Vec<usize>,
@@ -415,16 +415,16 @@ fn node_from_compute_bucket(
 ) -> Node {
     if let Some(op) = DUO_OPERATORS_MAP.get(&compute_bucket.op) {
         let arg1 = operator_argument_instruction(
-            cmp_ctx, &compute_bucket.stack[0], nodes, signal_node_idx,
+            cmp, &compute_bucket.stack[0], nodes, signal_node_idx,
             component_signal_start, io_map, print_debug, call_stack);
         let arg2 = operator_argument_instruction(
-            cmp_ctx, &compute_bucket.stack[1], nodes, signal_node_idx,
+            cmp, &compute_bucket.stack[1], nodes, signal_node_idx,
             component_signal_start, io_map, print_debug, call_stack);
         return Node::Op(*op, arg1, arg2);
     }
     if let Some(op) = UNO_OPERATORS_MAP.get(&compute_bucket.op) {
         let arg1 = operator_argument_instruction(
-            cmp_ctx, &compute_bucket.stack[0], nodes, signal_node_idx,
+            cmp, &compute_bucket.stack[0], nodes, signal_node_idx,
             component_signal_start, io_map, print_debug, call_stack);
         return Node::UnoOp(*op, arg1);
     }
@@ -434,13 +434,13 @@ fn node_from_compute_bucket(
 }
 
 fn calc_mapped_signal_idx(
-    cmp_ctx: &mut ComponentContext, subcomponent_idx: usize,
+    cmp: &mut ComponentInstance, subcomponent_idx: usize,
     io_map: &TemplateInstanceIOMap, signal_code: usize,
     indexes: &Vec<InstructionPointer>, nodes: &mut Nodes,
     component_signal_start: usize, signal_node_idx: &mut Vec<usize>,
     print_debug: bool, call_stack: &Vec<String>) -> (usize, String) {
 
-    let template_id = &cmp_ctx.subcomponents[subcomponent_idx]
+    let template_id = &cmp.subcomponents[subcomponent_idx]
         .as_ref()
         .unwrap()
         .template_id;
@@ -467,7 +467,7 @@ fn calc_mapped_signal_idx(
         // Calculate linear index
         for (i, idx_ip) in indexes.iter().enumerate() {
             let idx_value = calc_expression(
-                idx_ip, nodes, cmp_ctx, component_signal_start, signal_node_idx,
+                idx_ip, nodes, cmp, component_signal_start, signal_node_idx,
                 io_map, print_debug, call_stack);
             let idx_value = idx_value.must_const_usize(nodes, call_stack);
 
@@ -496,15 +496,28 @@ struct BuildCircuitContext<'a> {
     io_map: &'a TemplateInstanceIOMap,
 }
 
-struct ComponentContext {
-    vars: Vec<Option<Var>>,
-    subcomponents: Vec<Option<ComponentInstance>>,
+impl BuildCircuitContext<'_> {
+    fn new_component(
+        &self, template_id: usize, signal_offset: usize,
+        component_offset: usize) -> ComponentInstance {
+
+        let tmpl = &self.templates[template_id];
+        let mut cmp = ComponentInstance {
+            template_id,
+            signal_offset,
+            number_of_inputs: tmpl.number_of_inputs,
+            component_offset,
+            vars: vec![None; tmpl.var_stack_depth],
+            subcomponents: Vec::with_capacity(tmpl.number_of_components),
+        };
+        cmp.subcomponents.resize_with(tmpl.number_of_components, || None);
+        cmp
+    }
 }
 
 fn process_instruction(
-    ctx: &mut BuildCircuitContext, cmp_ctx: &mut ComponentContext,
-    inst: &InstructionPointer, print_debug: bool, call_stack: &Vec<String>,
-    cmp: &ComponentInstance) {
+    ctx: &mut BuildCircuitContext, inst: &InstructionPointer, print_debug: bool,
+    call_stack: &Vec<String>, cmp: &mut ComponentInstance) {
 
     match **inst {
         Instruction::Value(..) => {
@@ -526,8 +539,7 @@ fn process_instruction(
                             }
                             let signal_idx =
                                 calc_expression(
-                                    location, ctx.nodes, cmp_ctx,
-                                    cmp.signal_offset, ctx.signal_node_idx,
+                                    location, ctx.nodes, cmp, cmp.signal_offset, ctx.signal_node_idx,
                                     ctx.io_map, print_debug,
                                     call_stack)
                                 .must_const_usize(ctx.nodes, call_stack);
@@ -542,7 +554,7 @@ fn process_instruction(
                                 cmp.signal_offset + signal_idx;
 
                             let node_idxs = operator_argument_instruction_n(
-                                &store_bucket.src, ctx.nodes, cmp_ctx,
+                                &store_bucket.src, ctx.nodes, cmp,
                                 ctx.signal_node_idx, cmp.signal_offset,
                                 store_bucket.context.size,
                                 ctx.io_map, print_debug, call_stack);
@@ -580,17 +592,17 @@ fn process_instruction(
                             }
                             let lvar_idx =
                                 calc_expression(
-                                    location, ctx.nodes, cmp_ctx,
+                                    location, ctx.nodes, cmp,
                                     cmp.signal_offset, ctx.signal_node_idx,
                                     ctx.io_map, print_debug, call_stack)
                                 .must_const_usize(ctx.nodes, call_stack);
                             let var_exprs = calc_expression_n(
-                                &store_bucket.src, ctx.nodes, cmp_ctx,
+                                &store_bucket.src, ctx.nodes, cmp,
                                 cmp.signal_offset, ctx.signal_node_idx,
                                 store_bucket.context.size, ctx.io_map,
                                 print_debug, call_stack);
                             for i in 0..store_bucket.context.size {
-                                cmp_ctx.vars[lvar_idx + i] =
+                                cmp.vars[lvar_idx + i] =
                                     Some(var_exprs[i].clone());
                             }
                         }
@@ -605,14 +617,14 @@ fn process_instruction(
                     ..
                 } => {
                     let node_idxs = operator_argument_instruction_n(
-                        &store_bucket.src, ctx.nodes, cmp_ctx,
+                        &store_bucket.src, ctx.nodes, cmp,
                         ctx.signal_node_idx, cmp.signal_offset,
                         store_bucket.context.size, ctx.io_map, print_debug,
                         call_stack);
                     assert_eq!(node_idxs.len(), store_bucket.context.size);
 
                     store_subcomponent_signals(
-                        ctx, cmp_ctx, cmp_address, input_information, &node_idxs,
+                        ctx, cmp_address, input_information, &node_idxs,
                         &store_bucket.dest, store_bucket.context.size,
                         print_debug, call_stack, cmp);
                 }
@@ -628,7 +640,7 @@ fn process_instruction(
             let mut count: usize = 0;
             for inst2 in &call_bucket.arguments {
                 let args = calc_expression_n(
-                    inst2, ctx.nodes, cmp_ctx, cmp.signal_offset,
+                    inst2, ctx.nodes, cmp, cmp.signal_offset,
                     ctx.signal_node_idx, call_bucket.argument_types[idx].size,
                     ctx.io_map, print_debug, call_stack);
                 for arg in args {
@@ -650,14 +662,14 @@ fn process_instruction(
                     }
                     // assert_eq!(final_data.context.size, r.ln);
                     store_function_return_results(
-                        ctx, cmp_ctx, final_data, &fn_vars, &r,
-                        print_debug, call_stack, cmp);
+                        ctx, final_data, &fn_vars, &r, print_debug, call_stack,
+                        cmp);
                 }
             }
         }
         Instruction::Branch(ref branch_bucket) => {
             let cond = calc_expression(
-                &branch_bucket.cond, ctx.nodes, cmp_ctx, cmp.signal_offset,
+                &branch_bucket.cond, ctx.nodes, cmp, cmp.signal_offset,
                 ctx.signal_node_idx, ctx.io_map, print_debug,
                 call_stack);
             match cond.to_const(ctx.nodes) {
@@ -669,7 +681,7 @@ fn process_instruction(
                     };
                     for inst in inst_list {
                         process_instruction(
-                            ctx, cmp_ctx, inst, print_debug, call_stack, cmp);
+                            ctx, inst, print_debug, call_stack, cmp);
                     }
                 }
                 Err(NodeConstErr::InputSignal) => {
@@ -685,11 +697,11 @@ fn process_instruction(
                         panic!("Non-constant condition may be used only in ternary operation and both branches of code must be of length 1");
                     }
                     let if_branch = try_signal_store(
-                        cmp_ctx, &branch_bucket.if_branch[0], ctx.nodes,
+                        cmp, &branch_bucket.if_branch[0], ctx.nodes,
                         cmp.signal_offset, ctx.signal_node_idx, ctx.io_map,
                         print_debug, call_stack);
                     let else_branch = try_signal_store(
-                        cmp_ctx, &branch_bucket.else_branch[0], ctx.nodes,
+                        cmp, &branch_bucket.else_branch[0], ctx.nodes,
                         cmp.signal_offset, ctx.signal_node_idx, ctx.io_map,
                         print_debug, call_stack);
                     match (if_branch, else_branch) {
@@ -705,12 +717,12 @@ fn process_instruction(
                             );
 
                             let node_idx_if = operator_argument_instruction(
-                                cmp_ctx, if_src, ctx.nodes, ctx.signal_node_idx,
+                                cmp, if_src, ctx.nodes, ctx.signal_node_idx,
                                 cmp.signal_offset, ctx.io_map, print_debug,
                                 call_stack);
 
                             let node_idx_else = operator_argument_instruction(
-                                cmp_ctx, else_src, ctx.nodes,
+                                cmp, else_src, ctx.nodes,
                                 ctx.signal_node_idx, cmp.signal_offset,
                                 ctx.io_map, print_debug, call_stack);
 
@@ -746,31 +758,31 @@ fn process_instruction(
         }
         Instruction::Loop(ref loop_bucket) => {
             while check_continue_condition(
-                cmp_ctx, &loop_bucket.continue_condition, ctx.nodes,
+                cmp, &loop_bucket.continue_condition, ctx.nodes,
                 cmp.signal_offset, ctx.signal_node_idx, ctx.io_map, print_debug,
                 call_stack) {
 
                 for i in &loop_bucket.body {
                     process_instruction(
-                        ctx, cmp_ctx, i,print_debug, call_stack, cmp);
+                        ctx, i, print_debug, call_stack, cmp);
                 }
             }
         }
         Instruction::CreateCmp(ref create_component_bucket) => {
             let sub_cmp_idx =
                 calc_expression(
-                    &create_component_bucket.sub_cmp_id, ctx.nodes, cmp_ctx,
+                    &create_component_bucket.sub_cmp_id, ctx.nodes, cmp,
                     cmp.signal_offset, ctx.signal_node_idx, ctx.io_map,
                     print_debug, call_stack)
                 .must_const_usize(ctx.nodes, call_stack);
 
             assert!(
                 sub_cmp_idx + create_component_bucket.number_of_cmp - 1
-                    < cmp_ctx.subcomponents.len(),
+                    < cmp.subcomponents.len(),
                 "cmp_idx = {}, number_of_cmp = {}, subcomponents.len() = {}",
                 sub_cmp_idx,
                 create_component_bucket.number_of_cmp,
-                cmp_ctx.subcomponents.len()
+                cmp.subcomponents.len()
             );
 
             let mut cmp_signal_offset = create_component_bucket.signal_offset;
@@ -779,17 +791,14 @@ fn process_instruction(
             for (i, _ ) in create_component_bucket.defined_positions.iter() {
                 let i = sub_cmp_idx + *i;
 
-                if let Some(_) = cmp_ctx.subcomponents[i] {
+                if let Some(_) = cmp.subcomponents[i] {
                     panic!("subcomponent already set");
                 }
-                cmp_ctx.subcomponents[i] = Some(ComponentInstance {
-                    template_id: create_component_bucket.template_id,
-                    signal_offset: cmp.signal_offset + cmp_signal_offset,
-                    number_of_inputs: ctx
-                        .templates[create_component_bucket.template_id]
-                        .number_of_inputs,
-                    component_offset: cmp.component_offset + cmp_offset + 1,
-                });
+                cmp.subcomponents[i] = Some(ctx.new_component(
+                    create_component_bucket.template_id,
+                    cmp.signal_offset + cmp_signal_offset,
+                    cmp.component_offset + cmp_offset + 1,
+                ));
                 cmp_offset += create_component_bucket.component_offset_jump;
                 cmp_signal_offset += create_component_bucket.signal_offset_jump;
             }
@@ -798,13 +807,13 @@ fn process_instruction(
                 println!(
                     "{}",
                     fmt_create_cmp_bucket(
-                        create_component_bucket, ctx.nodes, cmp_ctx,
+                        create_component_bucket, ctx.nodes, cmp,
                         cmp.signal_offset, ctx.signal_node_idx, ctx.io_map,
                         print_debug, call_stack));
             }
             if !create_component_bucket.has_inputs {
                 for i in sub_cmp_idx..sub_cmp_idx + create_component_bucket.number_of_cmp {
-                    let cmp = cmp_ctx.subcomponents[i].as_ref().unwrap();
+                    let cmp = cmp.subcomponents[i].as_mut().unwrap();
                     run_template(ctx, print_debug, call_stack, cmp)
                 }
             }
@@ -854,9 +863,9 @@ fn store_function_return_results_into_variable(
 }
 
 fn store_function_return_results_into_subsignal(
-    ctx: &mut BuildCircuitContext, cmp_ctx: &mut ComponentContext,
-    final_data: &FinalData, src_vars: &Vec<Option<Var>>, ret: &FnReturn,
-    print_debug: bool, call_stack: &Vec<String>, cmp: &ComponentInstance) {
+    ctx: &mut BuildCircuitContext, final_data: &FinalData,
+    src_vars: &Vec<Option<Var>>, ret: &FnReturn, print_debug: bool,
+    call_stack: &Vec<String>, cmp: &mut ComponentInstance) {
 
     let (cmp_address, input_information) = if let AddressType::SubcmpSignal {cmp_address, input_information, ..} = &final_data.dest_address_type {
         (cmp_address, input_information)
@@ -897,26 +906,26 @@ fn store_function_return_results_into_subsignal(
     }
 
     store_subcomponent_signals(
-        ctx, cmp_ctx, cmp_address, input_information, &src_node_idxs,
+        ctx, cmp_address, input_information, &src_node_idxs,
         &final_data.dest, final_data.context.size, print_debug,
         call_stack, cmp);
 }
 
 fn store_function_return_results(
-    ctx: &mut BuildCircuitContext, cmp_ctx: &mut ComponentContext,
-    final_data: &FinalData, src_vars: &Vec<Option<Var>>, ret: &FnReturn,
-    print_debug: bool, call_stack: &Vec<String>, cmp: &ComponentInstance) {
+    ctx: &mut BuildCircuitContext, final_data: &FinalData,
+    src_vars: &Vec<Option<Var>>, ret: &FnReturn, print_debug: bool,
+    call_stack: &Vec<String>, cmp: &mut ComponentInstance) {
 
     match &final_data.dest_address_type {
         AddressType::Signal => todo!("Signal"),
         AddressType::Variable => {
             store_function_return_results_into_variable(
-                final_data, src_vars, ret, &mut cmp_ctx.vars, ctx.nodes,
+                final_data, src_vars, ret, &mut cmp.vars, ctx.nodes,
                 call_stack);
         }
         AddressType::SubcmpSignal {..} => {
             store_function_return_results_into_subsignal(
-                ctx, cmp_ctx, final_data, src_vars, ret, print_debug,
+                ctx, final_data, src_vars, ret, print_debug,
                 call_stack, cmp);
         }
     }
@@ -1446,12 +1455,14 @@ struct ComponentInstance {
     signal_offset: usize,
     number_of_inputs: usize,
     component_offset: usize, // global component index
+    vars: Vec<Option<Var>>,
+    subcomponents: Vec<Option<ComponentInstance>>,
 }
 
 fn fmt_create_cmp_bucket(
     cmp_bucket: &CreateCmpBucket,
     nodes: &mut Nodes,
-    cmp_ctx: &mut ComponentContext,
+    cmp: &mut ComponentInstance,
     component_signal_start: usize,
     signal_node_idx: &mut Vec<usize>,
     io_map: &TemplateInstanceIOMap,
@@ -1459,7 +1470,7 @@ fn fmt_create_cmp_bucket(
     call_stack: &Vec<String>,
 ) -> String {
     let sub_cmp_id = calc_expression(
-        &cmp_bucket.sub_cmp_id, nodes, cmp_ctx, component_signal_start,
+        &cmp_bucket.sub_cmp_id, nodes, cmp, component_signal_start,
         signal_node_idx, io_map, print_debug, call_stack);
 
     let sub_cmp_id = match sub_cmp_id {
@@ -1539,7 +1550,7 @@ impl Var {
 
 fn load_n(
     load_bucket: &LoadBucket, nodes: &mut Nodes,
-    cmp_ctx: &mut ComponentContext, component_signal_start: usize,
+    cmp: &mut ComponentInstance, component_signal_start: usize,
     signal_node_idx: &mut Vec<usize>, size: usize,
     io_map: &TemplateInstanceIOMap, print_debug: bool,
     call_stack: &Vec<String>) -> Vec<Var> {
@@ -1554,7 +1565,7 @@ fn load_n(
                     panic!("not implemented: template_header expected to be None");
                 }
                 let signal_idx = calc_expression(
-                    location, nodes, cmp_ctx, component_signal_start,
+                    location, nodes, cmp, component_signal_start,
                     signal_node_idx, io_map, print_debug,
                     call_stack);
                 let signal_idx = signal_idx.must_const_usize(
@@ -1580,7 +1591,7 @@ fn load_n(
         } => {
             let subcomponent_idx =
                 calc_expression(
-                    cmp_address, nodes, cmp_ctx, component_signal_start,
+                    cmp_address, nodes, cmp, component_signal_start,
                     signal_node_idx, io_map, print_debug, call_stack)
                 .must_const_usize(nodes, call_stack);
 
@@ -1590,7 +1601,7 @@ fn load_n(
                     ref template_header,
                 } => {
                     let signal_idx = calc_expression(
-                        location, nodes, cmp_ctx, component_signal_start,
+                        location, nodes, cmp, component_signal_start,
                         signal_node_idx, io_map, print_debug, call_stack);
                     let signal_idx = signal_idx.to_const_usize(nodes)
                         .unwrap_or_else(|e| panic!(
@@ -1601,12 +1612,12 @@ fn load_n(
                 }
                 LocationRule::Mapped { ref signal_code, ref indexes } => {
                     calc_mapped_signal_idx(
-                        cmp_ctx, subcomponent_idx, io_map, signal_code.clone(),
+                        cmp, subcomponent_idx, io_map, signal_code.clone(),
                         indexes, nodes, component_signal_start, signal_node_idx,
                         print_debug, call_stack)
                 }
             };
-            let signal_offset = cmp_ctx.subcomponents[subcomponent_idx]
+            let signal_offset = cmp.subcomponents[subcomponent_idx]
                 .as_ref().unwrap().signal_offset;
 
             if print_debug {
@@ -1643,13 +1654,13 @@ fn load_n(
             };
             let var_idx =
                 calc_expression(
-                    location, nodes, cmp_ctx, component_signal_start,
+                    location, nodes, cmp, component_signal_start,
                     signal_node_idx, io_map, print_debug, call_stack)
                 .must_const_usize(nodes, call_stack);
 
             let mut result: Vec<Var> = Vec::with_capacity(size);
             for i in 0..size {
-                result.push(match cmp_ctx.vars[var_idx + i] {
+                result.push(match cmp.vars[var_idx + i] {
                     Some(ref v) => v.clone(),
                     None => panic!("variable is not set yet"),
                 });
@@ -1660,7 +1671,7 @@ fn load_n(
 }
 
 fn build_unary_op_var(
-    cmp_ctx: &mut ComponentContext,
+    cmp: &mut ComponentInstance,
     op: UnoOperation,
     stack: &Vec<InstructionPointer>,
     nodes: &mut Nodes,
@@ -1672,7 +1683,7 @@ fn build_unary_op_var(
 ) -> Var {
     assert_eq!(stack.len(), 1);
     let a = calc_expression(
-        &stack[0], nodes, cmp_ctx, component_signal_start,
+        &stack[0], nodes, cmp, component_signal_start,
         signal_node_idx, io_map, print_debug, call_stack);
 
     match &a {
@@ -1688,7 +1699,7 @@ fn build_unary_op_var(
 
 // Create a Var from operation on two arguments a anb b
 fn build_binary_op_var(
-    cmp_ctx: &mut ComponentContext,
+    cmp: &mut ComponentInstance,
     op: Operation,
     stack: &Vec<InstructionPointer>,
     nodes: &mut Nodes,
@@ -1700,10 +1711,10 @@ fn build_binary_op_var(
 ) -> Var {
     assert_eq!(stack.len(), 2);
     let a = calc_expression(
-        &stack[0], nodes, cmp_ctx, component_signal_start,
+        &stack[0], nodes, cmp, component_signal_start,
         signal_node_idx, io_map, print_debug, call_stack);
     let b = calc_expression(
-        &stack[1], nodes, cmp_ctx, component_signal_start,
+        &stack[1], nodes, cmp, component_signal_start,
         signal_node_idx, io_map, print_debug, call_stack);
 
     let mut node_idx = |v: &Var| match v {
@@ -1729,7 +1740,7 @@ fn build_binary_op_var(
 fn calc_expression(
     inst: &InstructionPointer,
     nodes: &mut Nodes,
-    cmp_ctx: &mut ComponentContext,
+    cmp: &mut ComponentInstance,
     component_signal_start: usize,
     signal_node_idx: &mut Vec<usize>,
     io_map: &TemplateInstanceIOMap,
@@ -1745,7 +1756,7 @@ fn calc_expression(
         }
         Instruction::Load(ref load_bucket) => {
             let r = load_n(
-                load_bucket, nodes, cmp_ctx, component_signal_start,
+                load_bucket, nodes, cmp, component_signal_start,
                 signal_node_idx, 1, io_map, print_debug, call_stack);
             assert_eq!(r.len(), 1);
             r[0].clone()
@@ -1754,7 +1765,7 @@ fn calc_expression(
             // try duo operation
             if let Ok(op) = Operation::try_from(compute_bucket.op) {
                 build_binary_op_var(
-                    cmp_ctx, op, &compute_bucket.stack, nodes,
+                    cmp, op, &compute_bucket.stack, nodes,
                     component_signal_start, signal_node_idx, io_map,
                     print_debug, call_stack)
             }
@@ -1762,7 +1773,7 @@ fn calc_expression(
             // try uno operation
             else if let Ok(op) = UnoOperation::try_from(compute_bucket.op) {
                 build_unary_op_var(
-                    cmp_ctx, op, &compute_bucket.stack, nodes,
+                    cmp, op, &compute_bucket.stack, nodes,
                     component_signal_start, signal_node_idx, io_map,
                     print_debug, call_stack)
             }
@@ -1786,7 +1797,7 @@ fn calc_expression(
 fn calc_expression_n(
     inst: &InstructionPointer,
     nodes: &mut Nodes,
-    cmp_ctx: &mut ComponentContext,
+    cmp: &mut ComponentInstance,
     component_signal_start: usize,
     signal_node_idx: &mut Vec<usize>,
     size: usize,
@@ -1796,14 +1807,14 @@ fn calc_expression_n(
 ) -> Vec<Var> {
     if size == 1 {
         return vec![calc_expression(
-            inst, nodes, cmp_ctx, component_signal_start, signal_node_idx,
+            inst, nodes, cmp, component_signal_start, signal_node_idx,
             io_map, print_debug, call_stack)];
     }
 
     match **inst {
         Instruction::Load(ref load_bucket) => {
             load_n(
-                load_bucket, nodes, cmp_ctx, component_signal_start,
+                load_bucket, nodes, cmp, component_signal_start,
                 signal_node_idx, size, io_map, print_debug, call_stack)
         },
         _ => {
@@ -1816,7 +1827,7 @@ fn calc_expression_n(
 }
 
 fn check_continue_condition(
-    cmp_ctx: &mut ComponentContext,
+    cmp: &mut ComponentInstance,
     inst: &InstructionPointer,
     nodes: &mut Nodes,
     component_signal_start: usize,
@@ -1826,8 +1837,8 @@ fn check_continue_condition(
     call_stack: &Vec<String>,
 ) -> bool {
     let val = calc_expression(
-            inst, nodes, cmp_ctx, component_signal_start, signal_node_idx,
-            io_map, print_debug, call_stack)
+        inst, nodes, cmp, component_signal_start, signal_node_idx,
+        io_map, print_debug, call_stack)
         .to_const(nodes)
         .unwrap_or_else(
             |e| panic!(
@@ -1905,7 +1916,7 @@ fn init_input_signals(
 
 fn run_template(
     ctx: &mut BuildCircuitContext, print_debug: bool, call_stack: &Vec<String>,
-    cmp: &ComponentInstance) {
+    cmp: &mut ComponentInstance) {
 
     let tmpl = &ctx.templates[cmp.template_id];
 
@@ -1919,15 +1930,8 @@ fn run_template(
             tmpl.body.len());
     }
 
-    let mut cmp_ctx = ComponentContext {
-        vars: vec![None; tmpl.var_stack_depth],
-        subcomponents: Vec::new(),
-    };
-    cmp_ctx.subcomponents.resize_with(tmpl.number_of_components, || None);
-
     for inst in &tmpl.body {
-        process_instruction(
-            ctx, &mut cmp_ctx, &inst, print_debug, &call_stack, cmp);
+        process_instruction(ctx, &inst, print_debug, &call_stack, cmp);
     }
 
     if print_debug {
@@ -2106,14 +2110,6 @@ fn main() {
         }
     }
 
-    let main_component_signal_start = 1usize;
-    let main_component = ComponentInstance {
-        template_id: main_template_id,
-        signal_offset: main_component_signal_start,
-        number_of_inputs: circuit.templates[main_template_id].number_of_inputs,
-        component_offset: 0,
-    };
-
     let mut ctx = BuildCircuitContext {
         nodes: &mut nodes,
         signal_node_idx: &mut signal_node_idx,
@@ -2122,7 +2118,11 @@ fn main() {
         io_map: circuit.c_producer.get_io_map(),
     };
 
-    run_template(&mut ctx, args.print_debug, &vec![], &main_component);
+    let main_component_signal_start = 1usize;
+    let mut main_component = ctx.new_component(
+        main_template_id, main_component_signal_start, 0);
+
+    run_template(&mut ctx, args.print_debug, &vec![], &mut main_component);
 
     for (idx, i) in signal_node_idx.iter().enumerate() {
         if *i == usize::MAX {
@@ -2212,10 +2212,10 @@ fn evaluate_unoptimized(nodes: &Nodes, inputs: &[U256], signal_node_idx: &Vec<us
 }
 
 fn store_subcomponent_signals(
-    ctx: &mut BuildCircuitContext, cmp_ctx: &mut ComponentContext,
-    cmp_address: &InstructionPointer, input_information: &InputInformation,
-    src_node_idxs: &[usize], dest: &LocationRule, size: usize,
-    print_debug: bool, call_stack: &Vec<String>, cmp: &ComponentInstance) {
+    ctx: &mut BuildCircuitContext, cmp_address: &InstructionPointer,
+    input_information: &InputInformation, src_node_idxs: &[usize],
+    dest: &LocationRule, size: usize, print_debug: bool,
+    call_stack: &Vec<String>, cmp: &mut ComponentInstance) {
 
     let input_status: &StatusInput;
     if let InputInformation::Input { ref status } = input_information {
@@ -2226,7 +2226,7 @@ fn store_subcomponent_signals(
 
     let subcomponent_idx =
         calc_expression(
-            cmp_address, ctx.nodes, cmp_ctx, cmp.signal_offset,
+            cmp_address, ctx.nodes, cmp, cmp.signal_offset,
             ctx.signal_node_idx, ctx.io_map, print_debug, call_stack)
         .must_const_usize(ctx.nodes, call_stack);
 
@@ -2237,7 +2237,7 @@ fn store_subcomponent_signals(
         } => {
             let signal_idx =
                 calc_expression(
-                    location, ctx.nodes, cmp_ctx, cmp.signal_offset,
+                    location, ctx.nodes, cmp, cmp.signal_offset,
                     ctx.signal_node_idx, ctx.io_map, print_debug,
                     call_stack)
                 .must_const_usize(ctx.nodes, call_stack);
@@ -2245,13 +2245,13 @@ fn store_subcomponent_signals(
         }
         LocationRule::Mapped { ref signal_code, ref indexes } => {
             calc_mapped_signal_idx(
-                cmp_ctx, subcomponent_idx, ctx.io_map, *signal_code, indexes,
+                cmp, subcomponent_idx, ctx.io_map, *signal_code, indexes,
                 ctx.nodes, cmp.signal_offset, ctx.signal_node_idx, print_debug,
                 call_stack)
         }
     };
 
-    let sub_cmp = cmp_ctx.subcomponents[subcomponent_idx]
+    let sub_cmp = cmp.subcomponents[subcomponent_idx]
         .as_mut().unwrap();
     let signal_offset = sub_cmp.signal_offset;
 
