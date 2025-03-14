@@ -1,7 +1,7 @@
 use std::{collections::HashMap, ops::{BitAnd, Shl, Shr}, thread};
 use std::cmp::Ordering;
 use std::error::Error;
-use std::ops::{BitOr, BitXor, Deref};
+use std::ops::{BitOr, BitXor, Deref, Not};
 use std::sync::{mpsc, Arc};
 use std::time::Instant;
 use crate::field::M;
@@ -221,7 +221,12 @@ impl UnoOperation {
             UnoOperation::Neg => if a == U256::ZERO { U256::ZERO } else { M - a },
             UnoOperation::Id => a,
             UnoOperation::Lnot => todo!(),
-            UnoOperation::Bnot => todo!(),
+            UnoOperation::Bnot => {
+                let a = a.not();
+                let mask = U256::ZERO.not().shr(M.leading_zeros());
+                let a = a & mask;
+                if a >= M { a - M } else { a }
+            },
         }
     }
 
@@ -908,7 +913,7 @@ pub fn u256_to_fr(x: &U256) -> Fr {
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Div;
+    use std::ops::{Div};
     use super::*;
     use ruint::{uint};
     use std::str::FromStr;
@@ -1050,5 +1055,42 @@ mod tests {
         let cf = Operation::Pow.eval_fr(af, bf);
         let wantf = u256_to_fr(&want);
         assert_eq!(cf, wantf);
+    }
+
+    #[test]
+    fn test_bnot() {
+        assert_eq!(
+            uint!(7059779437489773633646340506914701874769131765994106666166191815402473914366_U256),
+            UnoOperation::Bnot.eval(uint!(0_U256)));
+        assert_eq!(
+            uint!(7059779437489773633646340506914701874769131765994106666166191815400326430719_U256),
+            UnoOperation::Bnot.eval(uint!(2147483647_U256)));
+        assert_eq!(
+            uint!(7059779437489773633646340506914701874769131765994106666166191815402473914367_U256),
+            UnoOperation::Bnot.eval(uint!(21888242871839275222246405745257275088548364400416034343698204186575808495616_U256)));
+        assert_eq!(
+            uint!(7059779437489773633646340506914701874769131765994106666166191815401042258601_U256),
+            UnoOperation::Bnot.eval(uint!(1431655765_U256)));
+        assert_eq!(
+            uint!(7059779437489773633646340506914701874769131765994106666166191815404191901285_U256),
+            UnoOperation::Bnot.eval(uint!(21888242871839275222246405745257275088548364400416034343698204186574090508698_U256)));
+        assert_eq!(
+            uint!(0_U256),
+            UnoOperation::Bnot.eval(uint!(115792089237316195423570985008687907853269984665640564039457584007913129639935_U256)));
+        assert_eq!(
+            uint!(19298681539552699237261830834781317975544997444273427339909597334652188273322_U256),
+            UnoOperation::Bnot.eval(uint!(38597363079105398474523661669562635951089994888546854679819194669304376546645_U256)));
+        assert_eq!(
+            uint!(17368813385597429313535647751303186177990497699846084605918637601186969445990_U256),
+            UnoOperation::Bnot.eval(uint!(69475253542389717254142591005212744711961990799384338423674550404747877783961_U256)));
+        assert_eq!(
+            uint!(16975279050329094783283862284904804026119806273934822715754654203603313563979_U256),
+            UnoOperation::Bnot.eval(uint!(11972743258999954072608883967267172937197689892475318294109741798374968846004_U256)));
+        assert_eq!(
+            uint!(10364945975102880683525514432911402591886023268641012016029012611469420464237_U256),
+            UnoOperation::Bnot.eval(uint!(18583076334226168172367231819260574371431472897769128993835383390508861945746_U256)));
+        assert_eq!(
+            uint!(4253782056457656234530291275605853130160190710592122558439987573692654305887_U256),
+            UnoOperation::Bnot.eval(uint!(2805997381032117399116049231308848744608941055401984107726204241709819608479_U256)));
     }
 }
