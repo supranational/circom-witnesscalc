@@ -220,7 +220,11 @@ impl UnoOperation {
         match self {
             UnoOperation::Neg => if a == U256::ZERO { U256::ZERO } else { M - a },
             UnoOperation::Id => a,
-            UnoOperation::Lnot => todo!(),
+            UnoOperation::Lnot => if a == U256::ZERO {
+                uint!(1_U256)
+            } else {
+                U256::ZERO
+            },
             UnoOperation::Bnot => {
                 let a = a.not();
                 let mask = U256::ZERO.not().shr(M.leading_zeros());
@@ -1092,5 +1096,21 @@ mod tests {
         assert_eq!(
             uint!(4253782056457656234530291275605853130160190710592122558439987573692654305887_U256),
             UnoOperation::Bnot.eval(uint!(2805997381032117399116049231308848744608941055401984107726204241709819608479_U256)));
+    }
+
+    #[test]
+    fn test_lnot() {
+        assert_eq!(
+            uint!(0_U256),
+            UnoOperation::Lnot.eval(uint!(1_U256)));
+        assert_eq!(
+            uint!(1_U256),
+            UnoOperation::Lnot.eval(uint!(0_U256)));
+        assert_eq!(
+            uint!(0_U256),
+            UnoOperation::Lnot.eval(uint!(10944121435919637611123202872628637544274182200208017171849102093287904247808_U256)));
+        assert_eq!(
+            uint!(0_U256),
+            UnoOperation::Lnot.eval(uint!(115792089237316195423570985008687907853269984665640564039457584007913129639935_U256)));
     }
 }
