@@ -60,7 +60,7 @@ fn u32_or_expression(
                     Ok(U32OrExpression::U32(v))
                 },
                 ValueType::BigInt => {
-                    return Ok(U32OrExpression::BigInt(constants[value.value]));
+                    Ok(U32OrExpression::BigInt(constants[value.value]))
                 },
             }
         }
@@ -195,27 +195,24 @@ fn parse_args() -> Args {
             if i >= args.len() {
                 usage("missing argument for -wtns");
             }
-            if let None = witness_file {
-                witness_file = Some(args[i].clone());
-            } else {
+            if witness_file.is_some() {
                 usage("multiple witness files");
             }
+            witness_file = Some(args[i].clone());
         } else if args[i] == "-i" {
             i += 1;
             if i >= args.len() {
                 usage("missing argument for -i");
             }
-            if let None = inputs_file {
-                inputs_file = Some(args[i].clone());
-            } else {
+            if inputs_file.is_some() {
                 usage("multiple inputs files");
             }
+            inputs_file = Some(args[i].clone());
         } else if args[i].starts_with("-i") {
-            if let None = inputs_file {
-                inputs_file = Some(args[i][2..].to_string());
-            } else {
+            if inputs_file.is_some() {
                 usage("multiple inputs files");
             }
+            inputs_file = Some(args[i][2..].to_string());
         } else if args[i] == "-v" {
             print_debug = true;
         } else if args[i] == "-expected-signals" {
@@ -227,9 +224,9 @@ fn parse_args() -> Args {
         } else if args[i].starts_with("-") {
             let message = format!("unknown argument: {}", args[i]);
             usage(&message);
-        } else if let None = circuit_file {
+        } else if circuit_file.is_none() {
             circuit_file = Some(args[i].clone());
-        } else if let None = vm_out_file {
+        } else if vm_out_file.is_none() {
             vm_out_file = Some(args[i].clone());
         } else {
             usage(format!("unexpected argument: {}", args[i]).as_str());
@@ -1893,12 +1890,12 @@ fn compile(
 
 fn bigint_to_u64(i: U256) -> Option<u64> {
     let ls = i.as_limbs();
-    for i in 1..ls.len() {
-        if ls[i] != 0 {
+    for limb in ls.iter().skip(1) {
+        if *limb != 0 {
             return None;
         }
     }
-    return Some(ls[0]);
+    Some(ls[0])
 }
 
 fn disassemble(
