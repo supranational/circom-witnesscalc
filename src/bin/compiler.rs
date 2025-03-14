@@ -60,7 +60,7 @@ fn u32_or_expression(
                     Ok(U32OrExpression::U32(v))
                 },
                 ValueType::BigInt => {
-                    return Ok(U32OrExpression::BigInt(constants[value.value]));
+                    Ok(U32OrExpression::BigInt(constants[value.value]))
                 },
             }
         }
@@ -195,27 +195,24 @@ fn parse_args() -> Args {
             if i >= args.len() {
                 usage("missing argument for -wtns");
             }
-            if let None = witness_file {
-                witness_file = Some(args[i].clone());
-            } else {
+            if witness_file.is_some() {
                 usage("multiple witness files");
             }
+            witness_file = Some(args[i].clone());
         } else if args[i] == "-i" {
             i += 1;
             if i >= args.len() {
                 usage("missing argument for -i");
             }
-            if let None = inputs_file {
-                inputs_file = Some(args[i].clone());
-            } else {
+            if inputs_file.is_some() {
                 usage("multiple inputs files");
             }
+            inputs_file = Some(args[i].clone());
         } else if args[i].starts_with("-i") {
-            if let None = inputs_file {
-                inputs_file = Some(args[i][2..].to_string());
-            } else {
+            if inputs_file.is_some() {
                 usage("multiple inputs files");
             }
+            inputs_file = Some(args[i][2..].to_string());
         } else if args[i] == "-v" {
             print_debug = true;
         } else if args[i] == "-expected-signals" {
@@ -227,9 +224,9 @@ fn parse_args() -> Args {
         } else if args[i].starts_with("-") {
             let message = format!("unknown argument: {}", args[i]);
             usage(&message);
-        } else if let None = circuit_file {
+        } else if circuit_file.is_none() {
             circuit_file = Some(args[i].clone());
-        } else if let None = vm_out_file {
+        } else if vm_out_file.is_none() {
             vm_out_file = Some(args[i].clone());
         } else {
             usage(format!("unexpected argument: {}", args[i]).as_str());
@@ -495,33 +492,32 @@ fn patch_jump(code: &mut [u8], jump_offset_addr: usize, to: usize) {
 }
 
 fn store_subsignal(
-    code: &mut Vec<u8>, dest: &LocationRule, constants: &[U256],
-    components: &mut Vec<ComponentTmpl>, line_numbers: &mut Vec<usize>,
-    line_no: usize, cmp_address: &InstructionPointer,
-    input_information: &InputInformation, signals_num: u32) {
+    ctx: &mut TmplCompilationCtx, dest: &LocationRule, line_no: usize,
+    cmp_address: &InstructionPointer, input_information: &InputInformation,
+    signals_num: u32) {
 
     let mut indexes_number = 0u32;
     let mut signal_code = 0u32;
     let is_signal_idx_mapped = match dest {
         LocationRule::Indexed { ref location, .. } => {
             let sig_idx =
-                u32_or_expression(location, constants).unwrap();
+                u32_or_expression(location, ctx.constants).unwrap();
 
             match sig_idx {
                 U32OrExpression::U32(sig_idx) => {
-                    code.push(OpCode::Push4 as u8);
-                    line_numbers.push(line_no);
+                    ctx.code.push(OpCode::Push4 as u8);
+                    ctx.line_numbers.push(line_no);
 
-                    code.extend_from_slice(sig_idx.to_le_bytes().as_ref());
-                    for _ in 0..4 { line_numbers.push(usize::MAX); }
+                    ctx.code.extend_from_slice(sig_idx.to_le_bytes().as_ref());
+                    for _ in 0..4 { ctx.line_numbers.push(usize::MAX); }
                 }
                 U32OrExpression::BigInt(_) => {
                     panic!("Signal index is not u32");
                 }
                 U32OrExpression::Expression => {
                     expression_u32(
-                        location, code, constants, line_numbers,
-                        components);
+                        location, &mut ctx.code, ctx.constants,
+                        &mut ctx.line_numbers, &ctx.components);
                 }
             };
 
@@ -530,8 +526,8 @@ fn store_subsignal(
         LocationRule::Mapped { signal_code: ref signal_code_local, ref indexes } => {
             for idx_inst in indexes {
                 expression_u32(
-                    idx_inst, code, constants, line_numbers,
-                    components)
+                    idx_inst, &mut ctx.code, ctx.constants,
+                    &mut ctx.line_numbers, &ctx.components)
             }
 
             indexes_number = indexes.len()
@@ -543,24 +539,24 @@ fn store_subsignal(
         }
     };
     let cmp_idx =
-        u32_or_expression(cmp_address, constants);
+        u32_or_expression(cmp_address, ctx.constants);
     match cmp_idx {
         Ok(ref cmp_idx) => {
             match cmp_idx {
                 U32OrExpression::U32(cmp_idx) => {
-                    code.push(OpCode::Push4 as u8);
-                    line_numbers.push(line_no);
+                    ctx.code.push(OpCode::Push4 as u8);
+                    ctx.line_numbers.push(line_no);
 
-                    code.extend_from_slice(cmp_idx.to_le_bytes().as_ref());
-                    for _ in 0..4 { line_numbers.push(usize::MAX); }
+                    ctx.code.extend_from_slice(cmp_idx.to_le_bytes().as_ref());
+                    for _ in 0..4 { ctx.line_numbers.push(usize::MAX); }
                 },
                 U32OrExpression::BigInt(_) => {
                     panic!("Component index is not u32");
                 },
                 U32OrExpression::Expression => {
                     expression_u32(
-                        cmp_address, code, constants,
-                        line_numbers, components);
+                        cmp_address, &mut ctx.code, ctx.constants,
+                        &mut ctx.line_numbers, &ctx.components);
                 }
             }
         }
@@ -570,33 +566,32 @@ fn store_subsignal(
     };
 
 
-    code.push(OpCode::SetSubSignal as u8);
-    line_numbers.push(line_no);
+    ctx.code.push(OpCode::SetSubSignal as u8);
+    ctx.line_numbers.push(line_no);
 
-    code.extend_from_slice(signals_num.to_le_bytes().as_ref());
-    for _ in 0..4 { line_numbers.push(usize::MAX); }
+    ctx.code.extend_from_slice(signals_num.to_le_bytes().as_ref());
+    for _ in 0..4 { ctx.line_numbers.push(usize::MAX); }
 
     let input_status: InputStatus = if let InputInformation::Input{ status } = input_information {
         status.into()
     } else {
         panic!("Can't store signal to non-input subcomponent");
     };
-    code.push(mk_flags(input_status, is_signal_idx_mapped));
-    line_numbers.push(usize::MAX);
+    ctx.code.push(mk_flags(input_status, is_signal_idx_mapped));
+    ctx.line_numbers.push(usize::MAX);
 
     if is_signal_idx_mapped {
-        code.extend_from_slice(indexes_number.to_le_bytes().as_ref());
-        for _ in 0..4 { line_numbers.push(usize::MAX); }
+        ctx.code.extend_from_slice(indexes_number.to_le_bytes().as_ref());
+        for _ in 0..4 { ctx.line_numbers.push(usize::MAX); }
 
-        code.extend_from_slice(signal_code.to_le_bytes().as_ref());
-        for _ in 0..4 { line_numbers.push(usize::MAX); }
+        ctx.code.extend_from_slice(signal_code.to_le_bytes().as_ref());
+        for _ in 0..4 { ctx.line_numbers.push(usize::MAX); }
     }
 }
 
-// After statement execution, there should not be side-effect on the stack
+// After statement execution, there should not be side effect on the stack
 fn statement(
-    inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[U256],
-    line_numbers: &mut Vec<usize>, components: &mut Vec<ComponentTmpl>,
+    ctx: &mut TmplCompilationCtx, inst: &InstructionPointer,
     fn_registry: &mut FnRegistry) {
 
     // println!("statement: {}", inst.to_string());
@@ -605,8 +600,9 @@ fn statement(
         Instruction::Store(ref store_bucket) => {
 
             expression(
-                &store_bucket.src, code, constants, line_numbers, components);
-            assert_eq!(line_numbers.len(), code.len());
+                &store_bucket.src, &mut ctx.code, ctx.constants,
+                &mut ctx.line_numbers, &ctx.components);
+            assert_eq!(ctx.line_numbers.len(), ctx.code.len());
 
             match store_bucket.dest_address_type {
                 AddressType::Variable => {
@@ -617,31 +613,31 @@ fn statement(
                     };
 
                     let var_idx =
-                        u32_or_expression(location, constants).unwrap();
+                        u32_or_expression(location, ctx.constants).unwrap();
 
                     match var_idx {
                         U32OrExpression::U32(var_idx) => {
-                            code.push(OpCode::SetVariable4 as u8);
-                            line_numbers.push(store_bucket.line);
-                            code.extend_from_slice(var_idx.to_le_bytes().as_ref());
-                            for _ in 0..4 { line_numbers.push(usize::MAX); }
+                            ctx.code.push(OpCode::SetVariable4 as u8);
+                            ctx.line_numbers.push(store_bucket.line);
+                            ctx.code.extend_from_slice(var_idx.to_le_bytes().as_ref());
+                            for _ in 0..4 { ctx.line_numbers.push(usize::MAX); }
                         }
                         U32OrExpression::BigInt(_) => {
                             panic!("Variable index is not u32");
                         }
                         U32OrExpression::Expression => {
                             expression_u32(
-                                location, code, constants, line_numbers,
-                                components);
-                            code.push(OpCode::SetVariable as u8);
-                            line_numbers.push(store_bucket.line);
+                                location, &mut ctx.code, ctx.constants,
+                                &mut ctx.line_numbers, &ctx.components);
+                            ctx.code.push(OpCode::SetVariable as u8);
+                            ctx.line_numbers.push(store_bucket.line);
                         }
                     }
 
                     let signals_num: u32 = store_bucket.context.size
                         .try_into().expect("Too many signals");
-                    code.extend_from_slice(signals_num.to_le_bytes().as_ref());
-                    for _ in 0..4 { line_numbers.push(usize::MAX); }
+                    ctx.code.extend_from_slice(signals_num.to_le_bytes().as_ref());
+                    for _ in 0..4 { ctx.line_numbers.push(usize::MAX); }
                 }
 
                 AddressType::Signal => {
@@ -652,31 +648,31 @@ fn statement(
                     };
 
                     let sig_idx =
-                        u32_or_expression(location, constants).unwrap();
+                        u32_or_expression(location, ctx.constants).unwrap();
 
                     match sig_idx {
                         U32OrExpression::U32(sig_idx) => {
-                            code.push(OpCode::SetSelfSignal4 as u8);
-                            line_numbers.push(store_bucket.line);
-                            code.extend_from_slice(sig_idx.to_le_bytes().as_ref());
-                            for _ in 0..4 { line_numbers.push(usize::MAX); }
+                            ctx.code.push(OpCode::SetSelfSignal4 as u8);
+                            ctx.line_numbers.push(store_bucket.line);
+                            ctx.code.extend_from_slice(sig_idx.to_le_bytes().as_ref());
+                            for _ in 0..4 { ctx.line_numbers.push(usize::MAX); }
                         }
                         U32OrExpression::BigInt(_) => {
                             panic!("Signal index is not u32");
                         }
                         U32OrExpression::Expression => {
                             expression_u32(
-                                location, code, constants, line_numbers,
-                                components);
-                            code.push(OpCode::SetSelfSignal as u8);
-                            line_numbers.push(store_bucket.line);
+                                location, &mut ctx.code, ctx.constants,
+                                &mut ctx.line_numbers, &ctx.components);
+                            ctx.code.push(OpCode::SetSelfSignal as u8);
+                            ctx.line_numbers.push(store_bucket.line);
                         }
                     }
 
                     let signals_num: u32 = store_bucket.context.size
                         .try_into().expect("Too many signals");
-                    code.extend_from_slice(signals_num.to_le_bytes().as_ref());
-                    for _ in 0..4 { line_numbers.push(usize::MAX); }
+                    ctx.code.extend_from_slice(signals_num.to_le_bytes().as_ref());
+                    for _ in 0..4 { ctx.line_numbers.push(usize::MAX); }
                 }
 
                 AddressType::SubcmpSignal { ref cmp_address, ref input_information, .. } => {
@@ -684,46 +680,44 @@ fn statement(
                         .try_into().expect("Too many signals");
 
                     store_subsignal(
-                        code, &store_bucket.dest, constants, components,
-                        line_numbers, store_bucket.get_line(), cmp_address,
-                        input_information, signals_num);
+                        ctx, &store_bucket.dest, store_bucket.get_line(),
+                        cmp_address, input_information, signals_num);
                 }
             }
-            assert_eq!(line_numbers.len(), code.len());
+            assert_eq!(ctx.line_numbers.len(), ctx.code.len());
         }
         Instruction::Loop(ref loop_bucket) => {
-            let loop_start = code.len();
+            let loop_start = ctx.code.len();
 
             expression(
-                &loop_bucket.continue_condition, code, constants, line_numbers,
-                components);
+                &loop_bucket.continue_condition, &mut ctx.code, ctx.constants,
+                &mut ctx.line_numbers, &ctx.components);
 
-            let loop_end_jump_offset = pre_emit_jump_if_false(code);
-            line_numbers.push(loop_bucket.line);
-            line_numbers.push(usize::MAX);
-            line_numbers.push(usize::MAX);
-            line_numbers.push(usize::MAX);
-            line_numbers.push(usize::MAX);
+            let loop_end_jump_offset =
+                pre_emit_jump_if_false(&mut ctx.code);
+            ctx.line_numbers.push(loop_bucket.line);
+            ctx.line_numbers.push(usize::MAX);
+            ctx.line_numbers.push(usize::MAX);
+            ctx.line_numbers.push(usize::MAX);
+            ctx.line_numbers.push(usize::MAX);
 
-            block(
-                &loop_bucket.body, code, constants, line_numbers, components,
-                fn_registry);
+            block(ctx, &loop_bucket.body, fn_registry);
 
-            emit_jump(code, loop_start);
-            line_numbers.push(loop_bucket.line);
-            line_numbers.push(usize::MAX);
-            line_numbers.push(usize::MAX);
-            line_numbers.push(usize::MAX);
-            line_numbers.push(usize::MAX);
+            emit_jump(&mut ctx.code, loop_start);
+            ctx.line_numbers.push(loop_bucket.line);
+            ctx.line_numbers.push(usize::MAX);
+            ctx.line_numbers.push(usize::MAX);
+            ctx.line_numbers.push(usize::MAX);
+            ctx.line_numbers.push(usize::MAX);
 
-            let to = code.len();
+            let to = ctx.code.len();
 
-            patch_jump(code, loop_end_jump_offset, to);
-            assert_eq!(line_numbers.len(), code.len());
+            patch_jump(&mut ctx.code, loop_end_jump_offset, to);
+            assert_eq!(ctx.line_numbers.len(), ctx.code.len());
         }
         Instruction::CreateCmp(ref cmp_bucket) => {
             let sub_cmp_idx = u32_or_expression(
-                &cmp_bucket.sub_cmp_id, constants).unwrap();
+                &cmp_bucket.sub_cmp_id, ctx.constants).unwrap();
 
             let sub_cmp_idx = if let U32OrExpression::U32(sub_cmp_idx) = sub_cmp_idx {
                 sub_cmp_idx
@@ -754,7 +748,7 @@ fn statement(
             //     todo!();
             // }
 
-            components.push(ComponentTmpl {
+            ctx.components.push(ComponentTmpl {
                 symbol: cmp_bucket.symbol.clone(),
                 sub_cmp_idx: sub_cmp_idx as usize,
                 number_of_cmp: cmp_bucket.number_of_cmp,
@@ -774,15 +768,15 @@ fn statement(
                     .try_into().expect("Too many components");
 
                 for i in 0..components_number {
-                    code.push(OpCode::CmpCall as u8);
-                    line_numbers.push(cmp_bucket.line);
+                    ctx.code.push(OpCode::CmpCall as u8);
+                    ctx.line_numbers.push(cmp_bucket.line);
 
                     let (sub_cmp_idx2, overflowed) = sub_cmp_idx.overflowing_add(i);
                     if overflowed {
                         panic!("Subcomponent index is too large");
                     }
-                    code.extend_from_slice(sub_cmp_idx2.to_le_bytes().as_ref());
-                    for _ in 0..4 { line_numbers.push(usize::MAX); }
+                    ctx.code.extend_from_slice(sub_cmp_idx2.to_le_bytes().as_ref());
+                    for _ in 0..4 { ctx.line_numbers.push(usize::MAX); }
                 }
             }
         }
@@ -792,28 +786,30 @@ fn statement(
 
             let args_num: usize = call_bucket.arguments.iter().map(
                 |arg| {
-                    expression(arg, code, constants, line_numbers, components)
+                    expression(
+                        arg, &mut ctx.code, ctx.constants,
+                        &mut ctx.line_numbers, &ctx.components)
                 }).sum();
 
             let fn_idx = fn_registry.get(&call_bucket.symbol);
             let fn_idx: u32 = fn_idx.try_into().expect("Such a lot of functions?");
-            code.push(OpCode::FnCall as u8);
-            line_numbers.push(call_bucket.line);
+            ctx.code.push(OpCode::FnCall as u8);
+            ctx.line_numbers.push(call_bucket.line);
 
-            code.extend_from_slice(fn_idx.to_le_bytes().as_ref());
-            for _ in 0..4 { line_numbers.push(usize::MAX); }
+            ctx.code.extend_from_slice(fn_idx.to_le_bytes().as_ref());
+            for _ in 0..4 { ctx.line_numbers.push(usize::MAX); }
 
             let args_num: u32 = args_num.try_into().expect("Too many arguments");
-            code.extend_from_slice(args_num.to_le_bytes().as_ref());
-            for _ in 0..4 { line_numbers.push(usize::MAX); }
+            ctx.code.extend_from_slice(args_num.to_le_bytes().as_ref());
+            for _ in 0..4 { ctx.line_numbers.push(usize::MAX); }
 
             match call_bucket.return_info {
                 ReturnType::Intermediate { .. } => todo!(),
                 ReturnType::Final(ref final_data) => {
                     let return_num: u32 = final_data.context.size.try_into()
                         .expect("Too many return values");
-                    code.extend_from_slice(return_num.to_le_bytes().as_ref());
-                    for _ in 0..4 { line_numbers.push(usize::MAX); }
+                    ctx.code.extend_from_slice(return_num.to_le_bytes().as_ref());
+                    for _ in 0..4 { ctx.line_numbers.push(usize::MAX); }
 
                     match final_data.dest_address_type {
                         AddressType::Variable => {
@@ -823,21 +819,20 @@ fn statement(
                                 panic!("Variable destination should be of Indexed type");
                             };
                             expression_u32(
-                                location, code, constants, line_numbers,
-                                components);
+                                location, &mut ctx.code, ctx.constants,
+                                &mut ctx.line_numbers, &ctx.components);
 
-                            code.push(OpCode::SetVariable as u8);
-                            line_numbers.push(location.get_line());
+                            ctx.code.push(OpCode::SetVariable as u8);
+                            ctx.line_numbers.push(location.get_line());
 
-                            code.extend_from_slice(return_num.to_le_bytes().as_ref());
-                            for _ in 0..4 { line_numbers.push(usize::MAX); }
+                            ctx.code.extend_from_slice(return_num.to_le_bytes().as_ref());
+                            for _ in 0..4 { ctx.line_numbers.push(usize::MAX); }
                         }
                         AddressType::Signal => {todo!()}
                         AddressType::SubcmpSignal { ref cmp_address, ref input_information, .. } => {
                             store_subsignal(
-                                code, &final_data.dest, constants, components,
-                                line_numbers, call_bucket.get_line(), cmp_address,
-                                input_information, return_num);
+                                ctx, &final_data.dest, call_bucket.get_line(),
+                                cmp_address, input_information, return_num);
                         }
                     }
                 }
@@ -855,31 +850,28 @@ fn statement(
         }
         Instruction::Branch(ref branch_bucket) => {
             expression(
-                &branch_bucket.cond, code, constants, line_numbers, components);
+                &branch_bucket.cond, &mut ctx.code, ctx.constants,
+                &mut ctx.line_numbers, &ctx.components);
 
-            let else_jump_offset = pre_emit_jump_if_false(code);
-            line_numbers.push(branch_bucket.line);
-            for _ in 0..4 { line_numbers.push(usize::MAX); }
+            let else_jump_offset = pre_emit_jump_if_false(&mut ctx.code);
+            ctx.line_numbers.push(branch_bucket.line);
+            for _ in 0..4 { ctx.line_numbers.push(usize::MAX); }
 
-            block(
-                &branch_bucket.if_branch, code, constants, line_numbers,
-                components, fn_registry);
+            block(ctx, &branch_bucket.if_branch, fn_registry);
 
-            let end_jump_offset = pre_emit_jump(code);
-            line_numbers.push(branch_bucket.line);
-            for _ in 0..4 { line_numbers.push(usize::MAX); }
+            let end_jump_offset = pre_emit_jump(&mut ctx.code);
+            ctx.line_numbers.push(branch_bucket.line);
+            for _ in 0..4 { ctx.line_numbers.push(usize::MAX); }
 
-            let to = code.len();
-            patch_jump(code, else_jump_offset, to);
+            let to = ctx.code.len();
+            patch_jump(&mut ctx.code, else_jump_offset, to);
 
-            block(
-                &branch_bucket.else_branch, code, constants, line_numbers,
-                components, fn_registry);
+            block(ctx, &branch_bucket.else_branch, fn_registry);
 
-            let to = code.len();
-            patch_jump(code, end_jump_offset, to);
+            let to = ctx.code.len();
+            patch_jump(&mut ctx.code, end_jump_offset, to);
 
-            assert_eq!(line_numbers.len(), code.len());
+            assert_eq!(ctx.line_numbers.len(), ctx.code.len());
         }
         Instruction::Return(_) => {
             todo!();
@@ -1117,8 +1109,7 @@ fn assert_64() {
 
 fn expression_load(
     lb: &LoadBucket, code: &mut Vec<u8>, constants: &[U256],
-    line_numbers: &mut Vec<usize>,
-    components: &mut Vec<ComponentTmpl>) -> usize {
+    line_numbers: &mut Vec<usize>, components: &[ComponentTmpl]) -> usize {
 
     match lb.address_type {
         AddressType::Signal => {
@@ -1333,7 +1324,7 @@ fn fn_expression_load(
 fn expression_compute(
     cb: &ComputeBucket, code: &mut Vec<u8>, constants: &[U256],
     line_numbers: &mut Vec<usize>,
-    components: &mut Vec<ComponentTmpl>) -> usize {
+    components: &[ComponentTmpl]) -> usize {
 
     // two operand operations
     let mut op2 = |oc: OpCode| {
@@ -1524,7 +1515,7 @@ fn fn_expression_compute(
 
 fn expression_compute_u32(
     cb: &ComputeBucket, code: &mut Vec<u8>, constants: &[U256],
-    line_numbers: &mut Vec<usize>, components: &mut Vec<ComponentTmpl>) {
+    line_numbers: &mut Vec<usize>, components: &[ComponentTmpl]) {
 
     match cb.op {
         OperatorType::ToAddress => {
@@ -1596,7 +1587,7 @@ fn fn_expression_compute_u32(
 fn expression(
     inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[U256],
     line_numbers: &mut Vec<usize>,
-    components: &mut Vec<ComponentTmpl>) -> usize {
+    components: &[ComponentTmpl]) -> usize {
 
     // println!("expression: {}", inst.to_string());
     match **inst {
@@ -1684,7 +1675,7 @@ fn fn_expression(
 // After expression execution_u32, the value of the expression should be on the stack_u32
 fn expression_u32(
     inst: &InstructionPointer, code: &mut Vec<u8>, constants: &[U256],
-    line_numbers: &mut Vec<usize>, components: &mut Vec<ComponentTmpl>) {
+    line_numbers: &mut Vec<usize>, components: &[ComponentTmpl]) {
 
     // println!("expression: {}", inst.to_string());
     match **inst {
@@ -1758,13 +1749,12 @@ fn fn_expression_u32(
 }
 
 fn block(
-    inst_list: &InstructionList, code: &mut Vec<u8>, constants: &[U256],
-    line_numbers: &mut Vec<usize>, components: &mut Vec<ComponentTmpl>,
+    ctx: &mut TmplCompilationCtx, inst_list: &InstructionList,
     fn_registry: &mut FnRegistry) {
 
     for inst in inst_list {
-        statement(inst, code, constants, line_numbers, components, fn_registry);
-        assert_eq!(line_numbers.len(), code.len());
+        statement(ctx, inst, fn_registry);
+        assert_eq!(ctx.line_numbers.len(), ctx.code.len());
     }
 }
 
@@ -1778,26 +1768,40 @@ fn fn_block(
     }
 }
 
+struct TmplCompilationCtx<'a> {
+    code: Vec<u8>,
+    line_numbers: Vec<usize>,
+    components: Vec<ComponentTmpl>,
+    constants: &'a [U256],
+}
+
+impl TmplCompilationCtx<'_> {
+    fn new(constants: &[U256]) -> TmplCompilationCtx {
+        TmplCompilationCtx {
+            code: vec![],
+            line_numbers: vec![],
+            components: vec![],
+            constants,
+        }
+    }
+}
+
 fn compile_template(
     tmpl_code: &TemplateCode, constants: &[U256],
     fn_registry: &mut FnRegistry) -> Template {
 
     // println!("Compile template {}", tmpl_code.name);
 
-    let mut code = vec![];
-    let mut line_numbers = vec![];
-    let mut components = Vec::new();
-    block(
-        &tmpl_code.body, &mut code, constants, &mut line_numbers,
-        &mut components, fn_registry);
+    let mut ctx = TmplCompilationCtx::new(constants);
+    block(&mut ctx, &tmpl_code.body, fn_registry);
 
-    assert_eq!(line_numbers.len(), code.len());
+    assert_eq!(ctx.line_numbers.len(), ctx.code.len());
 
     Template {
         name: tmpl_code.name.clone(),
-        code,
-        line_numbers,
-        components,
+        code: ctx.code,
+        line_numbers: ctx.line_numbers,
+        components: ctx.components,
         var_stack_depth: tmpl_code.var_stack_depth,
         number_of_inputs: tmpl_code.number_of_inputs,
     }
@@ -1893,12 +1897,12 @@ fn compile(
 
 fn bigint_to_u64(i: U256) -> Option<u64> {
     let ls = i.as_limbs();
-    for i in 1..ls.len() {
-        if ls[i] != 0 {
+    for limb in ls.iter().skip(1) {
+        if *limb != 0 {
             return None;
         }
     }
-    return Some(ls[0]);
+    Some(ls[0])
 }
 
 fn disassemble(
@@ -2031,7 +2035,6 @@ mod tests {
 	value:0)
 )
          */
-        let mut code = vec![];
         let inst = Box::new(Instruction::Store(StoreBucket {
             line: 8,
             message_id: 0,
@@ -2058,13 +2061,10 @@ mod tests {
         }));
 
         let constants = vec![];
-        let mut line_numbers = vec![];
-        let mut components = vec![];
         let mut fn_registry = FnRegistry::new();
-        statement(
-            &inst, &mut code, &constants, &mut line_numbers, &mut components,
-            &mut fn_registry);
-        assert_eq!(code,
+        let mut ctx = TmplCompilationCtx::new(&constants);
+        statement(&mut ctx, &inst, &mut fn_registry);
+        assert_eq!(ctx.code,
                    vec![
                        OpCode::GetConstant8 as u8, 0xea, 0, 0, 0, 0, 0, 0, 0,
                        OpCode::SetVariable4 as u8, 0x2b, 0x2, 0, 0, 1, 0, 0, 0]);
@@ -2122,7 +2122,6 @@ mod tests {
 			)
 		);
          */
-        let mut code = vec![];
         let inst = Box::new(Instruction::Store(StoreBucket {
             line: 12,
             message_id: 0,
@@ -2229,11 +2228,8 @@ mod tests {
         }));
 
         let constants = vec![];
-        let mut line_numbers = vec![];
-        let mut components = vec![];
-        statement(
-            &inst, &mut code, &constants, &mut line_numbers, &mut components,
-            &mut FnRegistry::new());
+        let mut ctx = TmplCompilationCtx::new(&constants);
+        statement(&mut ctx, &inst, &mut FnRegistry::new());
 
         let var1 = Some(U256::from(2));
         let var2 = Some(U256::from(1));
@@ -2247,9 +2243,9 @@ mod tests {
         let component = Rc::new(RefCell::new(c));
         let templates = vec![Template{
             name: "test".to_string(),
-            code: code,
-            line_numbers,
-            components,
+            code: ctx.code,
+            line_numbers: ctx.line_numbers,
+            components: ctx.components,
             var_stack_depth: 0,
             number_of_inputs: 0,
         }];
@@ -2336,15 +2332,11 @@ STORE(
             })),
         }));
 
-        let mut code = vec![];
         let constants = vec![];
-        let mut line_numbers = vec![];
-        let mut components = vec![];
         let functions = vec![];
-        statement(
-            &inst, &mut code, &constants, &mut line_numbers, &mut components,
-            &mut FnRegistry::new());
-        disassemble(&code, &line_numbers, "test", &functions);
+        let mut ctx = TmplCompilationCtx::new(&constants);
+        statement(&mut ctx, &inst, &mut FnRegistry::new());
+        disassemble(&ctx.code, &ctx.line_numbers, "test", &functions);
     }
 
     #[test]
