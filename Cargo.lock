@@ -480,8 +480,6 @@ dependencies = [
  "code_producers",
  "compiler",
  "constraint_generation",
- "hex",
- "lazy_static",
  "libc",
  "num-bigint",
  "parser",

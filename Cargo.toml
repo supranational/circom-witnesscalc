@@ -15,13 +15,11 @@ ark-bn254 = { version = "0.5.0", features = ["std"] }
 ark-ff = { version = "0.5.0", features = ["std", "asm"] }
 ark-serialize = { version = "0.5.0", features = ["derive"] }
 byteorder = "1.4.3"
-hex = "0.4.3"
 rand = "0.8.5"
 ruint = { version = "1.12.4", features = ["rand", "serde"] }
 serde = { version = "1.0.190", features = ["derive"] }
 serde_json = "1.0.64"
 wtns-file = "0.1.5"
-lazy_static = "1.4.0"
 libc = "0.2.155"
 # circom dependencies
 #compiler = { path = "../circom/compiler" }
@@ -38,7 +36,6 @@ type_analysis = { git = "https://github.com/olomix/circom.git", branch = "master
 constraint_generation = { git = "https://github.com/olomix/circom.git", branch = "master" }
 prost = "0.13.1"
 num-bigint = "0.4.6"
-
 
 [profile.release]
 opt-level = 3

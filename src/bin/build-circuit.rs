@@ -1,6 +1,6 @@
 use compiler::circuit_design::template::TemplateCode;
 use compiler::compiler_interface::{run_compiler, Circuit, Config};
-use compiler::intermediate_representation::ir_interface::{AddressType, CallBucket, ComputeBucket, CreateCmpBucket, FinalData, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, ObtainMeta, OperatorType, ReturnBucket, ReturnType, StatusInput, StoreBucket, ValueBucket, ValueType};
+use compiler::intermediate_representation::ir_interface::{AddressType, CallBucket, ComputeBucket, CreateCmpBucket, FinalData, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, ObtainMeta, ReturnBucket, ReturnType, StatusInput, StoreBucket, ValueBucket, ValueType};
 use constraint_generation::{build_circuit, BuildConfig};
 use program_structure::error_definition::Report;
 use ruint::aliases::U256;
@@ -11,7 +11,6 @@ use std::path::PathBuf;
 use code_producers::c_elements::IODef;
 use code_producers::components::TemplateInstanceIOMap;
 use compiler::circuit_design::function::FunctionCode;
-use lazy_static::lazy_static;
 use type_analysis::check_types::check_types;
 use circom_witnesscalc::{deserialize_inputs, InputSignalsInfo};
 use circom_witnesscalc::graph::{optimize, Node, Operation, UnoOperation, TresOperation, Nodes, NodeConstErr, NodeIdx};
@@ -342,40 +341,6 @@ fn operator_argument_instruction(
     }
 }
 
-lazy_static! {
-    static ref DUO_OPERATORS_MAP: HashMap<OperatorType, Operation> = {
-        let mut m = HashMap::new();
-        m.insert(OperatorType::Mul, Operation::Mul);
-        m.insert(OperatorType::Div, Operation::Div);
-        m.insert(OperatorType::Add, Operation::Add);
-        m.insert(OperatorType::Sub, Operation::Sub);
-        m.insert(OperatorType::Pow, Operation::Pow);
-        m.insert(OperatorType::IntDiv, Operation::Idiv);
-        m.insert(OperatorType::Mod, Operation::Mod);
-        m.insert(OperatorType::ShiftL, Operation::Shl);
-        m.insert(OperatorType::ShiftR, Operation::Shr);
-        m.insert(OperatorType::LesserEq, Operation::Leq);
-        m.insert(OperatorType::GreaterEq, Operation::Geq);
-        m.insert(OperatorType::Lesser, Operation::Lt);
-        m.insert(OperatorType::Greater, Operation::Gt);
-        m.insert(OperatorType::Eq(1), Operation::Eq);
-        m.insert(OperatorType::NotEq, Operation::Neq);
-        m.insert(OperatorType::BoolAnd, Operation::Land);
-        m.insert(OperatorType::BitOr, Operation::Bor);
-        m.insert(OperatorType::BitAnd, Operation::Band);
-        m.insert(OperatorType::BitXor, Operation::Bxor);
-        m.insert(OperatorType::MulAddress, Operation::Mul);
-        m.insert(OperatorType::AddAddress, Operation::Add);
-        m
-    };
-    static ref UNO_OPERATORS_MAP: HashMap<OperatorType, UnoOperation> = {
-        let mut m = HashMap::new();
-        m.insert(OperatorType::PrefixSub, UnoOperation::Neg);
-        m.insert(OperatorType::ToAddress, UnoOperation::Id);
-        m
-    };
-}
-
 fn node_from_compute_bucket(
     ctx: &mut BuildCircuitContext,
     cmp: &mut ComponentInstance,
@@ -383,21 +348,21 @@ fn node_from_compute_bucket(
     print_debug: bool,
     call_stack: &Vec<String>,
 ) -> Node {
-    if let Some(op) = DUO_OPERATORS_MAP.get(&compute_bucket.op) {
+    if let Ok(op) = TryInto::<Operation>::try_into(compute_bucket.op) {
         let arg1 = operator_argument_instruction(
             ctx, cmp, &compute_bucket.stack[0], print_debug, call_stack);
         let arg2 = operator_argument_instruction(
             ctx, cmp, &compute_bucket.stack[1], print_debug, call_stack);
-        return Node::Op(*op, arg1, arg2);
-    }
-    if let Some(op) = UNO_OPERATORS_MAP.get(&compute_bucket.op) {
+        Node::Op(op, arg1, arg2)
+    } else if let Ok(op) = TryInto::<UnoOperation>::try_into(compute_bucket.op) {
         let arg1 = operator_argument_instruction(
             ctx, cmp, &compute_bucket.stack[0], print_debug, call_stack);
-        return Node::UnoOp(*op, arg1);
+        Node::UnoOp(op, arg1)
+    } else {
+        panic!(
+            "not implemented: this operator is not supported to be converted to Node: {}",
+            compute_bucket.to_string());
     }
-    panic!(
-        "not implemented: this operator is not supported to be converted to Node: {}",
-        compute_bucket.to_string());
 }
 
 fn calc_mapped_signal_idx(
@@ -1040,7 +1005,7 @@ fn compute_function_expression(
     compute_bucket: &ComputeBucket, fn_vars: &mut Vec<Option<Var>>,
     nodes: &mut Nodes, call_stack: &Vec<String>) -> Var {
 
-    if let Some(op) = DUO_OPERATORS_MAP.get(&compute_bucket.op) {
+    if let Ok(op) = TryInto::<Operation>::try_into(compute_bucket.op) {
         assert_eq!(compute_bucket.stack.len(), 2);
         let a = calc_function_expression(
             compute_bucket.stack.first().unwrap(), fn_vars,
@@ -1050,33 +1015,31 @@ fn compute_function_expression(
             nodes, call_stack);
         match (&a, &b) {
             (Var::Value(a), Var::Value(b)) => {
-                return Var::Value(op.eval(*a, *b));
+                Var::Value(op.eval(*a, *b))
             }
             _ => {
                 let a_idx = node_from_var(&a, nodes);
                 let b_idx = node_from_var(&b, nodes);
-                return Var::Node(nodes.push(Node::Op(*op, a_idx, b_idx)).0);
+                Var::Node(nodes.push(Node::Op(op, a_idx, b_idx)).0)
             }
         }
-    }
-
-    if let Some(op) = UNO_OPERATORS_MAP.get(&compute_bucket.op) {
+    } else if let Ok(op) = TryInto::<UnoOperation>::try_into(compute_bucket.op) {
         assert_eq!(compute_bucket.stack.len(), 1);
         let a = calc_function_expression(
             compute_bucket.stack.first().unwrap(), fn_vars, nodes, call_stack);
         match &a {
             Var::Value(v) => {
-                return Var::Value(op.eval(*v));
+                Var::Value(op.eval(*v))
             }
             Var::Node(node_idx) => {
-                return Var::Node(nodes.push(Node::UnoOp(*op, *node_idx)).0);
+                Var::Node(nodes.push(Node::UnoOp(op, *node_idx)).0)
             }
         }
+    } else {
+        panic!(
+            "unsupported operator: {}: {}",
+            compute_bucket.op.to_string(), call_stack.join(" -> "));
     }
-
-    panic!(
-        "unsupported operator: {}: {}",
-        compute_bucket.op.to_string(), call_stack.join(" -> "));
 }
 
 enum FnReturn {

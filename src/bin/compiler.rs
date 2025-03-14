@@ -1335,6 +1335,15 @@ fn expression_compute(
         line_numbers.push(cb.line);
     };
 
+    let op1 =
+        |oc: OpCode, code: &mut Vec<u8>, line_numbers: &mut Vec<usize>| {
+            assert_eq!(1, cb.stack.len());
+            expression(
+                &cb.stack[0], code, constants, line_numbers, components);
+            code.push(oc as u8);
+            line_numbers.push(cb.line);
+        };
+
     match cb.op {
         OperatorType::Mul => {
             op2(OpCode::OpMul);
@@ -1400,17 +1409,16 @@ fn expression_compute(
             op2(OpCode::OpBitXor);
         }
         OperatorType::PrefixSub => {
-            assert_eq!(1, cb.stack.len());
-            expression(&cb.stack[0], code, constants, line_numbers, components);
-            code.push(OpCode::OpNeg as u8);
-            line_numbers.push(cb.line);
+            op1(OpCode::OpNeg, code, line_numbers)
+        }
+        OperatorType::BoolNot => {
+            op1(OpCode::OpBoolNot, code, line_numbers)
+        }
+        OperatorType::Complement => {
+            op1(OpCode::OpBitNot, code, line_numbers)
         }
         OperatorType::ToAddress | OperatorType::MulAddress | OperatorType::AddAddress => {
             panic!("Unexpected address operator: {}", cb.op.to_string());
-        }
-        _ => {
-            todo!("not implemented expression operator {}: {}",
-                cb.op.to_string(), cb.to_string());
         }
     };
     1

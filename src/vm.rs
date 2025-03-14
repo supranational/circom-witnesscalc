@@ -365,18 +365,20 @@ pub enum OpCode {
     OpNe           = 31,
     OpBoolOr       = 32,
     OpBoolAnd      = 33,
-    OpBitOr        = 34,
-    OpBitAnd       = 35,
-    OpBitXor       = 36,
-    OpNeg          = 37,
-    OpToAddr       = 38,
-    OpMulAddr      = 39,
-    OpAddAddr      = 40,
-    CmpCall        = 41,
-    FnCall         = 42,
-    FnReturn       = 43,
+    OpBoolNot      = 34,
+    OpBitOr        = 35,
+    OpBitAnd       = 36,
+    OpBitXor       = 37,
+    OpBitNot       = 38,
+    OpNeg          = 39,
+    OpToAddr       = 40,
+    OpMulAddr      = 41,
+    OpAddAddr      = 42,
+    CmpCall        = 43,
+    FnCall         = 44,
+    FnReturn       = 45,
     // TODO: Assert should accept an index of the string to print
-    Assert         = 44,
+    Assert         = 46,
 }
 
 fn read_instruction(code: &[u8], ip: usize) -> OpCode {
@@ -635,6 +637,9 @@ pub fn disassemble_instruction(
         OpCode::OpBoolAnd => {
             println!("OpBoolAnd");
         }
+        OpCode::OpBoolNot => {
+            println!("OpBoolNot");
+        }
         OpCode::OpBitOr => {
             println!("OpBitOr");
         }
@@ -643,6 +648,9 @@ pub fn disassemble_instruction(
         }
         OpCode::OpBitXor => {
             println!("OpBitXor");
+        }
+        OpCode::OpBitNot => {
+            println!("OpBitNot");
         }
         OpCode::OpNeg => {
             println!("OpNeg");
@@ -1352,6 +1360,10 @@ pub fn execute(
                 let a = vm.stack.pop().unwrap();
                 vm.push_stack(Operation::Land.eval(a, b));
             }
+            OpCode::OpBoolNot => {
+                let a = vm.stack.pop().unwrap();
+                vm.push_stack(UnoOperation::Lnot.eval(a));
+            }
             OpCode::OpBitOr => {
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
@@ -1366,6 +1378,10 @@ pub fn execute(
                 let b = vm.stack.pop().unwrap();
                 let a = vm.stack.pop().unwrap();
                 vm.push_stack(Operation::Bxor.eval(a, b));
+            }
+            OpCode::OpBitNot => {
+                let a = vm.stack.pop().unwrap();
+                vm.push_stack(UnoOperation::Bnot.eval(a));
             }
             OpCode::OpNeg => {
                 let a = vm.stack.pop().unwrap();

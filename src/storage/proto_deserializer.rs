@@ -216,6 +216,8 @@ fn decode_uno_op_node(bytes: &[u8]) -> Result<Node, Error> {
                 op = match value {
                     0 => UnoOperation::Neg,
                     1 => UnoOperation::Id,
+                    2 => UnoOperation::Lnot,
+                    3 => UnoOperation::Bnot,
                     _ => return Err(Error::new(
                         ErrorKind::InvalidData,
                         format!("Unknown DuoOp operation value: {}", value),
