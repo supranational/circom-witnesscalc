@@ -751,7 +751,6 @@ pub fn constants(nodes: &mut [Node]) {
     eprintln!("Found {} constants", constants);
 }
 
-/// Convert to Montgomery form
 fn shl(a: Fr, b: Fr) -> Fr {
     if b.is_zero() {
         return a;

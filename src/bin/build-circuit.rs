@@ -1388,20 +1388,18 @@ impl<'a> fmt::Display for ValueTooBigError {
 
 impl Error for ValueTooBigError {}
 
+// Convert U256 to usize
 fn bigint_to_usize(value: &U256) -> Result<usize, Box<dyn Error>> {
-
-    // Convert U256 to usize
-    let bytes = value.to_le_bytes::<32>().to_vec(); // Convert to little-endian bytes
-    for i in std::mem::size_of::<usize>()..bytes.len() {
-        if bytes[i] != 0 {
+    let le_bytes = value.to_le_bytes::<32>(); // Convert to little-endian bytes
+    for item in le_bytes.iter().skip(size_of::<usize>()) {
+        if *item != 0 {
             return Err(Box::new(ValueTooBigError {}));
         }
     }
-    Ok(usize::from_le_bytes(
-        bytes[..std::mem::size_of::<usize>()]
-            .try_into()
-            .expect("slice with incorrect length"),
-    ))
+    let usize_bytes: [u8; size_of::<usize>()] = le_bytes[..size_of::<usize>()]
+        .try_into()
+        .expect("slice with incorrect length");
+    Ok(usize::from_le_bytes(usize_bytes))
 }
 
 
@@ -1425,7 +1423,7 @@ fn fmt_create_cmp_bucket(
         ctx, &cmp_bucket.sub_cmp_id, cmp, print_debug, call_stack);
 
     let sub_cmp_id = match sub_cmp_id {
-        Var::Value(ref c) => format!("Constant {}", c.to_string()),
+        Var::Value(ref c) => format!("Constant {}", c),
         Var::Node(idx) => format!("Variable {}", idx)
     };
 
@@ -1467,11 +1465,11 @@ enum Var {
     Node(usize),
 }
 
-impl ToString for Var {
-    fn to_string(&self) -> String {
+impl fmt::Display for Var {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Var::Value(ref c) => { format!("Var::Value({})", c) }
-            Var::Node(idx) => { format!("Var::Node({})", idx) }
+            Var::Value(ref c) => write!(f, "Var::Value({})", c),
+            Var::Node(idx) => write!(f, "Var::Node({})", idx),
         }
     }
 }
@@ -2212,9 +2210,23 @@ fn store_subcomponent_signals(
 
 #[cfg(test)]
 mod tests {
+    use ruint::uint;
+    use ruint::aliases::U256;
+    use crate::bigint_to_usize;
+
     #[test]
-    fn test_calc_const_expression() {
-        println!("OK");
+    fn test_bigint_to_usize() {
+        let v = uint!(0_U256);
+        let r = bigint_to_usize(&v);
+        assert!(matches!(r, Ok(0usize)));
+
+        let v = U256::from(usize::MAX);
+        let r = bigint_to_usize(&v);
+        assert!(matches!(r, Ok(usize::MAX)));
+
+        let v = v + v;
+        let r = bigint_to_usize(&v);
+        assert!(r.is_err());
     }
 }
 
