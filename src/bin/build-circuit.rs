@@ -54,7 +54,7 @@ fn try_signal_store<'a>(
 
 fn var_from_value_instruction_n(
     value_bucket: &ValueBucket, nodes: &Nodes, n: usize,
-    call_stack: &Vec<String>) -> Vec<Var> {
+    call_stack: &[String]) -> Vec<Var> {
 
     match value_bucket.parse_as {
         ValueType::BigInt => {
@@ -244,7 +244,7 @@ fn operator_argument_instruction(
                         let signal_idx = cmp.signal_offset + signal_idx;
                         let signal_node = ctx.signal_node_idx[signal_idx];
                         assert_ne!(signal_node, usize::MAX, "signal is not set yet");
-                        return signal_node;
+                        signal_node
                     }
                     LocationRule::Mapped { .. } => {
                         todo!()
@@ -290,7 +290,7 @@ fn operator_argument_instruction(
                     let signal_idx = signal_offset + signal_idx;
                     let signal_node = ctx.signal_node_idx[signal_idx];
                     assert_ne!(signal_node, usize::MAX, "signal is not set yet");
-                    return signal_node;
+                    signal_node
                 }
                 AddressType::Variable => {
                     match load_bucket.src {
@@ -403,7 +403,7 @@ fn node_from_compute_bucket(
 fn calc_mapped_signal_idx(
     ctx: &mut BuildCircuitContext, cmp: &mut ComponentInstance,
     subcomponent_idx: usize, signal_code: usize,
-    indexes: &Vec<InstructionPointer>, print_debug: bool,
+    indexes: &[InstructionPointer], print_debug: bool,
     call_stack: &Vec<String>) -> (usize, String) {
 
     let template_id = &cmp.subcomponents[subcomponent_idx]
@@ -524,7 +524,9 @@ fn process_instruction(
 
                             assert_eq!(node_idxs.len(), store_bucket.context.size);
 
-                            for i in 0..store_bucket.context.size {
+                            for (i, item) in node_idxs.iter()
+                                .enumerate().take(store_bucket.context.size) {
+
                                 if ctx.signal_node_idx[signal_idx + i] != usize::MAX {
                                     panic!(
                                         "signal is already set: {}, {}:{}",
@@ -532,7 +534,7 @@ fn process_instruction(
                                         call_stack.join(" -> "),
                                         store_bucket.get_line());
                                 }
-                                ctx.signal_node_idx[signal_idx + i] = node_idxs[i];
+                                ctx.signal_node_idx[signal_idx + i] = *item;
                             }
                         }
                         // LocationRule::Mapped { signal_code, indexes } => {}
@@ -562,9 +564,11 @@ fn process_instruction(
                                 ctx, &store_bucket.src, cmp,
                                 store_bucket.context.size, print_debug,
                                 call_stack);
-                            for i in 0..store_bucket.context.size {
-                                cmp.vars[lvar_idx + i] =
-                                    Some(var_exprs[i].clone());
+
+                            for (i, item) in var_exprs.iter()
+                                .enumerate().take(store_bucket.context.size) {
+
+                                cmp.vars[lvar_idx + i] = Some(item.clone());
                             }
                         }
                         LocationRule::Mapped {..} => {
@@ -599,9 +603,8 @@ fn process_instruction(
         Instruction::Call(ref call_bucket) => {
             let mut fn_vars: Vec<Option<Var>> = vec![None; call_bucket.arena_size];
 
-            let mut idx = 0;
             let mut count: usize = 0;
-            for inst2 in &call_bucket.arguments {
+            for (idx, inst2) in call_bucket.arguments.iter().enumerate() {
                 let args = calc_expression_n(
                     ctx, inst2, cmp, call_bucket.argument_types[idx].size,
                     print_debug, call_stack);
@@ -609,7 +612,6 @@ fn process_instruction(
                     fn_vars[count] = Some(arg);
                     count += 1;
                 }
-                idx += 1;
             }
 
             let r = run_function(
@@ -743,7 +745,7 @@ fn process_instruction(
             for (i, _ ) in create_component_bucket.defined_positions.iter() {
                 let i = sub_cmp_idx + *i;
 
-                if let Some(_) = cmp.subcomponents[i] {
+                if cmp.subcomponents[i].is_some() {
                     panic!("subcomponent already set");
                 }
                 cmp.subcomponents[i] = Some(ctx.new_component(
@@ -773,7 +775,7 @@ fn process_instruction(
 }
 
 fn store_function_return_results_into_variable(
-    final_data: &FinalData, src_vars: &Vec<Option<Var>>, ret: &FnReturn,
+    final_data: &FinalData, src_vars: &[Option<Var>], ret: &FnReturn,
     dst_vars: &mut Vec<Option<Var>>, nodes: &mut Nodes,
     call_stack: &Vec<String>) {
 
@@ -815,7 +817,7 @@ fn store_function_return_results_into_variable(
 
 fn store_function_return_results_into_subsignal(
     ctx: &mut BuildCircuitContext, final_data: &FinalData,
-    src_vars: &Vec<Option<Var>>, ret: &FnReturn, print_debug: bool,
+    src_vars: &[Option<Var>], ret: &FnReturn, print_debug: bool,
     call_stack: &Vec<String>, cmp: &mut ComponentInstance) {
 
     let (cmp_address, input_information) = if let AddressType::SubcmpSignal {cmp_address, input_information, ..} = &final_data.dest_address_type {
@@ -868,7 +870,7 @@ fn store_function_return_results_into_subsignal(
 
 fn store_function_return_results(
     ctx: &mut BuildCircuitContext, final_data: &FinalData,
-    src_vars: &Vec<Option<Var>>, ret: &FnReturn, print_debug: bool,
+    src_vars: &[Option<Var>], ret: &FnReturn, print_debug: bool,
     call_stack: &Vec<String>, cmp: &mut ComponentInstance) {
 
     match &final_data.dest_address_type {
@@ -889,7 +891,7 @@ fn store_function_return_results(
 fn run_function(
     call_bucket: &CallBucket, functions: &Vec<FunctionCode>,
     fn_vars: &mut Vec<Option<Var>>, nodes: &mut Nodes,
-    print_debug: bool, call_stack: &Vec<String>) -> FnReturn {
+    print_debug: bool, call_stack: &[String]) -> FnReturn {
 
     // for i in functions {
     //     println!("Function: {} {}", i.header, i.name);
@@ -900,7 +902,7 @@ fn run_function(
         println!("Run function {}", &call_bucket.symbol);
     }
 
-    let mut call_stack = call_stack.clone();
+    let mut call_stack = call_stack.to_owned();
     call_stack.push(f.name.clone());
 
     let mut r: Option<FnReturn> = None;
@@ -1028,7 +1030,7 @@ fn calc_function_expression(
 fn node_from_var(v: &Var, nodes: &mut Nodes) -> usize {
     match v {
         Var::Value(ref v) => {
-            nodes.push(Node::Constant(v.clone())).0
+            nodes.push(Node::Constant(*v)).0
         }
         Var::Node(node_idx) => *node_idx,
     }
@@ -1041,19 +1043,19 @@ fn compute_function_expression(
     if let Some(op) = DUO_OPERATORS_MAP.get(&compute_bucket.op) {
         assert_eq!(compute_bucket.stack.len(), 2);
         let a = calc_function_expression(
-            compute_bucket.stack.get(0).unwrap(), fn_vars,
+            compute_bucket.stack.first().unwrap(), fn_vars,
             nodes, call_stack);
         let b = calc_function_expression(
             compute_bucket.stack.get(1).unwrap(), fn_vars,
             nodes, call_stack);
         match (&a, &b) {
             (Var::Value(a), Var::Value(b)) => {
-                return Var::Value(op.eval(a.clone(), b.clone()));
+                return Var::Value(op.eval(*a, *b));
             }
             _ => {
                 let a_idx = node_from_var(&a, nodes);
                 let b_idx = node_from_var(&b, nodes);
-                return Var::Node(nodes.push(Node::Op(op.clone(), a_idx, b_idx)).0);
+                return Var::Node(nodes.push(Node::Op(*op, a_idx, b_idx)).0);
             }
         }
     }
@@ -1061,14 +1063,13 @@ fn compute_function_expression(
     if let Some(op) = UNO_OPERATORS_MAP.get(&compute_bucket.op) {
         assert_eq!(compute_bucket.stack.len(), 1);
         let a = calc_function_expression(
-            compute_bucket.stack.get(0).unwrap(), fn_vars,
-            nodes, call_stack);
+            compute_bucket.stack.first().unwrap(), fn_vars, nodes, call_stack);
         match &a {
             Var::Value(v) => {
-                return Var::Value(op.eval(v.clone()));
+                return Var::Value(op.eval(*v));
             }
             Var::Node(node_idx) => {
-                return Var::Node(nodes.push(Node::UnoOp(op.clone(), *node_idx)).0);
+                return Var::Node(nodes.push(Node::UnoOp(*op, *node_idx)).0);
             }
         }
     }
@@ -1314,9 +1315,8 @@ fn process_function_instruction(
         Instruction::Call(ref call_bucket) => {
             let mut new_fn_vars: Vec<Option<Var>> = vec![None; call_bucket.arena_size];
 
-            let mut idx = 0;
             let mut count: usize = 0;
-            for inst2 in &call_bucket.arguments {
+            for (idx, inst2) in call_bucket.arguments.iter().enumerate() {
                 let args = calc_function_expression_n(
                     inst2, fn_vars, nodes, call_bucket.argument_types[idx].size,
                     call_stack);
@@ -1324,7 +1324,6 @@ fn process_function_instruction(
                     new_fn_vars[count] = Some(arg);
                     count += 1;
                 }
-                idx += 1;
             }
 
             let r = run_function(
@@ -1371,16 +1370,14 @@ fn check_continue_condition_function(
     val != U256::ZERO
 }
 
-
-
-fn find_function<'a>(name: &str, functions: &'a Vec<FunctionCode>) -> &'a FunctionCode {
+fn find_function<'a>(name: &str, functions: &'a [FunctionCode]) -> &'a FunctionCode {
     functions.iter().find(|f| f.header == name).expect("function not found")
 }
 
 #[derive(Debug, Clone)]
 struct ValueTooBigError {}
 
-impl<'a> fmt::Display for ValueTooBigError {
+impl fmt::Display for ValueTooBigError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "value is too big")
     }
