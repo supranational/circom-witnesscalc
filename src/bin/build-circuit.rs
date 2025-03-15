@@ -1212,9 +1212,10 @@ fn process_function_instruction(
                         call_stack.join(" -> "));
                     assert_eq!(
                         branch_bucket.else_branch.len(), 1,
-                        "expected a ternary operation but it doesn't looks like one as the 'else' branch is not of length 1: {}: {}",
+                        "expected a ternary operation but it doesn't looks like one as the 'else' branch is not of length 1: {}: {}:{}",
                         branch_bucket.else_branch.len(),
-                        call_stack.join(" -> "));
+                        call_stack.join(" -> "),
+                        branch_bucket.line);
                     let (var_if, var_if_idx) = match *branch_bucket.if_branch[0] {
                         Instruction::Store(ref store_bucket) => {
                             store_function_variable(
@@ -1327,8 +1328,8 @@ fn check_continue_condition_function(
         .to_const(nodes)
         .unwrap_or_else(
             |e| panic!(
-                "condition is not a constant: {}: {}",
-                e, call_stack.join(" -> ")));
+                "condition is not a constant: {}: {}:{}",
+                e, call_stack.join(" -> "), inst.get_line()));
 
     val != U256::ZERO
 }
@@ -1916,18 +1917,12 @@ fn main() {
 
     match check_types(&mut program_archive) {
         Err(errs) => {
-            println!("Type errors:");
-            for err in errs {
-                println!("{}", err.get_message());
-            }
+            Report::print_reports(&errs, &program_archive.file_library);
             std::process::exit(1);
         }
         Ok(warns) => {
             if !warns.is_empty() {
-                println!("Type warnings:");
-                for warn in warns {
-                    println!("{}", warn.get_message());
-                }
+                Report::print_reports(&warns, &program_archive.file_library);
             }
         }
     }

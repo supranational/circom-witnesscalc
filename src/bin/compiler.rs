@@ -292,18 +292,12 @@ fn main() {
 
     match check_types(&mut program_archive) {
         Err(errs) => {
-            println!("Type errors:");
-            for err in errs {
-                println!("{}", err.get_message());
-            }
+            Report::print_reports(&errs, &program_archive.file_library);
             std::process::exit(1);
         }
         Ok(warns) => {
             if !warns.is_empty() {
-                println!("Type warnings:");
-                for warn in warns {
-                    println!("{}", warn.get_message());
-                }
+                Report::print_reports(&warns, &program_archive.file_library);
             }
         }
     }
