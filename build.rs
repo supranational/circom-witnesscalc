@@ -34,5 +34,10 @@ fn main() -> Result<()> {
 
     // println!("cargo:rustc-link-arg=-Wl,-soname,libcircom_witnesscalc.so");
 
+    let target = env::var("TARGET").unwrap();
+    if target.contains("android") {
+        println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,libcircom_witnesscalc.so");
+    }
+
     Ok(())
 }
