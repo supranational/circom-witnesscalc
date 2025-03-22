@@ -334,6 +334,31 @@ pub enum Node {
     TresOp(TresOperation, usize, usize, usize),
 }
 
+impl Node {
+    pub fn to_const(&self, nodes: &Nodes) -> Result<U256, NodeConstErr> {
+        match self {
+            Node::Constant(v) => Ok(*v),
+            Node::UnoOp(op, a) => {
+                Ok(op.eval(
+                    nodes.to_const(NodeIdx(*a))?))
+            }
+            Node::Op(op, a, b) => {
+                Ok(op.eval(
+                    nodes.to_const(NodeIdx(*a))?,
+                    nodes.to_const(NodeIdx(*b))?))
+            }
+            Node::TresOp(op, a, b, c) => {
+                Ok(op.eval(
+                    nodes.to_const(NodeIdx(*a))?,
+                    nodes.to_const(NodeIdx(*b))?,
+                    nodes.to_const(NodeIdx(*c))?))
+            }
+            _ =>  Err(NodeConstErr::InputSignal),
+        }
+    }
+
+}
+
 // TODO remove pub from Vec<Node>
 #[derive(Default)]
 pub struct Nodes(pub Vec<Node>);
@@ -371,6 +396,10 @@ impl Nodes {
     }
 
     pub fn push(&mut self, n: Node) -> NodeIdx {
+        let n = match n.to_const(self) {
+            Ok(v) => Node::Constant(v),
+            Err(_) => n,
+        };
         self.0.push(n);
         NodeIdx(self.0.len() - 1)
     }
