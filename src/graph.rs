@@ -339,19 +339,25 @@ impl Node {
         match self {
             Node::Constant(v) => Ok(*v),
             Node::UnoOp(op, a) => {
-                Ok(op.eval(
-                    nodes.to_const(NodeIdx(*a))?))
+                if let Node::Constant(c) = nodes[*a] {
+                    Ok(op.eval(c))
+                } else {
+                    Err(NodeConstErr::NotConst)
+                }
             }
             Node::Op(op, a, b) => {
-                Ok(op.eval(
-                    nodes.to_const(NodeIdx(*a))?,
-                    nodes.to_const(NodeIdx(*b))?))
+                if let (Node::Constant(ca), Node::Constant(cb)) = (nodes[*a], nodes[*b]) {
+                    Ok(op.eval(ca, cb))
+                } else {
+                    Err(NodeConstErr::NotConst)
+                }
             }
             Node::TresOp(op, a, b, c) => {
-                Ok(op.eval(
-                    nodes.to_const(NodeIdx(*a))?,
-                    nodes.to_const(NodeIdx(*b))?,
-                    nodes.to_const(NodeIdx(*c))?))
+                if let (Node::Constant(ca), Node::Constant(cb), Node::Constant(cc)) = (nodes[*a], nodes[*b], nodes[*c]) {
+                    Ok(op.eval(ca, cb, cc))
+                } else {
+                    Err(NodeConstErr::NotConst)
+                }
             }
             _ =>  Err(NodeConstErr::InputSignal),
         }
@@ -430,6 +436,7 @@ impl From<usize> for NodeIdx {
 pub enum NodeConstErr {
     EmptyNode(NodeIdx),
     InputSignal,
+    NotConst,
 }
 
 impl std::fmt::Display for NodeConstErr {
@@ -440,6 +447,9 @@ impl std::fmt::Display for NodeConstErr {
             }
             NodeConstErr::InputSignal => {
                 write!(f, "input signal is not a constant")
+            }
+            NodeConstErr::NotConst => {
+                write!(f, "node is not a constant")
             }
         }
     }
