@@ -271,6 +271,37 @@ pub enum Node {
     TresOp(TresOperation, usize, usize, usize),
 }
 
+impl Node {
+    pub fn to_const(&self, nodes: &Nodes) -> Result<U256, NodeConstErr> {
+        match self {
+            Node::Constant(v) => Ok(*v),
+            Node::UnoOp(op, a) => {
+                if let Node::Constant(c) = nodes[*a] {
+                    Ok(op.eval(c))
+                } else {
+                    Err(NodeConstErr::NotConst)
+                }
+            }
+            Node::Op(op, a, b) => {
+                if let (Node::Constant(ca), Node::Constant(cb)) = (nodes[*a], nodes[*b]) {
+                    Ok(op.eval(ca, cb))
+                } else {
+                    Err(NodeConstErr::NotConst)
+                }
+            }
+            Node::TresOp(op, a, b, c) => {
+                if let (Node::Constant(ca), Node::Constant(cb), Node::Constant(cc)) = (nodes[*a], nodes[*b], nodes[*c]) {
+                    Ok(op.eval(ca, cb, cc))
+                } else {
+                    Err(NodeConstErr::NotConst)
+                }
+            }
+            _ =>  Err(NodeConstErr::InputSignal),
+        }
+    }
+
+}
+
 // TODO remove pub from Vec<Node>
 #[derive(Default)]
 pub struct Nodes(pub Vec<Node>);
@@ -309,6 +340,10 @@ impl Nodes {
     }
 
     pub fn push(&mut self, n: Node) -> NodeIdx {
+        let n = match n.to_const(self) {
+            Ok(v) => Node::Constant(v),
+            Err(_) => n,
+        };
         self.0.push(n);
         NodeIdx(self.0.len() - 1)
     }
@@ -339,6 +374,7 @@ impl From<usize> for NodeIdx {
 pub enum NodeConstErr {
     EmptyNode(NodeIdx),
     InputSignal,
+    NotConst,
 }
 
 impl std::fmt::Display for NodeConstErr {
@@ -349,6 +385,9 @@ impl std::fmt::Display for NodeConstErr {
             }
             NodeConstErr::InputSignal => {
                 write!(f, "input signal is not a constant")
+            }
+            NodeConstErr::NotConst => {
+                write!(f, "node is not a constant")
             }
         }
     }

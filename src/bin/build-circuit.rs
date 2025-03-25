@@ -1,6 +1,6 @@
 use compiler::circuit_design::template::TemplateCode;
 use compiler::compiler_interface::{run_compiler, Circuit, Config};
-use compiler::intermediate_representation::ir_interface::{AddressType, CallBucket, ComputeBucket, CreateCmpBucket, FinalData, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, ObtainMeta, ReturnBucket, ReturnType, StatusInput, StoreBucket, ValueBucket, ValueType};
+use compiler::intermediate_representation::ir_interface::{AddressType, ComputeBucket, CreateCmpBucket, FinalData, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, ObtainMeta, ReturnBucket, ReturnType, StatusInput, StoreBucket, ValueBucket, ValueType};
 use constraint_generation::{build_circuit, BuildConfig};
 use program_structure::error_definition::Report;
 use ruint::aliases::U256;
@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::{env, fmt, fs};
 use std::error::Error;
 use std::path::PathBuf;
+use std::time::Instant;
 use code_producers::c_elements::IODef;
 use code_producers::components::TemplateInstanceIOMap;
 use compiler::circuit_design::function::FunctionCode;
@@ -580,7 +581,7 @@ fn process_instruction(
             }
 
             let r = run_function(
-                call_bucket, ctx.functions, &mut fn_vars, ctx.nodes,
+                &call_bucket.symbol, ctx.functions, &mut fn_vars, ctx.nodes,
                 print_debug, call_stack);
 
             match call_bucket.return_info {
@@ -854,7 +855,7 @@ fn store_function_return_results(
 }
 
 fn run_function(
-    call_bucket: &CallBucket, functions: &Vec<FunctionCode>,
+    fn_name: &str, functions: &Vec<FunctionCode>,
     fn_vars: &mut Vec<Option<Var>>, nodes: &mut Nodes,
     print_debug: bool, call_stack: &[String]) -> FnReturn {
 
@@ -862,9 +863,13 @@ fn run_function(
     //     println!("Function: {} {}", i.header, i.name);
     // }
 
-    let f = find_function(&call_bucket.symbol, functions);
+    let f = find_function(fn_name, functions);
+    let mut start: Option<Instant> = None;
     if print_debug {
-        println!("Run function {}", &call_bucket.symbol);
+        start = Some(Instant::now());
+        println!(
+            "Run function {}, vars num: {}, call stack: {}", fn_name,
+            fn_vars.len(), call_stack.join(" -> "));
     }
 
     let mut call_stack = call_stack.to_owned();
@@ -882,7 +887,7 @@ fn run_function(
 
     let r = r.expect("no return found");
     if print_debug {
-        println!("Function {} returned", &call_bucket.symbol);
+        println!("Function {} done in {:?}", fn_name, start.unwrap().elapsed());
     }
     r
 }
@@ -1124,9 +1129,9 @@ fn store_function_variable(
 
     assert_eq!(
         store_bucket.context.size, 1,
-        "variable size in ternary expression must be 1: {}, {}",
+        "variable size in ternary expression must be 1: {}, {}:{}",
         template_header.as_ref().unwrap_or(&"-".to_string()),
-        call_stack.join(" -> "));
+        call_stack.join(" -> "), store_bucket.get_line());
 
     let v = calc_function_expression(
         &store_bucket.src, fn_vars, nodes, call_stack);
@@ -1139,6 +1144,7 @@ fn process_function_instruction(
     nodes: &mut Nodes, functions: &Vec<FunctionCode>,
     print_debug: bool, call_stack: &Vec<String>) -> Option<FnReturn> {
 
+    // println!("function instruction: {:?}", inst.to_string());
     match **inst {
         Instruction::Store(ref store_bucket) => {
             // println!("store bucket: {}", store_bucket.to_string());
@@ -1207,9 +1213,9 @@ fn process_function_instruction(
                     // storing a variable to the same signal index.
                     assert_eq!(
                         branch_bucket.if_branch.len(), 1,
-                        "expected a ternary operation but it doesn't looks like one as the 'if' branch is not of length 1: {}: {}",
+                        "expected a ternary operation but it doesn't looks like one as the 'if' branch is not of length 1: {}: {}:{}",
                         branch_bucket.else_branch.len(),
-                        call_stack.join(" -> "));
+                        call_stack.join(" -> "), branch_bucket.get_line());
                     assert_eq!(
                         branch_bucket.else_branch.len(), 1,
                         "expected a ternary operation but it doesn't looks like one as the 'else' branch is not of length 1: {}: {}:{}",
@@ -1291,8 +1297,8 @@ fn process_function_instruction(
             }
 
             let r = run_function(
-                call_bucket, functions, &mut new_fn_vars, nodes, print_debug,
-                call_stack);
+                &call_bucket.symbol, functions, &mut new_fn_vars, nodes,
+                print_debug, call_stack);
 
             match call_bucket.return_info {
                 ReturnType::Intermediate{ ..} => { todo!(); }
