@@ -72,6 +72,7 @@ impl From<&Node> for crate::proto::node::Node {
                 crate::proto::node::Node::Constant(
                     crate::proto::ConstantNode { value: Some(i) })
             }
+            Node::Constant2(_) => todo!(),
             Node::UnoOp(op, a) => {
                 let op = crate::proto::UnoOp::from(op);
                 crate::proto::node::Node::UnoOp(

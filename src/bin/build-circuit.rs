@@ -2056,6 +2056,7 @@ fn evaluate_unoptimized(
         let value = match node {
             Node::Unknown => { panic!("unknown node value") }
             Node::Constant(c) => c,
+            Node::Constant2(_) => todo!(),
             Node::MontConstant(_) => { panic!("no montgomery constant expected in unoptimized graph") }
             Node::Input(i) => inputs[i],
             Node::Op(op, a, b) => op.eval(values[a], values[b]),

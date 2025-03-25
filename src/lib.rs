@@ -12,10 +12,11 @@ use std::ffi::{c_char, c_int, c_void, CStr};
 use std::slice::from_raw_parts;
 use ruint::aliases::U256;
 use ruint::ParseError;
-use crate::graph::Node;
+use crate::graph::{evaluate2, Node};
 use wtns_file::FieldElement;
 use ark_bn254::Fr;
 use ark_ff::{BigInteger, PrimeField};
+use crate::field::{Field, U254};
 use crate::storage::proto_deserializer::deserialize_witnesscalc_graph_from_bytes;
 
 pub type InputSignalsInfo = HashMap<String, (usize, usize)>;
@@ -150,8 +151,65 @@ pub fn calc_witness(inputs: &str, graph_data: &[u8]) -> Result<Vec<U256>, Error>
     populate_inputs(&inputs, &input_mapping, &mut inputs_buffer);
     println!("Inputs populated in {:?}", start.elapsed());
 
+
     // graph::evaluate_parallel(&nodes, inputs_buffer.as_slice(), &signals);
-    Ok(graph::evaluate(&nodes, inputs_buffer.as_slice(), &signals))
+    // Ok(graph::evaluate(&nodes, inputs_buffer.as_slice(), &signals))
+
+    let result = graph::evaluate(&nodes, inputs_buffer.as_slice(), &signals);
+
+    let result2 = test_evaluate2(&nodes, inputs_buffer.as_slice(), &signals);
+    assert_arr_equal(&result, &result2);
+    Ok(result)
+}
+
+fn test_evaluate2(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<U254> {
+    let (nodes, constants) = convert_u254(nodes);
+
+    let prime = U254::from_str_radix(
+        "21888242871839275222246405745257275088548364400416034343698204186575808495617",
+        10).unwrap();
+    let ff = Field::new(prime);
+
+    let inputs = convert_u254_arr(inputs);
+
+    evaluate2(ff, &nodes, &inputs, outputs, &constants)
+}
+
+fn convert_u254(nodes: &[Node]) -> (Vec<Node>, Vec<U254>) {
+    let mut r = Vec::with_capacity(nodes.len());
+    let mut constants = Vec::new();
+
+    for n in nodes.iter() {
+        match n {
+            Node::Unknown => panic!(),
+            Node::Input(_) => { r.push(*n); }
+            Node::Constant(c) => {
+                constants.push(U254::from_limbs(c.into_limbs()));
+                r.push(Node::Constant2(constants.len()-1));
+            }
+            Node::Constant2(_) => panic!(),
+            Node::MontConstant(_) => panic!(),
+            Node::UnoOp(_, _) => { r.push(*n); },
+            Node::Op(_, _, _) => { r.push(*n); },
+            Node::TresOp(_, _, _, _) => { r.push(*n); },
+        }
+    }
+
+    (r, constants)
+}
+
+fn convert_u254_arr(input: &[U256]) -> Vec<U254> {
+    input.iter()
+        .map(|x| U254::from_limbs(x.into_limbs()))
+        .collect()
+}
+
+fn assert_arr_equal(a: &[U256], b: &[U254]) {
+    assert_eq!(a.len(), b.len());
+    for (i, x) in a.iter().enumerate() {
+        assert_eq!(U254::from_limbs(x.into_limbs()), b[i]);
+    }
+    println!("result assertion passed");
 }
 
 fn get_inputs_size(nodes: &[Node]) -> usize {

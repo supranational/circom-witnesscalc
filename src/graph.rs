@@ -1,12 +1,11 @@
 use std::{collections::HashMap, ops::{BitAnd, Shl, Shr}, thread};
-use std::cmp::Ordering;
 use std::error::Error;
 use std::ops::{BitOr, BitXor, Deref, Not};
 use std::sync::{mpsc, Arc};
 use std::time::Instant;
-use crate::field::M;
+use crate::field::{FieldOperations, FieldOps, M};
 use ark_bn254::Fr;
-use ark_ff::{BigInt, PrimeField, BigInteger, Zero, One, Field};
+use ark_ff::{BigInt, PrimeField};
 use rand::Rng;
 use ruint::aliases::U256;
 use serde::{Deserialize, Serialize};
@@ -59,7 +58,6 @@ pub enum Operation {
 }
 
 impl Operation {
-    // TODO: rewrite to &U256 type
     pub fn eval(&self, a: U256, b: U256) -> U256 {
         use Operation::*;
         match self {
@@ -96,51 +94,6 @@ impl Operation {
             //      bigger then modulus
             Bxor => a.bitxor(b),
             Idiv => if b == U256::ZERO { U256::ZERO } else { a / b },
-        }
-    }
-
-    pub fn eval_fr(&self, a: Fr, b: Fr) -> Fr {
-        use Operation::*;
-        match self {
-            Mul => a * b,
-            // We always should return something on the circuit execution.
-            // So in case of division by 0 we would return 0. And the proof
-            // should be invalid in the end.
-            Div => if b.is_zero() { Fr::zero() } else { a / b },
-            Add => a + b,
-            Sub => a - b,
-            Pow => a.pow(b.into_bigint()),
-            Idiv => if b.is_zero() {
-                Fr::zero()
-            } else {
-                let x = fr_to_u256(&a) / fr_to_u256(&b);
-                u256_to_fr(&x)
-            },
-            Mod => if b.is_zero() {
-                Fr::zero()
-            } else {
-                let x = fr_to_u256(&a) % fr_to_u256(&b);
-                u256_to_fr(&x)
-            },
-            Eq => match a.cmp(&b) {
-                Ordering::Equal => Fr::one(),
-                _ => Fr::zero(),
-            }
-            Neq => match a.cmp(&b) {
-                Ordering::Equal => Fr::zero(),
-                _ => Fr::one(),
-            },
-            Lt => u256_to_fr(&u_lt(&fr_to_u256(&a), &fr_to_u256(&b))),
-            Gt => u256_to_fr(&u_gt(&fr_to_u256(&a), &fr_to_u256(&b))),
-            Leq => u256_to_fr(&u_lte(&fr_to_u256(&a), &fr_to_u256(&b))),
-            Geq => u256_to_fr(&u_gte(&fr_to_u256(&a), &fr_to_u256(&b))),
-            Land => if a.is_zero() || b.is_zero() { Fr::zero() } else { Fr::one() },
-            Lor => if a.is_zero() && b.is_zero() { Fr::zero() } else { Fr::one() },
-            Shl => shl(a, b),
-            Shr => shr(a, b),
-            Bor => bit_or(a, b),
-            Band => bit_and(a, b),
-            Bxor => bit_xor(a, b),
         }
     }
 }
@@ -233,17 +186,6 @@ impl UnoOperation {
             },
         }
     }
-
-    pub fn eval_fr(&self, a: Fr) -> Fr {
-        match self {
-            UnoOperation::Neg => if a.is_zero() { Fr::zero() } else {
-                let mut x = Fr::MODULUS;
-                x.sub_with_borrow(&a.into_bigint());
-                Fr::from_bigint(x).unwrap()
-            },
-            _ => unimplemented!("uno operator {:?} not implemented for Montgomery", self),
-        }
-    }
 }
 
 impl From<&UnoOperation> for crate::proto::UnoOp {
@@ -305,12 +247,6 @@ impl TresOperation {
             TresOperation::TernCond => if a == U256::ZERO { c } else { b },
         }
     }
-
-    pub fn eval_fr(&self, a: Fr, b: Fr, c: Fr) -> Fr {
-        match self {
-            TresOperation::TernCond => if a.is_zero() { c } else { b },
-        }
-    }
 }
 
 impl From<&TresOperation> for crate::proto::TresOp {
@@ -327,6 +263,7 @@ pub enum Node {
     Unknown,
     Input(usize),
     Constant(U256),
+    Constant2(usize),
     #[serde(serialize_with = "ark_se", deserialize_with = "ark_de")]
     MontConstant(Fr),
     UnoOp(UnoOperation, usize),
@@ -348,6 +285,7 @@ impl Nodes {
         match me {
             Node::Unknown => panic!("Unknown node"),
             Node::Constant(v) => Ok(*v),
+            Node::Constant2(_) => todo!(),
             Node::UnoOp(op, a) => {
                 Ok(op.eval(
                     self.to_const(NodeIdx(*a))?))
@@ -464,6 +402,7 @@ pub fn evaluate(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<U256>
         let value = match node {
             Node::Unknown => panic!("Unknown node"),
             Node::Constant(c) => c,
+            Node::Constant2(_) => todo!(),
             Node::MontConstant(c) => fr_to_u256(&c),
             Node::Input(i) => inputs[i],
             Node::Op(op, a, b) => op.eval(values[a], values[b]),
@@ -478,7 +417,72 @@ pub fn evaluate(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<U256>
     r
 }
 
-pub fn evaluate_parallel(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<Fr> {
+pub fn evaluate2<T: FieldOps, F: FieldOperations<Type = T>>(
+    ff: F, nodes: &[Node], inputs: &[T], outputs: &[usize],
+    constants: &[T]) -> Vec<T>
+where Vec<T>: FromIterator<<F as FieldOperations>::Type>
+{
+    // assert_valid(nodes);
+
+    let start = Instant::now();
+    // Evaluate the graph.
+    let mut values = Vec::with_capacity(nodes.len());
+    for &node in nodes.iter() {
+        let value = match node {
+            Node::Unknown => panic!("Unknown node"),
+            Node::Constant(_) => todo!("remove embedded constants"),
+            Node::Constant2(i) => constants[i],
+            Node::MontConstant(_) => todo!("remove usage of montgomery constants"),
+            Node::Input(i) => inputs[i],
+            Node::Op(op, a, b) => {
+                match op {
+                    Operation::Mul => ff.mul(values[a], values[b]),
+                    Operation::Div => ff.div(values[a], values[b]),
+                    Operation::Add => ff.add(values[a], values[b]),
+                    Operation::Sub => ff.sub(values[a], values[b]),
+                    Operation::Pow => ff.pow(values[a], values[b]),
+                    Operation::Idiv => ff.idiv(values[a], values[b]),
+                    Operation::Mod => ff.modulo(values[a], values[b]),
+                    Operation::Eq => ff.eq(values[a], values[b]),
+                    Operation::Neq => ff.neq(values[a], values[b]),
+                    Operation::Lt => ff.lt(values[a], values[b]),
+                    Operation::Gt => ff.gt(values[a], values[b]),
+                    Operation::Leq => ff.lte(values[a], values[b]),
+                    Operation::Geq => ff.gte(values[a], values[b]),
+                    Operation::Land => ff.land(values[a], values[b]),
+                    Operation::Lor => ff.lor(values[a], values[b]),
+                    Operation::Shl => ff.shl(values[a], values[b]),
+                    Operation::Shr => ff.shr(values[a], values[b]),
+                    Operation::Bor => ff.bor(values[a], values[b]),
+                    Operation::Band => ff.band(values[a], values[b]),
+                    Operation::Bxor => ff.bxor(values[a], values[b]),
+                }
+            },
+            Node::UnoOp(op, a) => {
+                match op {
+                    UnoOperation::Neg => ff.neg(values[a]),
+                    UnoOperation::Id => values[a],
+                    UnoOperation::Lnot => ff.lnot(values[a]),
+                    UnoOperation::Bnot => ff.bnot(values[a]),
+                }
+            },
+            Node::TresOp(op, a, b, c) => {
+                match op {
+                    TresOperation::TernCond => {
+                        if values[a].is_zero() { values[c] } else { values[b] }
+                    },
+                }
+            },
+        };
+        values.push(value);
+    }
+
+    let r = outputs.iter().map(|&i| values[i]).collect();
+    println!("generic typed graph calculated in {:?}", start.elapsed());
+    r
+}
+
+pub fn evaluate_parallel(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<U256> {
     let start = Instant::now();
     let inputs: Arc<[U256]> = Arc::from(inputs);
     println!("total nodes: {}", nodes.len());
@@ -515,17 +519,18 @@ pub fn evaluate_parallel(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> 
             for &node in nodes.iter() {
                 let value = match node {
                     Node::Unknown => panic!("Unknown node"),
-                    Node::Constant(c) => u256_to_fr(&c),
-                    Node::MontConstant(c) => c,
-                    Node::Input(i) => u256_to_fr(&inputs[i]),
-                    Node::Op(op, a, b) => op.eval_fr(values[a], values[b]),
-                    Node::UnoOp(op, a) => op.eval_fr(values[a]),
-                    Node::TresOp(op, a, b, c) => op.eval_fr(values[a], values[b], values[c]),
+                    Node::Constant(c) => c,
+                    Node::Constant2(_) => todo!(),
+                    Node::MontConstant(_) => todo!("remove montgomery constants"),
+                    Node::Input(i) => inputs[i],
+                    Node::Op(op, a, b) => op.eval(values[a], values[b]),
+                    Node::UnoOp(op, a) => op.eval(values[a]),
+                    Node::TresOp(op, a, b, c) => op.eval(values[a], values[b], values[c]),
                 };
                 values.push(value);
             }
 
-            let witness_signals: Vec<Fr> = outputs.iter().map(|&i| values[i]).collect();
+            let witness_signals: Vec<U256> = outputs.iter().map(|&i| values[i]).collect();
             tx.send((i, witness_signals)).unwrap();
         });
         handles.push(handle);
@@ -672,6 +677,8 @@ fn random_eval(nodes: &mut [Node]) -> Vec<U256> {
             // Constants evaluate to themselves
             Node::Constant(c) => *c,
 
+            Node::Constant2(_) => todo!(),
+
             Node::MontConstant(_) => unimplemented!("should not be used"),
 
             // Algebraic Ops are evaluated directly
@@ -760,101 +767,6 @@ pub fn constants(nodes: &mut [Node]) {
     eprintln!("Found {} constants", constants);
 }
 
-fn shl(a: Fr, b: Fr) -> Fr {
-    if b.is_zero() {
-        return a;
-    }
-
-    if b.cmp(&Fr::from(Fr::MODULUS_BIT_SIZE)).is_ge() {
-        return Fr::zero();
-    }
-
-    let n = b.into_bigint().0[0] as u32;
-    Fr::from_bigint(a.into_bigint() << n).unwrap()
-}
-
-fn shr(a: Fr, b: Fr) -> Fr {
-    if b.is_zero() {
-        return a;
-    }
-
-    match b.cmp(&Fr::from(254u64)) {
-        Ordering::Equal  => {return Fr::zero()},
-        Ordering::Greater => {return Fr::zero()},
-        _ => (),
-    };
-
-    let mut n = b.into_bigint().to_bytes_le()[0];
-    let mut result = a.into_bigint();
-    let c = result.as_mut();
-    while n >= 64 {
-        for i in 0..3 {
-            c[i as usize] = c[(i + 1) as usize];
-        }
-        c[3] = 0;
-        n -= 64;
-    }
-
-    if n == 0 {
-        return Fr::from_bigint(result).unwrap();
-    }
-
-    let mask:u64 = (1<<n) - 1;
-    let mut carrier: u64 = c[3] & mask;
-    c[3] >>= n;
-    for i in (0..3).rev() {
-        let new_carrier = c[i] & mask;
-        c[i] = (c[i] >> n) | (carrier << (64 - n));
-        carrier = new_carrier;
-    }
-    Fr::from_bigint(result).unwrap()
-}
-
-fn bit_and(a: Fr, b: Fr) -> Fr {
-    let a = a.into_bigint();
-    let b = b.into_bigint();
-    let mut c: [u64; 4] = [0; 4];
-    for (i, item) in c.iter_mut().enumerate() {
-        *item = a.0[i] & b.0[i];
-    }
-    let mut d: BigInt<4> = BigInt::new(c);
-    if d > Fr::MODULUS {
-        d.sub_with_borrow(&Fr::MODULUS);
-    }
-
-    Fr::from_bigint(d).unwrap()
-}
-
-fn bit_or(a: Fr, b: Fr) -> Fr {
-    let a = a.into_bigint();
-    let b = b.into_bigint();
-    let mut c: [u64; 4] = [0; 4];
-    for (i, item) in c.iter_mut().enumerate() {
-        *item = a.0[i] | b.0[i];
-    }
-    let mut d: BigInt<4> = BigInt::new(c);
-    if d > Fr::MODULUS {
-        d.sub_with_borrow(&Fr::MODULUS);
-    }
-
-    Fr::from_bigint(d).unwrap()
-}
-
-fn bit_xor(a: Fr, b: Fr) -> Fr {
-    let a = a.into_bigint();
-    let b = b.into_bigint();
-    let mut c: [u64; 4] = [0; 4];
-    for (i, item) in c.iter_mut().enumerate() {
-        *item = a.0[i] ^ b.0[i];
-    }
-    let mut d: BigInt<4> = BigInt::new(c);
-    if d > Fr::MODULUS {
-        d.sub_with_borrow(&Fr::MODULUS);
-    }
-
-    Fr::from_bigint(d).unwrap()
-}
-
 // M / 2
 const halfM: U256 = uint!(10944121435919637611123202872628637544274182200208017171849102093287904247808_U256);
 
@@ -920,55 +832,46 @@ mod tests {
     use std::ops::{Div};
     use super::*;
     use ruint::{uint};
-    use std::str::FromStr;
-
-    #[test]
-    fn test_ok() {
-        let a= Fr::from(4u64);
-        let b= Fr::from(2u64);
-        let c = shl(a, b);
-        assert_eq!(c.cmp(&Fr::from(16u64)), Ordering::Equal)
-    }
 
     #[test]
     fn test_div() {
         assert_eq!(
-            Operation::Div.eval_fr(Fr::from(2u64), Fr::from(3u64)),
-            Fr::from_str("7296080957279758407415468581752425029516121466805344781232734728858602831873").unwrap());
+            Operation::Div.eval(U256::from(2u64), U256::from(3u64)),
+            U256::from_str_radix("7296080957279758407415468581752425029516121466805344781232734728858602831873", 10).unwrap());
 
         assert_eq!(
-            Operation::Div.eval_fr(Fr::from(6u64), Fr::from(2u64)),
-            Fr::from_str("3").unwrap());
+            Operation::Div.eval(U256::from(6u64), U256::from(2u64)),
+            U256::from_str_radix("3", 10).unwrap());
 
         assert_eq!(
-            Operation::Div.eval_fr(Fr::from(7u64), Fr::from(2u64)),
-            Fr::from_str("10944121435919637611123202872628637544274182200208017171849102093287904247812").unwrap());
+            Operation::Div.eval(U256::from(7u64), U256::from(2u64)),
+            U256::from_str_radix("10944121435919637611123202872628637544274182200208017171849102093287904247812", 10).unwrap());
     }
 
     #[test]
     fn test_idiv() {
         assert_eq!(
-            Operation::Idiv.eval_fr(Fr::from(2u64), Fr::from(3u64)),
-            Fr::from_str("0").unwrap());
+            Operation::Idiv.eval(U256::from(2u64), U256::from(3u64)),
+            U256::from(0));
 
         assert_eq!(
-            Operation::Idiv.eval_fr(Fr::from(6u64), Fr::from(2u64)),
-            Fr::from_str("3").unwrap());
+            Operation::Idiv.eval(U256::from(6u64), U256::from(2u64)),
+            U256::from(3));
 
         assert_eq!(
-            Operation::Idiv.eval_fr(Fr::from(7u64), Fr::from(2u64)),
-            Fr::from_str("3").unwrap());
+            Operation::Idiv.eval(U256::from(7u64), U256::from(2u64)),
+            U256::from(3));
     }
 
     #[test]
     fn test_fr_mod() {
         assert_eq!(
-            Operation::Mod.eval_fr(Fr::from(7u64), Fr::from(2u64)),
-            Fr::from_str("1").unwrap());
+            Operation::Mod.eval(U256::from(7u64), U256::from(2u64)),
+            U256::from(1));
 
         assert_eq!(
-            Operation::Mod.eval_fr(Fr::from(7u64), Fr::from(9u64)),
-            Fr::from_str("7").unwrap());
+            Operation::Mod.eval(U256::from(7u64), U256::from(9u64)),
+            U256::from(7));
     }
 
     #[test]
@@ -1051,14 +954,6 @@ mod tests {
         let c = Operation::Pow.eval(a, b);
         let want = uint!(6741803673964058984617537840767809723100020752467791363717299927390655464193_U256);
         assert_eq!(c, want);
-
-        let af = u256_to_fr(&a);
-        let bf = u256_to_fr(&b);
-
-        // let cf = af.pow(bf.into_bigint());
-        let cf = Operation::Pow.eval_fr(af, bf);
-        let wantf = u256_to_fr(&want);
-        assert_eq!(cf, wantf);
     }
 
     #[test]
@@ -1112,5 +1007,31 @@ mod tests {
         assert_eq!(
             uint!(0_U256),
             UnoOperation::Lnot.eval(uint!(115792089237316195423570985008687907853269984665640564039457584007913129639935_U256)));
+    }
+
+    #[test]
+    fn test_half() {
+        // let h = M.div(U256::from(2));
+        let h = M.wrapping_shr(1);
+        type BN254 = ruint::Uint<254, 4>;
+
+        let m = BN254::from_str_radix(
+            "21888242871839275222246405745257275088548364400416034343698204186575808495617",
+            10).unwrap();
+        let a = BN254::from_str_radix(
+            "18583076334226168172367231819260574371431472897769128993835383390508861945746",
+            10).unwrap();
+        let a = a.not();
+        // let mask = BN254::ZERO.not().shr(m.leading_zeros());
+        // let a = a & mask;
+        let a = if a >= m { a - m } else { a };
+
+        let want = BN254::from_str_radix(
+            "10364945975102880683525514432911402591886023268641012016029012611469420464237",
+            10
+        ).unwrap();
+        assert_eq!(want, a);
+
+        assert_eq!(h, halfM);
     }
 }
