@@ -192,7 +192,7 @@ fn calc_witness_typed<T: FieldOps>(
         inputs.as_bytes(), &nodes.ff)?;
     let inputs = create_inputs(&inputs, input_mapping)?;
     let result = evaluate(
-        &nodes.ff, &nodes.nodes, &inputs, &signals,
+        &nodes.ff, &nodes.nodes, &inputs, signals,
         &nodes.constants);
     Ok(result)
 }

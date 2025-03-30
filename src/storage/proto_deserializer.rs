@@ -28,7 +28,6 @@ pub fn deserialize_witnesscalc_graph_from_bytes(
     let mut br = WriteBackReader::new(r);
     let md: crate::proto::GraphMetadata = read_message(&mut br)?;
 
-    let outer_nodes: Box<dyn NodesInterface>;
     let (prime, curve_name) = if md.prime.is_none() {
         (
             U254::from_str(
@@ -45,7 +44,7 @@ pub fn deserialize_witnesscalc_graph_from_bytes(
         )
     };
 
-    match prime.bit_len() {
+    let outer_nodes: Box<dyn NodesInterface> = match prime.bit_len() {
         64 => {
             let prime = U64::from_le_bytes(
                 &<U254 as FieldOps>::to_le_bytes(&prime))
@@ -57,7 +56,7 @@ pub fn deserialize_witnesscalc_graph_from_bytes(
                 decode_node(&bytes[idx..idx+msg_len as usize], &mut nodes)?;
                 idx += msg_len as usize;
             }
-            outer_nodes = Box::new(nodes);
+            Box::new(nodes)
         }
         254 => {
             let mut nodes = Nodes::new(prime, curve_name);
@@ -67,14 +66,14 @@ pub fn deserialize_witnesscalc_graph_from_bytes(
                 decode_node(&bytes[idx..idx+msg_len as usize], &mut nodes)?;
                 idx += msg_len as usize;
             }
-            outer_nodes = Box::new(nodes);
+            Box::new(nodes)
         }
         _ => {
             return Err(Error::new(
                 ErrorKind::InvalidData,
                 format!("unknown prime {}", md.prime_str)));
         }
-    }
+    };
 
     let witness_signals = md.witness_signals
         .iter()

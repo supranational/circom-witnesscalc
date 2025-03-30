@@ -1917,7 +1917,7 @@ fn parse_args() -> Args {
         graph_file: graph_file.unwrap_or_else(|| { usage("missing graph file") }),
         link_libraries,
         print_debug,
-        prime: prime.unwrap_or_else(|| Prime::Bn128),
+        prime: prime.unwrap_or(Prime::Bn128),
         r1cs: r1cs_file,
     }
 }
@@ -1977,7 +1977,7 @@ fn main() {
         .unwrap();
 
     if let Some(r1cs_file) = &args.r1cs {
-        if let Err(_) = cw.r1cs(r1cs_file, custom_gates) {
+        if cw.r1cs(r1cs_file, custom_gates).is_err() {
             panic!(
                 "Could not write the output in the given path: {}",
                 r1cs_file);
@@ -2042,7 +2042,7 @@ fn build_graph<T: FieldOps + 'static>(
         vec![usize::MAX; circuit.c_producer.total_number_of_signals];
 
     let input_signals: InputSignalsInfo = init_input_signals(
-        &circuit, &mut nodes, &mut signal_node_idx);
+        circuit, &mut nodes, &mut signal_node_idx);
 
     // assert that template id is equal to index in templates list
     for (i, t) in circuit.templates.iter().enumerate() {

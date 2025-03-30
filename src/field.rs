@@ -182,15 +182,13 @@ impl FieldOps for U64 {
         if v.len() <= 8 {
             let mut bytes = [0u8; 8];
             // Copy available bytes
-            for i in 0..v.len() {
-                bytes[i] = v[i];
-            }
+            bytes[..v.len()].copy_from_slice(v);
             return Ok(U64(u64::from_le_bytes(bytes)));
         }
 
         // Input is longer than 8 bytes, check if extra bytes are all zeros
-        for i in 8..v.len() {
-            if v[i] != 0 {
+        for item in v.iter().skip(8) {
+            if *item != 0 {
                 return Err("Input value too large for U64".into());
             }
         }

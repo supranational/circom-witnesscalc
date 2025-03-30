@@ -401,8 +401,7 @@ pub fn deserialize_witnesscalc_graph(
         })
         .collect::<InputSignalsInfo>();
 
-    let outer_nodes: Box<dyn NodesInterface>;
-    if (md.prime.is_none() && md.prime_str.is_empty())
+    let outer_nodes: Box<dyn NodesInterface> = if (md.prime.is_none() && md.prime_str.is_empty())
         || md.prime_str == "bn128" {
 
         let prime = U254::from_str_radix(
@@ -429,12 +428,12 @@ pub fn deserialize_witnesscalc_graph(
                 }
             }
         }
-        outer_nodes = Box::new(nodes);
+        Box::new(nodes)
     } else {
         return Err(Error::new(
             ErrorKind::InvalidData,
             format!("unknown prime {}", md.prime_str)));
-    }
+    };
 
     Ok((outer_nodes, witness_signals, input_signals))
 }

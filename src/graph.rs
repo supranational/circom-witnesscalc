@@ -410,7 +410,7 @@ impl<T: FieldOps + 'static> Nodes<T> {
         idx: usize) -> Result<crate::proto::node::Node, NodeConstErr> {
 
         let n = self.nodes.get(idx)
-            .ok_or_else(|| NodeConstErr::EmptyNode(NodeIdx(idx)))?;
+            .ok_or(NodeConstErr::EmptyNode(NodeIdx(idx)))?;
         match n {
             Node::Unknown => panic!("unknown node"),
             Node::Input(i) => Ok(
@@ -481,6 +481,10 @@ impl<T: FieldOps + 'static> Nodes<T> {
         self.nodes.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
     pub fn prime(&self) -> T {
         self.ff.prime
     }
@@ -498,7 +502,7 @@ impl<T: FieldOps + 'static> NodesInterface for Nodes<T> {
     }
 
     fn push(&mut self, n: Node) -> NodeIdx {
-        let n = self.try_into_constant(&n).unwrap_or_else(|_| n);
+        let n = self.try_into_constant(&n).unwrap_or(n);
         self.push_noopt(n)
     }
 
@@ -871,7 +875,7 @@ fn rnd<T: FieldOps>(ff: &Field<T>, rng: &mut ThreadRng) -> T {
 
     let bits = T::BITS % 8;
     if bits != 0 {
-        let mask = 1u16 << bits - 1;
+        let mask = (1u16 << bits) - 1;
         let last_idx = bs.len() - 1;
         bs[last_idx] &= mask as u8;
     }
