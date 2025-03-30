@@ -121,6 +121,7 @@ function test_circuit() {
 	# run commands from the working directory
 	pushd "$workdir" > /dev/null
 
+#	circom "${include_args[@]}" --prime grumpkin --r1cs --wasm "$circuit_path"
 	circom "${include_args[@]}" --r1cs --wasm "$circuit_path"
 	local r1cs_md5=$(openssl dgst -hex -md5 "${r1cs_path}" | awk '{print $2}')
 	local zkey_path="${circuit_name}_${r1cs_md5}_final.zkey"

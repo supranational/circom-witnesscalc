@@ -1,17 +1,21 @@
 use std::{collections::HashMap, ops::{BitAnd, Shl, Shr}, thread};
+use std::any::Any;
+use std::collections::hash_map::Entry;
 use std::error::Error;
-use std::ops::{BitOr, BitXor, Deref, Not};
+use std::fmt::Debug;
+use std::ops::{BitOr, BitXor, Not};
 use std::sync::{mpsc, Arc};
 use std::time::Instant;
-use crate::field::{FieldOperations, FieldOps, M};
+use crate::field::{Field, FieldOperations, FieldOps, M};
 use ark_bn254::Fr;
 use ark_ff::{BigInt, PrimeField};
-use rand::Rng;
+use rand::{RngCore};
 use ruint::aliases::U256;
 use serde::{Deserialize, Serialize};
 
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
 use compiler::intermediate_representation::ir_interface::OperatorType;
+use rand::prelude::ThreadRng;
 use ruint::uint;
 
 fn ark_se<S, A: CanonicalSerialize>(a: &A, s: S) -> Result<S::Ok, S::Error>
@@ -271,66 +275,55 @@ pub enum Node {
     TresOp(TresOperation, usize, usize, usize),
 }
 
-impl Node {
-    pub fn to_const(&self, nodes: &Nodes) -> Result<U256, NodeConstErr> {
-        match self {
-            Node::Constant(v) => Ok(*v),
-            Node::UnoOp(op, a) => {
-                if let Node::Constant(c) = nodes[*a] {
-                    Ok(op.eval(c))
-                } else {
-                    Err(NodeConstErr::NotConst)
-                }
-            }
-            Node::Op(op, a, b) => {
-                if let (Node::Constant(ca), Node::Constant(cb)) = (nodes[*a], nodes[*b]) {
-                    Ok(op.eval(ca, cb))
-                } else {
-                    Err(NodeConstErr::NotConst)
-                }
-            }
-            Node::TresOp(op, a, b, c) => {
-                if let (Node::Constant(ca), Node::Constant(cb), Node::Constant(cc)) = (nodes[*a], nodes[*b], nodes[*c]) {
-                    Ok(op.eval(ca, cb, cc))
-                } else {
-                    Err(NodeConstErr::NotConst)
-                }
-            }
-            _ =>  Err(NodeConstErr::InputSignal),
+pub trait NodesInterface: Any {
+    fn push_noopt(&mut self, n: Node) -> NodeIdx;
+    fn push(&mut self, n: Node) -> NodeIdx;
+    fn get_inputs_size(&self) -> usize;
+    fn as_any(&self) -> &dyn Any;
+}
+
+pub struct Nodes<T: FieldOps> {
+    prime_str: String,
+    // TODO maybe remove pub
+    pub ff: Field<T>,
+    // TODO remove pub
+    pub nodes: Vec<Node>,
+    pub constants: Vec<T>,
+    constants_idx: HashMap<T, usize>,
+}
+
+impl<T: FieldOps + 'static> Nodes<T> {
+    pub fn new(prime: T, prime_str: &str) -> Self {
+        let ff = Field::new(prime);
+        Nodes {
+            ff,
+            nodes: Vec::new(),
+            constants: Vec::new(),
+            constants_idx: HashMap::new(),
+            prime_str: prime_str.to_string(),
         }
     }
 
-}
-
-// TODO remove pub from Vec<Node>
-#[derive(Default)]
-pub struct Nodes(pub Vec<Node>);
-
-impl Nodes {
-    pub fn new() -> Self {
-        Nodes(Vec::new())
-    }
-
-    pub fn to_const(&self, idx: NodeIdx) -> Result<U256, NodeConstErr> {
-        let me = self.0.get(idx.0).ok_or(NodeConstErr::EmptyNode(idx))?;
+    pub fn to_const_recursive(&self, idx: NodeIdx) -> Result<T, NodeConstErr> {
+        let me = self.nodes.get(idx.0).ok_or(NodeConstErr::EmptyNode(idx))?;
         match me {
             Node::Unknown => panic!("Unknown node"),
-            Node::Constant(v) => Ok(*v),
-            Node::Constant2(_) => todo!(),
+            Node::Constant(_) => todo!("remove this"),
+            Node::Constant2(const_idx) => Ok(self.constants[*const_idx]),
             Node::UnoOp(op, a) => {
-                Ok(op.eval(
-                    self.to_const(NodeIdx(*a))?))
+                Ok((&self.ff).op_uno(*op,
+                    self.to_const_recursive(NodeIdx(*a))?))
             }
             Node::Op(op, a, b) => {
-                Ok(op.eval(
-                    self.to_const(NodeIdx(*a))?,
-                    self.to_const(NodeIdx(*b))?))
+                Ok((&self.ff).op_duo(*op,
+                    self.to_const_recursive(NodeIdx(*a))?,
+                    self.to_const_recursive(NodeIdx(*b))?))
             }
             Node::TresOp(op, a, b, c) => {
-                Ok(op.eval(
-                    self.to_const(NodeIdx(*a))?,
-                    self.to_const(NodeIdx(*b))?,
-                    self.to_const(NodeIdx(*c))?))
+                Ok((&self.ff).op_tres(*op,
+                    self.to_const_recursive(NodeIdx(*a))?,
+                    self.to_const_recursive(NodeIdx(*b))?,
+                    self.to_const_recursive(NodeIdx(*c))?))
             }
             Node::Input(_) => Err(NodeConstErr::InputSignal),
             Node::MontConstant(_) => {
@@ -339,25 +332,234 @@ impl Nodes {
         }
     }
 
-    pub fn push(&mut self, n: Node) -> NodeIdx {
-        let n = match n.to_const(self) {
-            Ok(v) => Node::Constant(v),
-            Err(_) => n,
-        };
-        self.0.push(n);
-        NodeIdx(self.0.len() - 1)
+    fn const_node_from_value(&mut self, v: T) -> Node {
+        match self.constants_idx.entry(v) {
+            Entry::Occupied(e) => {
+                Node::Constant2(*e.get())
+            }
+            Entry::Vacant(e) => {
+                self.constants.push(v);
+                let idx = self.constants.len() - 1;
+                e.insert(idx);
+                Node::Constant2(idx)
+            }
+        }
+    }
+
+    // try to return a constant node if operands are constant, otherwise return
+    // the unmodified node
+    fn try_into_constant(&mut self, n: &Node) -> Result<Node, NodeConstErr> {
+        match n {
+            Node::Unknown => panic!("Unknown node"),
+            Node::Constant(..) => todo!("remove this"),
+            Node::Constant2(c_idx) => Ok(Node::Constant2(*c_idx)),
+            Node::UnoOp(op, a) => {
+                if let Node::Constant2(a_idx) = self.nodes[*a] {
+                    let v = (&self.ff).op_uno(*op, self.constants[a_idx]);
+                    Ok(self.const_node_from_value(v))
+                } else {
+                    Err(NodeConstErr::NotConst)
+                }
+            }
+            Node::Op(op, a, b) => {
+                if let (
+                    Node::Constant2(a_idx),
+                    Node::Constant2(b_idx)) = (
+                    self.nodes[*a],
+                    self.nodes[*b]) {
+
+                    let v = (&self.ff).op_duo(*op, self.constants[a_idx], self.constants[b_idx]);
+                    Ok(self.const_node_from_value(v))
+                } else {
+                    Err(NodeConstErr::NotConst)
+                }
+            }
+            Node::TresOp(op, a, b, c) => {
+                if let (
+                    Node::Constant2(a_idx),
+                    Node::Constant2(b_idx),
+                    Node::Constant2(c_idx)) = (
+                    self.nodes[*a],
+                    self.nodes[*b],
+                    self.nodes[*c]) {
+
+                    let v = (&self.ff).op_tres(
+                        *op, self.constants[a_idx], self.constants[b_idx],
+                        self.constants[c_idx]);
+                    Ok(self.const_node_from_value(v))
+                } else {
+                    Err(NodeConstErr::NotConst)
+                }
+            }
+            Node::Input(_) => Err(NodeConstErr::InputSignal),
+            Node::MontConstant(_) => todo!("remove this"),        }
+    }
+
+    pub fn push_constant(&mut self, v: T) -> NodeIdx {
+        let n = self.const_node_from_value(v);
+        self.nodes.push(n);
+        NodeIdx(self.nodes.len() - 1)
     }
 
     pub fn get(&self, idx: NodeIdx) -> Option<&Node> {
-        self.0.get(idx.0)
+        self.nodes.get(idx.0)
+    }
+
+    pub fn to_proto(
+        &self,
+        idx: usize) -> Result<crate::proto::node::Node, NodeConstErr> {
+
+        let n = self.nodes.get(idx)
+            .ok_or_else(|| NodeConstErr::EmptyNode(NodeIdx(idx)))?;
+        match n {
+            Node::Unknown => panic!("unknown node"),
+            Node::Input(i) => Ok(
+                crate::proto::node::Node::Input (
+                    crate::proto::InputNode { idx: *i as u32 })),
+            Node::Constant(_) => todo!("remove constant node"),
+            Node::Constant2(idx) => {
+                let c = self.constants[*idx];
+                let i = crate::proto::BigUInt { value_le: c.to_le_bytes() };
+                Ok(crate::proto::node::Node::Constant(
+                    crate::proto::ConstantNode { value: Some(i) }))
+            },
+            Node::MontConstant(_) => todo!("remove mont constant node"),
+            Node::UnoOp(op, a) => Ok(
+                crate::proto::node::Node::UnoOp(
+                    crate::proto::UnoOpNode {
+                        op: crate::proto::UnoOp::from(op) as i32,
+                        a_idx: *a as u32 })
+            ),
+            Node::Op(op, a, b) => Ok(
+                crate::proto::node::Node::DuoOp(
+                    crate::proto::DuoOpNode {
+                        op: crate::proto::DuoOp::from(op) as i32,
+                        a_idx: *a as u32,
+                        b_idx: *b as u32 })),
+            Node::TresOp(op, a, b, c) => Ok(
+                crate::proto::node::Node::TresOp(
+                    crate::proto::TresOpNode {
+                        op: crate::proto::TresOp::from(op) as i32,
+                        a_idx: *a as u32,
+                        b_idx: *b as u32,
+                        c_idx: *c as u32 })),
+        }
+    }
+
+    pub fn push_proto(&mut self, n: &crate::proto::node::Node) {
+        match n {
+            crate::proto::node::Node::Input(n2) => {
+                let idx: usize = n2.idx.try_into().unwrap();
+                self.push_noopt(Node::Input(idx));
+            },
+            crate::proto::node::Node::Constant(n2) => {
+                let c = (&self.ff)
+                    .parse_le_bytes(&n2.value.as_ref().unwrap().value_le)
+                    .unwrap();
+                self.push_constant(c);
+            },
+            crate::proto::node::Node::UnoOp(n2) => {
+                let op = crate::proto::UnoOp::try_from(n2.op).unwrap();
+                self.push_noopt(Node::UnoOp(op.into(), n2.a_idx as usize));
+            },
+            crate::proto::node::Node::DuoOp(n2) => {
+                let op = crate::proto::DuoOp::try_from(n2.op).unwrap();
+                self.push_noopt(
+                    Node::Op(op.into(), n2.a_idx as usize, n2.b_idx as usize));
+            },
+            crate::proto::node::Node::TresOp(n2) => {
+                let op = crate::proto::TresOp::try_from(n2.op).unwrap();
+                self.push_noopt(
+                    Node::TresOp(
+                        op.into(), n2.a_idx as usize, n2.b_idx as usize,
+                        n2.c_idx as usize));
+            },
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn prime(&self) -> T {
+        self.ff.prime
+    }
+
+    pub fn prime_str(&self) -> String {
+        self.prime_str.clone()
     }
 }
 
-impl Deref for Nodes {
-    type Target = Vec<Node>;
+impl<T: FieldOps + 'static> NodesInterface for Nodes<T> {
+    // push without optimization
+    fn push_noopt(&mut self, n: Node) -> NodeIdx {
+        self.nodes.push(n);
+        NodeIdx(self.nodes.len() - 1)
+    }
 
-    fn deref(&self) -> &Self::Target {
-        &self.0
+    fn push(&mut self, n: Node) -> NodeIdx {
+        let n = self.try_into_constant(&n).unwrap_or_else(|_| n);
+        self.push_noopt(n)
+    }
+
+    fn get_inputs_size(&self) -> usize {
+        let mut start = false;
+        let mut max_index = 0usize;
+        for &node in self.nodes.iter() {
+            if let Node::Input(i) = node {
+                if i > max_index {
+                    max_index = i;
+                }
+                start = true
+            } else if start {
+                break;
+            }
+        }
+        max_index + 1
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[cfg(test)]
+impl<T: FieldOps> PartialEq for Nodes<T> {
+    fn eq(&self, other: &Self) -> bool {
+        if self.nodes.len() != other.nodes.len() {
+            return false;
+        }
+        self.nodes.iter().zip(other.nodes.iter()).all(|(a, b)| {
+            match (a, b) {
+                (Node::Unknown, Node::Unknown) => true,
+                (Node::Input(a), Node::Input(b)) => a == b,
+                (Node::Constant(_), Node::Constant(_)) => todo!("remove this"),
+                (Node::Constant2(a), Node::Constant2(b)) => self.constants[*a] == self.constants[*b],
+                (Node::MontConstant(_), Node::MontConstant(_)) => todo!("remove this"),
+                (Node::UnoOp(a, b), Node::UnoOp(c, d)) => a == c && b == d,
+                (Node::Op(a, b, c), Node::Op(d, e, f)) => a == d && b == e && c == f,
+                (Node::TresOp(a, b, c, d), Node::TresOp(e, f, g, h)) => a == e && b == f && c == g && d == h,
+                _ => false,
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+impl<T: FieldOps> Debug for Nodes<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Nodes {{")?;
+        for (i, n) in self.nodes.iter().enumerate() {
+            if let Node::Constant2(c_idx) = *n {
+                let bs = self.constants[c_idx].to_le_bytes();
+                let n = U256::from_le_slice(&bs);
+                writeln!(f, "    {}, Constant({})", i, n)?;
+            } else {
+                writeln!(f, "    {}, {:?}", i, n)?;
+            }
+        }
+        writeln!(f, "}}")?;
+        Ok(())
     }
 }
 
@@ -423,40 +625,15 @@ fn assert_valid(nodes: &[Node]) {
     }
 }
 
-pub fn optimize(nodes: &mut Vec<Node>, outputs: &mut [usize]) {
-    tree_shake(nodes, outputs);
+pub fn optimize<T: FieldOps + 'static>(nodes: &mut Nodes<T>, outputs: &mut [usize]) {
+    tree_shake(&mut nodes.nodes, outputs);
     propagate(nodes);
     value_numbering(nodes, outputs);
     constants(nodes);
-    tree_shake(nodes, outputs);
+    tree_shake(&mut nodes.nodes, outputs);
 }
 
-pub fn evaluate(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<U256> {
-    // assert_valid(nodes);
-
-    let start = Instant::now();
-    // Evaluate the graph.
-    let mut values = Vec::with_capacity(nodes.len());
-    for &node in nodes.iter() {
-        let value = match node {
-            Node::Unknown => panic!("Unknown node"),
-            Node::Constant(c) => c,
-            Node::Constant2(_) => todo!(),
-            Node::MontConstant(c) => fr_to_u256(&c),
-            Node::Input(i) => inputs[i],
-            Node::Op(op, a, b) => op.eval(values[a], values[b]),
-            Node::UnoOp(op, a) => op.eval(values[a]),
-            Node::TresOp(op, a, b, c) => op.eval(values[a], values[b], values[c]),
-        };
-        values.push(value);
-    }
-
-    let r = outputs.iter().map(|&i| values[i]).collect();
-    println!("graph calculated in {:?}", start.elapsed());
-    r
-}
-
-pub fn evaluate2<T: FieldOps, F: FieldOperations<Type = T>>(
+pub fn evaluate<T: FieldOps, F: FieldOperations<Type = T>>(
     ff: F, nodes: &[Node], inputs: &[T], outputs: &[usize],
     constants: &[T]) -> Vec<T>
 where Vec<T>: FromIterator<<F as FieldOperations>::Type>
@@ -474,36 +651,10 @@ where Vec<T>: FromIterator<<F as FieldOperations>::Type>
             Node::MontConstant(_) => todo!("remove usage of montgomery constants"),
             Node::Input(i) => inputs[i],
             Node::Op(op, a, b) => {
-                match op {
-                    Operation::Mul => ff.mul(values[a], values[b]),
-                    Operation::Div => ff.div(values[a], values[b]),
-                    Operation::Add => ff.add(values[a], values[b]),
-                    Operation::Sub => ff.sub(values[a], values[b]),
-                    Operation::Pow => ff.pow(values[a], values[b]),
-                    Operation::Idiv => ff.idiv(values[a], values[b]),
-                    Operation::Mod => ff.modulo(values[a], values[b]),
-                    Operation::Eq => ff.eq(values[a], values[b]),
-                    Operation::Neq => ff.neq(values[a], values[b]),
-                    Operation::Lt => ff.lt(values[a], values[b]),
-                    Operation::Gt => ff.gt(values[a], values[b]),
-                    Operation::Leq => ff.lte(values[a], values[b]),
-                    Operation::Geq => ff.gte(values[a], values[b]),
-                    Operation::Land => ff.land(values[a], values[b]),
-                    Operation::Lor => ff.lor(values[a], values[b]),
-                    Operation::Shl => ff.shl(values[a], values[b]),
-                    Operation::Shr => ff.shr(values[a], values[b]),
-                    Operation::Bor => ff.bor(values[a], values[b]),
-                    Operation::Band => ff.band(values[a], values[b]),
-                    Operation::Bxor => ff.bxor(values[a], values[b]),
-                }
+                ff.op_duo(op, values[a], values[b])
             },
             Node::UnoOp(op, a) => {
-                match op {
-                    UnoOperation::Neg => ff.neg(values[a]),
-                    UnoOperation::Id => values[a],
-                    UnoOperation::Lnot => ff.lnot(values[a]),
-                    UnoOperation::Bnot => ff.bnot(values[a]),
-                }
+                ff.op_uno(op, values[a])
             },
             Node::TresOp(op, a, b, c) => {
                 match op {
@@ -594,13 +745,17 @@ pub fn evaluate_parallel(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> 
 }
 
 /// Constant propagation
-pub fn propagate(nodes: &mut [Node]) {
-    assert_valid(nodes);
+pub fn propagate<T: FieldOps + 'static>(nodes: &mut Nodes<T>) {
+    assert_valid(&nodes.nodes);
     let mut constants = 0_usize;
     for i in 0..nodes.len() {
-        if let Node::Op(op, a, b) = nodes[i] {
-            if let (Node::Constant(va), Node::Constant(vb)) = (nodes[a], nodes[b]) {
-                nodes[i] = Node::Constant(op.eval(va, vb));
+        if let Node::Op(op, a, b) = nodes.nodes[i] {
+            if let (
+                Node::Constant2(va),
+                Node::Constant2(vb)) = (nodes.nodes[a], nodes.nodes[b]) {
+                let v = (&nodes.ff).op_duo(
+                    op, nodes.constants[va], nodes.constants[vb]);
+                nodes.nodes[i] = nodes.const_node_from_value(v);
                 constants += 1;
             } else if a == b {
                 // Not constant but equal
@@ -610,18 +765,27 @@ pub fn propagate(nodes: &mut [Node]) {
                     Neq | Lt | Gt => Some(false),
                     _ => None,
                 } {
-                    nodes[i] = Node::Constant(U256::from(c));
+                    let v = T::from_bool(c);
+                    nodes.nodes[i] = nodes.const_node_from_value(v);
                     constants += 1;
                 }
             }
-        } else if let Node::UnoOp(op, a) = nodes[i] {
-            if let Node::Constant(va) = nodes[a] {
-                nodes[i] = Node::Constant(op.eval(va));
+        } else if let Node::UnoOp(op, a) = nodes.nodes[i] {
+            if let Node::Constant2(va) = nodes.nodes[a] {
+                let v = (&nodes.ff).op_uno(op, nodes.constants[va]);
+                nodes.nodes[i] = nodes.const_node_from_value(v);
                 constants += 1;
             }
-        } else if let Node::TresOp(op, a, b, c) = nodes[i] {
-            if let (Node::Constant(va), Node::Constant(vb), Node::Constant(vc)) = (nodes[a], nodes[b], nodes[c]) {
-                nodes[i] = Node::Constant(op.eval(va, vb, vc));
+        } else if let Node::TresOp(op, a, b, c) = nodes.nodes[i] {
+            if let (
+                Node::Constant2(va), Node::Constant2(vb),
+                Node::Constant2(vc)) = (
+                nodes.nodes[a], nodes.nodes[b], nodes.nodes[c]) {
+
+                let v = (&nodes.ff).op_tres(
+                    op, nodes.constants[va], nodes.constants[vb],
+                    nodes.constants[vc]);
+                nodes.nodes[i] = nodes.const_node_from_value(v);
                 constants += 1;
             }
         }
@@ -700,43 +864,61 @@ pub fn tree_shake(nodes: &mut Vec<Node>, outputs: &mut [usize]) {
     eprintln!("Removed {removed} unused nodes");
 }
 
+fn rnd<T: FieldOps>(ff: &Field<T>, rng: &mut ThreadRng) -> T {
+    let x: usize = (T::BITS + 7) / 8;
+    let mut bs = vec![0u8; x];
+    rng.fill_bytes(&mut bs);
+
+    let bits = T::BITS % 8;
+    if bits != 0 {
+        let mask = 1u16 << bits - 1;
+        let last_idx = bs.len() - 1;
+        bs[last_idx] &= mask as u8;
+    }
+
+    ff.parse_le_bytes(&bs).unwrap()
+}
+
+
 /// Randomly evaluate the graph
-fn random_eval(nodes: &mut [Node]) -> Vec<U256> {
+fn random_eval<T: FieldOps + 'static>(nodes: &mut Nodes<T>) -> Vec<T> {
     let mut rng = rand::thread_rng();
     let mut values = Vec::with_capacity(nodes.len());
     let mut inputs = HashMap::new();
     let mut prfs = HashMap::new();
     let mut prfs_uno = HashMap::new();
     let mut prfs_tres = HashMap::new();
-    for node in nodes.iter() {
-        use Operation::*;
+    for node in nodes.nodes.iter() {
         let value = match node {
             Node::Unknown => panic!("Unknown node"),
 
             // Constants evaluate to themselves
-            Node::Constant(c) => *c,
+            Node::Constant(_) => todo!("remove me"),
 
-            Node::Constant2(_) => todo!(),
+            Node::Constant2(c_idx) => nodes.constants[*c_idx],
 
-            Node::MontConstant(_) => unimplemented!("should not be used"),
+            Node::MontConstant(_) => todo!("remove me"),
 
             // Algebraic Ops are evaluated directly
             // Since the field is large, by Swartz-Zippel if
             // two values are the same then they are likely algebraically equal.
-            Node::Op(op @ (Add | Sub | Mul), a, b) => op.eval(values[*a], values[*b]),
+            Node::Op(op @ (Operation::Add | Operation::Sub | Operation::Mul), a, b) => {
+                (&nodes.ff).op_duo(*op, values[*a], values[*b])
+            },
 
             // Input and non-algebraic ops are random functions
             // TODO: https://github.com/recmo/uint/issues/95 and use .gen_range(..M)
-            Node::Input(i) => *inputs.entry(*i).or_insert_with(|| rng.gen::<U256>() % M),
+            Node::Input(i) => *inputs.entry(*i)
+                .or_insert_with(|| rnd(&nodes.ff, &mut rng)),
             Node::Op(op, a, b) => *prfs
                 .entry((*op, values[*a], values[*b]))
-                .or_insert_with(|| rng.gen::<U256>() % M),
+                .or_insert_with(|| rnd(&nodes.ff, &mut rng)),
             Node::UnoOp(op, a) => *prfs_uno
                 .entry((*op, values[*a]))
-                .or_insert_with(|| rng.gen::<U256>() % M),
+                .or_insert_with(|| rnd(&nodes.ff, &mut rng)),
             Node::TresOp(op, a, b, c) => *prfs_tres
                 .entry((*op, values[*a], values[*b], values[*c]))
-                .or_insert_with(|| rng.gen::<U256>() % M),
+                .or_insert_with(|| rnd(&nodes.ff, &mut rng)),
         };
         values.push(value);
     }
@@ -744,8 +926,10 @@ fn random_eval(nodes: &mut [Node]) -> Vec<U256> {
 }
 
 /// Value numbering
-pub fn value_numbering(nodes: &mut [Node], outputs: &mut [usize]) {
-    assert_valid(nodes);
+pub fn value_numbering<T: FieldOps + 'static>(
+    nodes: &mut Nodes<T>, outputs: &mut [usize]) {
+
+    assert_valid(&nodes.nodes);
 
     // Evaluate the graph in random field elements.
     let values = random_eval(nodes);
@@ -763,7 +947,7 @@ pub fn value_numbering(nodes: &mut [Node], outputs: &mut [usize]) {
     }
 
     // Renumber references.
-    for node in nodes.iter_mut() {
+    for node in nodes.nodes.iter_mut() {
         if let Node::Op(_, a, b) = node {
             *a = renumber[*a];
             *b = renumber[*b];
@@ -785,8 +969,8 @@ pub fn value_numbering(nodes: &mut [Node], outputs: &mut [usize]) {
 }
 
 /// Probabilistic constant determination
-pub fn constants(nodes: &mut [Node]) {
-    assert_valid(nodes);
+pub fn constants<T: FieldOps + 'static>(nodes: &mut Nodes<T>) {
+    assert_valid(&nodes.nodes);
 
     // Evaluate the graph in random field elements.
     let values_a = random_eval(nodes);
@@ -795,11 +979,11 @@ pub fn constants(nodes: &mut [Node]) {
     // Find all nodes with the same value.
     let mut constants = 0;
     for i in 0..nodes.len() {
-        if let Node::Constant(_) = nodes[i] {
+        if let Node::Constant2(_) = nodes.nodes[i] {
             continue;
         }
         if values_a[i] == values_b[i] {
-            nodes[i] = Node::Constant(values_a[i]);
+            nodes.nodes[i] = nodes.const_node_from_value(values_a[i]);
             constants += 1;
         }
     }
@@ -871,6 +1055,20 @@ mod tests {
     use std::ops::{Div};
     use super::*;
     use ruint::{uint};
+    use crate::field::U254;
+
+    #[test]
+    fn test_ok() {
+        let prime = U254::from_str_radix(
+            "21888242871839275222246405745257275088548364400416034343698204186575808495617",
+            10).unwrap();
+        let ff = Field::new(prime);
+        let mut rng = rand::thread_rng();
+        let y = rnd(&ff, &mut rng);
+        // println!("{}", rnd::<U254>());
+        // let y = rng.gen::<[u8; 3]>();
+        println!("{:?}", y);
+    }
 
     #[test]
     fn test_div() {

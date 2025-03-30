@@ -37,6 +37,7 @@ constraint_generation = { git = "https://github.com/olomix/circom.git", branch =
 prost = "0.13.1"
 num-bigint = "0.4.6"
 num-traits = "0.2.19"
+anyhow = "1.0.97"
 
 [profile.release]
 opt-level = 3

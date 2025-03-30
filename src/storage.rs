@@ -7,7 +7,8 @@ use code_producers::c_elements::InputList;
 use code_producers::components::{IODef, TemplateInstanceIOMap};
 use prost::Message;
 use ruint::aliases::U256;
-use crate::graph::{Node, Operation, TresOperation, UnoOperation};
+use crate::field::{FieldOps, U254};
+use crate::graph::{Nodes, NodesInterface, Operation, TresOperation, UnoOperation};
 use crate::InputSignalsInfo;
 use crate::proto::SignalDescription;
 use crate::proto::vm::{IoDef, IoDefs};
@@ -25,85 +26,6 @@ const WITNESSCALC_GRAPH_MAGIC: &[u8] = b"wtns.graph.001";
 const WITNESSCALC_VM_MAGIC: &[u8] = b"wtns.vm.001";
 
 const MAX_VARINT_LENGTH: usize = 10;
-
-impl From<crate::proto::Node> for Node {
-    fn from(value: crate::proto::Node) -> Self {
-        match value.node.unwrap() {
-            crate::proto::node::Node::Input(input_node) => {
-                Node::Input(input_node.idx as usize)
-            }
-            crate::proto::node::Node::Constant(constant_node) => {
-                let i = constant_node.value.unwrap();
-                Node::Constant(U256::from_le_slice(i.value_le.as_slice()))
-            }
-            crate::proto::node::Node::UnoOp(uno_op_node) => {
-                let op = crate::proto::UnoOp::try_from(uno_op_node.op).unwrap();
-                Node::UnoOp(op.into(), uno_op_node.a_idx as usize)
-            }
-            crate::proto::node::Node::DuoOp(duo_op_node) => {
-                let op = crate::proto::DuoOp::try_from(duo_op_node.op).unwrap();
-                Node::Op(
-                    op.into(), duo_op_node.a_idx as usize,
-                    duo_op_node.b_idx as usize)
-            }
-            crate::proto::node::Node::TresOp(tres_op_node) => {
-                let op = crate::proto::TresOp::try_from(tres_op_node.op).unwrap();
-                Node::TresOp(
-                    op.into(), tres_op_node.a_idx as usize,
-                    tres_op_node.b_idx as usize, tres_op_node.c_idx as usize)
-            }
-        }
-    }
-}
-
-impl From<&Node> for crate::proto::node::Node {
-    fn from(node: &Node) -> Self {
-        match node {
-            Node::Unknown => {
-                panic!("Unknown node serialization not implemented");
-            }
-            Node::Input(i) => {
-                crate::proto::node::Node::Input (crate::proto::InputNode {
-                    idx: *i as u32
-                })
-            }
-            Node::Constant(c) => {
-                let i = crate::proto::BigUInt { value_le: c.to_le_bytes_vec() };
-                crate::proto::node::Node::Constant(
-                    crate::proto::ConstantNode { value: Some(i) })
-            }
-            Node::Constant2(_) => todo!(),
-            Node::UnoOp(op, a) => {
-                let op = crate::proto::UnoOp::from(op);
-                crate::proto::node::Node::UnoOp(
-                    crate::proto::UnoOpNode {
-                        op: op as i32,
-                        a_idx: *a as u32 })
-            }
-            Node::Op(op, a, b) => {
-                crate::proto::node::Node::DuoOp(
-                    crate::proto::DuoOpNode {
-                        op: crate::proto::DuoOp::from(op) as i32,
-                        a_idx: *a as u32,
-                        b_idx: *b as u32 })
-            }
-            Node::TresOp(op, a, b, c) => {
-                crate::proto::node::Node::TresOp(
-                    crate::proto::TresOpNode {
-                        op: crate::proto::TresOp::from(op) as i32,
-                        a_idx: *a as u32,
-                        b_idx: *b as u32,
-                        c_idx: *c as u32 })
-            }
-            Node::MontConstant(c) => {
-                let bi = Into::<num_bigint::BigUint>::into(*c);
-                let i = crate::proto::BigUInt { value_le: bi.to_bytes_le() };
-                crate::proto::node::Node::Constant(
-                    crate::proto::ConstantNode { value: Some(i) })
-            }
-        }
-    }
-}
 
 impl From<crate::proto::UnoOp> for UnoOperation {
     fn from(value: crate::proto::UnoOp) -> Self {
@@ -151,15 +73,15 @@ impl From<crate::proto::TresOp> for TresOperation {
     }
 }
 
-pub fn serialize_witnesscalc_graph<T: Write>(
-    mut w: T, nodes: &Vec<Node>, witness_signals: &[usize],
+pub fn serialize_witnesscalc_graph<W: Write, T: FieldOps + 'static>(
+    mut w: W, nodes: &Nodes<T>, witness_signals: &[usize],
     input_signals: &InputSignalsInfo) -> std::io::Result<()> {
 
     let mut ptr = 0usize;
     w.write_all(WITNESSCALC_GRAPH_MAGIC).unwrap();
     ptr += WITNESSCALC_GRAPH_MAGIC.len();
 
-    w.write_u64::<LittleEndian>(nodes.len() as u64)?;
+    w.write_u64::<LittleEndian>(nodes.nodes.len() as u64)?;
     ptr += 8;
 
     let metadata = crate::proto::GraphMetadata {
@@ -169,7 +91,11 @@ pub fn serialize_witnesscalc_graph<T: Write>(
                 offset: v.0 as u32,
                 len: v.1 as u32 };
             (k.clone(), sig)
-        }).collect()
+        }).collect(),
+        prime: Some(crate::proto::BigUInt {
+            value_le: nodes.prime().to_le_bytes()
+        }),
+        prime_str: nodes.prime_str(),
     };
 
     // capacity of buf should be enough to hold the largest message + 10 bytes
@@ -177,10 +103,9 @@ pub fn serialize_witnesscalc_graph<T: Write>(
     let mut buf =
         Vec::with_capacity(metadata.encoded_len() + MAX_VARINT_LENGTH);
 
-    for node in nodes {
-        let node_pb = crate::proto::Node{
-            node: Some(crate::proto::node::Node::from(node)),
-        };
+    for i in 0..nodes.len() {
+        let node = nodes.to_proto(i).unwrap();
+        let node_pb = crate::proto::Node{ node: Some(node) };
 
         assert_eq!(buf.len(), 0);
         node_pb.encode_length_delimited(&mut buf)?;
@@ -188,6 +113,7 @@ pub fn serialize_witnesscalc_graph<T: Write>(
 
         w.write_all(&buf)?;
         buf.clear();
+
     }
 
     metadata.encode_length_delimited(&mut buf)?;
@@ -441,7 +367,7 @@ pub fn deserialize_witnesscalc_vm(
 // for this function — deserialize_witnesscalc_graph_from_bytes, but it
 // implements custom protobuf deserialization and may be not fully compatible.
 pub fn deserialize_witnesscalc_graph(
-    r: impl Read) -> std::io::Result<(Vec<crate::graph::Node>, Vec<usize>, InputSignalsInfo)> {
+    r: impl Read) -> std::io::Result<(Box<dyn NodesInterface>, Vec<usize>, InputSignalsInfo)> {
 
     let mut br = WriteBackReader::new(r);
     let mut magic = [0u8; WITNESSCALC_GRAPH_MAGIC.len()];
@@ -454,11 +380,12 @@ pub fn deserialize_witnesscalc_graph(
     }
 
     let nodes_num = br.read_u64::<LittleEndian>()?;
-    let mut nodes = Vec::with_capacity(nodes_num as usize);
+    let mut nodes_pb = Vec::with_capacity(nodes_num as usize);
     for _ in 0..nodes_num {
         let n: crate::proto::Node = read_message(&mut br)?;
-        let n2: Node = n.into();
-        nodes.push(n2);
+        nodes_pb.push(n);
+        // let n2: Node = n.into();
+        // nodes.push(n2);
     }
 
     let md: crate::proto::GraphMetadata = read_message(&mut br)?;
@@ -474,7 +401,42 @@ pub fn deserialize_witnesscalc_graph(
         })
         .collect::<InputSignalsInfo>();
 
-    Ok((nodes, witness_signals, input_signals))
+    let outer_nodes: Box<dyn NodesInterface>;
+    if (md.prime.is_none() && md.prime_str.is_empty())
+        || md.prime_str == "bn128" {
+
+        let prime = U254::from_str_radix(
+            "21888242871839275222246405745257275088548364400416034343698204186575808495617",
+            10).unwrap();
+
+        if md.prime.is_some() {
+            let prime_pb = md.prime.unwrap();
+            let prime2 = U254::from_le_slice(prime_pb.value_le.as_slice());
+            if prime2 != prime {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!("prime mismatch, want {}, actual {}",
+                            prime, prime2)));
+            }
+        }
+
+        let mut nodes = Nodes::new(prime, "bn128");
+        for n in nodes_pb.iter() {
+            match &n.node {
+                Some(n) => nodes.push_proto(n),
+                None => {
+                    return Err(Error::new(ErrorKind::InvalidData, "empty node"));
+                }
+            }
+        }
+        outer_nodes = Box::new(nodes);
+    } else {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("unknown prime {}", md.prime_str)));
+    }
+
+    Ok((outer_nodes, witness_signals, input_signals))
 }
 
 struct WriteBackReader<R: Read> {
@@ -564,11 +526,10 @@ pub fn init_input_signals(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use crate::graph::{Operation, TresOperation, UnoOperation};
-    use core::str::FromStr;
+    use crate::graph::{Node, Operation, TresOperation, UnoOperation};
     use byteorder::ByteOrder;
     use crate::vm::ComponentTmpl;
-    use ark_bn254::Fr;
+    use crate::field::{FieldOperations, U254};
     use crate::storage::proto_deserializer::deserialize_witnesscalc_graph_from_bytes;
     use super::*;
 
@@ -602,49 +563,31 @@ mod tests {
 
     #[test]
     fn test_read_message_variant() {
-        let nodes = vec![
-            crate::proto::Node {
-                node: Some(
-                    crate::proto::node::Node::from(&Node::Input(0))
-                )
-            },
-            crate::proto::Node {
-                node: Some(
-                    crate::proto::node::Node::from(
-                        &Node::MontConstant(
-                            Fr::from_str("1").unwrap()))
-                )
-            },
-            crate::proto::Node {
-                node: Some(
-                    crate::proto::node::Node::from(&Node::UnoOp(UnoOperation::Id, 4))
-                )
-            },
-            crate::proto::Node {
-                node: Some(
-                    crate::proto::node::Node::from(&Node::Op(Operation::Mul, 5, 6))
-                )
-            },
-            crate::proto::Node {
-                node: Some(
-                    crate::proto::node::Node::from(&Node::TresOp(TresOperation::TernCond, 7, 8, 9))
-                )
-            },
-        ];
-
+        let prime = U254::from_str_radix(
+            "21888242871839275222246405745257275088548364400416034343698204186575808495617",
+            10).unwrap();
+        let mut nodes = Nodes::new(prime, "bn128");
+        nodes.push(Node::Input(0));
+        let c = (&nodes.ff).parse_str("1").unwrap();
+        nodes.push_constant(c);
+        nodes.push(Node::UnoOp(UnoOperation::Id, 1));
+        nodes.push(Node::Op(Operation::Add, 1, 2));
+        nodes.push(Node::TresOp(TresOperation::TernCond, 1, 2, 2));
+        let mut nodes_pb = Vec::new();
         let mut buf = Vec::new();
-        for n in &nodes {
-            n.encode_length_delimited(&mut buf).unwrap();
+        for i in 0..nodes.len() {
+            let n = nodes.to_proto(i).unwrap();
+            let node_pb = crate::proto::Node{ node: Some(n) };
+            node_pb.encode_length_delimited(&mut buf).unwrap();
+            nodes_pb.push(node_pb);
         }
-
         let mut nodes_got: Vec<crate::proto::Node> = Vec::new();
         let mut reader = std::io::Cursor::new(&buf);
         let mut rw = WriteBackReader::new(&mut reader);
         for _ in 0..nodes.len() {
             nodes_got.push(read_message(&mut rw).unwrap());
         }
-
-        assert_eq!(nodes, nodes_got);
+        assert_eq!(nodes_pb, nodes_got);
     }
 
     #[test]
@@ -678,14 +621,16 @@ mod tests {
 
     #[test]
     fn test_deserialize_inputs() {
-        let nodes = vec![
-            Node::Input(0),
-            Node::Constant(U256::from_str("1").unwrap()),
-            Node::Constant(U256::from_str("0").unwrap()),
-            Node::UnoOp(UnoOperation::Id, 4),
-            Node::Op(Operation::Mul, 5, 6),
-            Node::TresOp(TresOperation::TernCond, 7, 8, 9),
-        ];
+        let prime = <U254 as FieldOps>::from_str("21888242871839275222246405745257275088548364400416034343698204186575808495617").unwrap();
+        let mut nodes = Nodes::new(prime, "bn128");
+        nodes.push(Node::Input(0));
+        let c = (&nodes.ff).parse_str("1").unwrap();
+        nodes.push_constant(c);
+        let c = (&nodes.ff).parse_str("0").unwrap();
+        nodes.push_constant(c);
+        nodes.push_noopt(Node::UnoOp(UnoOperation::Id, 0));
+        nodes.push_noopt(Node::Op(Operation::Mul, 1, 2));
+        nodes.push_noopt(Node::TresOp(TresOperation::TernCond, 1, 2, 3));
 
         let witness_signals = vec![4, 1];
 
@@ -701,14 +646,24 @@ mod tests {
         let (nodes_res, witness_signals_res, input_signals_res) =
             deserialize_witnesscalc_graph(&mut reader).unwrap();
 
-        assert_eq!(nodes, nodes_res);
+        match nodes_res.as_any().downcast_ref::<Nodes<U254>>() {
+            Some(t) => {
+                assert_eq!(&nodes, t);
+            },
+            None => panic!(),
+        }
         assert_eq!(input_signals, input_signals_res);
         assert_eq!(witness_signals, witness_signals_res);
 
         let (nodes_res, witness_signals_res, input_signals_res) =
             deserialize_witnesscalc_graph_from_bytes(&tmp).unwrap();
+        match nodes_res.as_any().downcast_ref::<Nodes<U254>>() {
+            Some(t) => {
+                assert_eq!(&nodes, t);
+            },
+            None => panic!(),
+        }
 
-        assert_eq!(nodes, nodes_res);
         assert_eq!(input_signals, input_signals_res);
         assert_eq!(witness_signals, witness_signals_res);
 
@@ -718,14 +673,20 @@ mod tests {
         let mut rw = WriteBackReader::new(mt_reader);
         let metadata: crate::proto::GraphMetadata = read_message(&mut rw).unwrap();
 
+        let prime = nodes.prime();
+        let prime_bytes: Vec<u8> = <U254 as FieldOps>::to_le_bytes(&prime);
         let metadata_want = crate::proto::GraphMetadata {
             witness_signals: vec![4, 1],
             inputs: input_signals.iter().map(|(k, v)| {
-                (k.clone(), crate::proto::SignalDescription {
+                (k.clone(), SignalDescription {
                     offset: v.0 as u32,
                     len: v.1 as u32
                 })
-            }).collect()
+            }).collect(),
+            prime: Some(crate::proto::BigUInt {
+                value_le: prime_bytes,
+            }),
+            prime_str: nodes.prime_str(),
         };
 
         assert_eq!(metadata, metadata_want);

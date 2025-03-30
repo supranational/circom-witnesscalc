@@ -1,6 +1,6 @@
 use std::io::{Cursor, Error, ErrorKind};
-use ruint::aliases::U256;
-use crate::graph::{Node, Operation, TresOperation, UnoOperation};
+use crate::field::{FieldOperations, FieldOps, U254, U64};
+use crate::graph::{Node, Nodes, NodesInterface, Operation, TresOperation, UnoOperation};
 use crate::InputSignalsInfo;
 use crate::storage::{read_message, WriteBackReader, WITNESSCALC_GRAPH_MAGIC};
 
@@ -9,7 +9,7 @@ use crate::storage::{read_message, WriteBackReader, WITNESSCALC_GRAPH_MAGIC};
 // specifically optimized to unpack the list of Nodes.
 pub fn deserialize_witnesscalc_graph_from_bytes(
     bytes: &[u8]
-) -> std::io::Result<(Vec<Node>, Vec<usize>, InputSignalsInfo)> {
+) -> std::io::Result<(Box<dyn NodesInterface>, Vec<usize>, InputSignalsInfo)> {
 
     if bytes.len() < WITNESSCALC_GRAPH_MAGIC.len() {
         return Err(Error::new(ErrorKind::Other, "Invalid magic"));
@@ -22,17 +22,59 @@ pub fn deserialize_witnesscalc_graph_from_bytes(
     let nodes_num = u64::from_le_bytes(bytes[idx..idx+8].try_into().unwrap());
     idx += 8;
 
-    let mut nodes = Vec::with_capacity(nodes_num as usize);
-    for _ in 0..nodes_num {
-        let (msg_len, int_len) = decode_varint_u32(&bytes[idx..])?;
-        idx += int_len;
-        nodes.push(decode_node(&bytes[idx..idx+msg_len as usize])?);
-        idx += msg_len as usize;
-    }
-
-    let r = Cursor::new(&bytes[idx..]);
+    let vm_ptr = u64::from_le_bytes(bytes[bytes.len() - 8..bytes.len()]
+        .try_into().unwrap());
+    let r = Cursor::new(&bytes[vm_ptr as usize..]);
     let mut br = WriteBackReader::new(r);
     let md: crate::proto::GraphMetadata = read_message(&mut br)?;
+
+    let outer_nodes: Box<dyn NodesInterface>;
+    let (prime, curve_name) = if md.prime.is_none() {
+        (
+            U254::from_str(
+                "21888242871839275222246405745257275088548364400416034343698204186575808495617")
+                .unwrap(),
+            "bn128"
+        )
+    } else {
+        (
+            <U254 as FieldOps>::from_le_bytes(
+                md.prime.unwrap().value_le.as_slice())
+                .unwrap(),
+            md.prime_str.as_str()
+        )
+    };
+
+    match prime.bit_len() {
+        64 => {
+            let prime = U64::from_le_bytes(
+                &<U254 as FieldOps>::to_le_bytes(&prime))
+                .unwrap();
+            let mut nodes = Nodes::new(prime, curve_name);
+            for _ in 0..nodes_num {
+                let (msg_len, int_len) = decode_varint_u32(&bytes[idx..])?;
+                idx += int_len;
+                decode_node(&bytes[idx..idx+msg_len as usize], &mut nodes)?;
+                idx += msg_len as usize;
+            }
+            outer_nodes = Box::new(nodes);
+        }
+        254 => {
+            let mut nodes = Nodes::new(prime, curve_name);
+            for _ in 0..nodes_num {
+                let (msg_len, int_len) = decode_varint_u32(&bytes[idx..])?;
+                idx += int_len;
+                decode_node(&bytes[idx..idx+msg_len as usize], &mut nodes)?;
+                idx += msg_len as usize;
+            }
+            outer_nodes = Box::new(nodes);
+        }
+        _ => {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("unknown prime {}", md.prime_str)));
+        }
+    }
 
     let witness_signals = md.witness_signals
         .iter()
@@ -45,7 +87,7 @@ pub fn deserialize_witnesscalc_graph_from_bytes(
         })
         .collect::<InputSignalsInfo>();
 
-    Ok((nodes, witness_signals, input_signals))
+    Ok((outer_nodes, witness_signals, input_signals))
 }
 
 #[repr(u8)]
@@ -76,7 +118,9 @@ impl TryFrom<u8> for WireType {
 }
 
 /// Decodes a protobuf Node message into a Node enum
-pub fn decode_node(bytes: &[u8]) -> Result<Node, Error> {
+pub fn decode_node<T: FieldOps + 'static>(
+    bytes: &[u8], nodes: &mut Nodes<T>) -> Result<(), Error> {
+
     if bytes.is_empty() {
         return Err(Error::new(
             ErrorKind::UnexpectedEof,
@@ -106,20 +150,23 @@ pub fn decode_node(bytes: &[u8]) -> Result<Node, Error> {
     }
 
     match field_number {
-        1 => decode_input_node(bytes),
-        2 => decode_constant_node(bytes),
-        3 => decode_uno_op_node(bytes),
-        4 => decode_duo_op_node(bytes),
-        5 => decode_tres_op_node(bytes),
+        1 => decode_input_node(bytes, nodes),
+        2 => decode_constant_node(bytes, nodes),
+        3 => decode_uno_op_node(bytes, nodes),
+        4 => decode_duo_op_node(bytes, nodes),
+        5 => decode_tres_op_node(bytes, nodes),
         _ => {
             panic!("found unknown node")
         }
     }
 }
 
-fn decode_input_node(bytes: &[u8]) -> Result<Node, Error> {
+fn decode_input_node<T: FieldOps + 'static>(
+    bytes: &[u8], nodes: &mut Nodes<T>) -> Result<(), Error> {
+
     if bytes.is_empty() {
-        return Ok(Node::Input(0));
+        nodes.push_noopt(Node::Input(0));
+        return Ok(());
     }
 
     let (field_number, wire_type, tag_size) = read_tag(bytes)?;
@@ -147,10 +194,11 @@ fn decode_input_node(bytes: &[u8]) -> Result<Node, Error> {
             "Incorrect InputNode field size",
         ));
     }
-    Ok(Node::Input(value as usize))
+    nodes.push_noopt(Node::Input(value as usize));
+    Ok(())
 }
 
-fn decode_big_uint(bytes: &[u8]) -> Result<U256, Error> {
+fn decode_big_le_bytes(bytes: &[u8]) -> Result<Vec<u8>, Error> {
     if bytes.is_empty() {
         return Err(Error::new(
             ErrorKind::UnexpectedEof,
@@ -182,13 +230,16 @@ fn decode_big_uint(bytes: &[u8]) -> Result<U256, Error> {
         ));
     }
     let bytes = &bytes[varint_size..];
-    Ok(U256::from_le_slice(bytes))
+    Ok(bytes.to_vec())
 }
 
 /// Decodes a UnoOpNode message into an Operation and two indices
-fn decode_uno_op_node(bytes: &[u8]) -> Result<Node, Error> {
+fn decode_uno_op_node<T: FieldOps + 'static>(
+    bytes: &[u8], nodes: &mut Nodes<T>) -> Result<(), Error> {
+
     if bytes.is_empty() {
-        return Ok(Node::UnoOp(UnoOperation::Neg, 0));
+        nodes.push_noopt(Node::UnoOp(UnoOperation::Neg, 0));
+        return Ok(());
     }
 
     let mut offset = 0;
@@ -233,13 +284,17 @@ fn decode_uno_op_node(bytes: &[u8]) -> Result<Node, Error> {
         }
     }
 
-    Ok(Node::UnoOp(op, a_idx))
+    nodes.push_noopt(Node::UnoOp(op, a_idx));
+    Ok(())
 }
 
 /// Decodes a DuoOpNode message into an Operation and two indices
-fn decode_duo_op_node(bytes: &[u8]) -> Result<Node, Error> {
+fn decode_duo_op_node<T: FieldOps + 'static>(
+    bytes: &[u8], nodes: &mut Nodes<T>) -> Result<(), Error> {
+
     if bytes.is_empty() {
-        return Ok(Node::Op(Operation::Mul, 0, 0));
+        nodes.push_noopt(Node::Op(Operation::Mul, 0, 0));
+        return Ok(());
     }
 
     let mut offset = 0;
@@ -304,12 +359,16 @@ fn decode_duo_op_node(bytes: &[u8]) -> Result<Node, Error> {
         }
     }
 
-    Ok(Node::Op(op, a_idx, b_idx))
+    nodes.push_noopt(Node::Op(op, a_idx, b_idx));
+    Ok(())
 }
 
-fn decode_tres_op_node(bytes: &[u8]) -> Result<Node, Error> {
+fn decode_tres_op_node<T: FieldOps + 'static>(
+    bytes: &[u8], nodes: &mut Nodes<T>) -> Result<(), Error> {
+
     if bytes.is_empty() {
-        return Ok(Node::TresOp(TresOperation::TernCond, 0, 0, 0));
+        nodes.push_noopt(Node::TresOp(TresOperation::TernCond, 0, 0, 0));
+        return Ok(());
     }
 
     let mut offset = 0;
@@ -359,10 +418,13 @@ fn decode_tres_op_node(bytes: &[u8]) -> Result<Node, Error> {
         }
     }
 
-    Ok(Node::TresOp(op, a_idx, b_idx, c_idx))
+    nodes.push_noopt(Node::TresOp(op, a_idx, b_idx, c_idx));
+    Ok(())
 }
 
-fn decode_constant_node(bytes: &[u8]) -> Result<Node, Error> {
+fn decode_constant_node<T: FieldOps + 'static>(
+    bytes: &[u8], nodes: &mut Nodes<T>) -> Result<(), Error> {
+
     if bytes.is_empty() {
         return Err(Error::new(
             ErrorKind::UnexpectedEof,
@@ -396,9 +458,12 @@ fn decode_constant_node(bytes: &[u8]) -> Result<Node, Error> {
         ));
     }
 
-    let n = decode_big_uint(bytes)?;
-
-    Ok(Node::Constant(n))
+    let n = decode_big_le_bytes(bytes)?;
+    let v = (&nodes.ff).parse_le_bytes(&n).map_err(|_| {
+        Error::new(ErrorKind::InvalidData, "Invalid BigInt bytes")
+    })?;
+    nodes.push_constant(v);
+    Ok(())
 }
 
 fn read_tag(bytes: &[u8]) -> Result<(u32, WireType, usize), Error> {
