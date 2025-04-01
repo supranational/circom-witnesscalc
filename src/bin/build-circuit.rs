@@ -67,7 +67,7 @@ fn var_from_value_instruction_n<T: FieldOps + 'static>(
                 assert!(
                     matches!(
                         nodes.get(NodeIdx(value_bucket.value+i)),
-                        Some(Node::Constant2(..))),
+                        Some(Node::Constant(..))),
                     "node #{} expected to be a constant, but it is not; {}",
                     value_bucket.value+i, call_stack.join(" -> "));
                 result.push(Var::Node(value_bucket.value+i));
@@ -326,7 +326,7 @@ fn operator_argument_instruction<T: FieldOps + 'static>(
         Instruction::Value(ref value_bucket) => {
             match value_bucket.parse_as {
                 ValueType::BigInt => match ctx.nodes.get(NodeIdx(value_bucket.value)) {
-                    Some(Node::Constant2(..)) => {
+                    Some(Node::Constant(..)) => {
                         value_bucket.value
                     }
                     _ => {
@@ -954,7 +954,7 @@ fn calc_function_expression<T: FieldOps + 'static>(
         Instruction::Value(ref value_bucket) => {
             match value_bucket.parse_as {
                 ValueType::BigInt => match nodes.get(NodeIdx(value_bucket.value)) {
-                    Some(Node::Constant2(..)) => Var::Node(value_bucket.value),
+                    Some(Node::Constant(..)) => Var::Node(value_bucket.value),
                     _ => panic!("not a constant"),
                 },
                 ValueType::U32 => {

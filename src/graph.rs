@@ -244,7 +244,7 @@ pub enum Node {
     #[default]
     Unknown,
     Input(usize),
-    Constant2(usize),
+    Constant(usize),
     UnoOp(UnoOperation, usize),
     Op(Operation, usize, usize),
     TresOp(TresOperation, usize, usize, usize),
@@ -283,7 +283,7 @@ impl<T: FieldOps + 'static> Nodes<T> {
         let me = self.nodes.get(idx.0).ok_or(NodeConstErr::EmptyNode(idx))?;
         match me {
             Node::Unknown => panic!("Unknown node"),
-            Node::Constant2(const_idx) => Ok(self.constants[*const_idx]),
+            Node::Constant(const_idx) => Ok(self.constants[*const_idx]),
             Node::UnoOp(op, a) => {
                 Ok((&self.ff).op_uno(*op,
                     self.to_const_recursive(NodeIdx(*a))?))
@@ -306,13 +306,13 @@ impl<T: FieldOps + 'static> Nodes<T> {
     fn const_node_from_value(&mut self, v: T) -> Node {
         match self.constants_idx.entry(v) {
             Entry::Occupied(e) => {
-                Node::Constant2(*e.get())
+                Node::Constant(*e.get())
             }
             Entry::Vacant(e) => {
                 self.constants.push(v);
                 let idx = self.constants.len() - 1;
                 e.insert(idx);
-                Node::Constant2(idx)
+                Node::Constant(idx)
             }
         }
     }
@@ -322,9 +322,9 @@ impl<T: FieldOps + 'static> Nodes<T> {
     fn try_into_constant(&mut self, n: &Node) -> Result<Node, NodeConstErr> {
         match n {
             Node::Unknown => panic!("Unknown node"),
-            Node::Constant2(c_idx) => Ok(Node::Constant2(*c_idx)),
+            Node::Constant(c_idx) => Ok(Node::Constant(*c_idx)),
             Node::UnoOp(op, a) => {
-                if let Node::Constant2(a_idx) = self.nodes[*a] {
+                if let Node::Constant(a_idx) = self.nodes[*a] {
                     let v = (&self.ff).op_uno(*op, self.constants[a_idx]);
                     Ok(self.const_node_from_value(v))
                 } else {
@@ -333,8 +333,8 @@ impl<T: FieldOps + 'static> Nodes<T> {
             }
             Node::Op(op, a, b) => {
                 if let (
-                    Node::Constant2(a_idx),
-                    Node::Constant2(b_idx)) = (
+                    Node::Constant(a_idx),
+                    Node::Constant(b_idx)) = (
                     self.nodes[*a],
                     self.nodes[*b]) {
 
@@ -346,9 +346,9 @@ impl<T: FieldOps + 'static> Nodes<T> {
             }
             Node::TresOp(op, a, b, c) => {
                 if let (
-                    Node::Constant2(a_idx),
-                    Node::Constant2(b_idx),
-                    Node::Constant2(c_idx)) = (
+                    Node::Constant(a_idx),
+                    Node::Constant(b_idx),
+                    Node::Constant(c_idx)) = (
                     self.nodes[*a],
                     self.nodes[*b],
                     self.nodes[*c]) {
@@ -386,7 +386,7 @@ impl<T: FieldOps + 'static> Nodes<T> {
             Node::Input(i) => Ok(
                 crate::proto::node::Node::Input (
                     crate::proto::InputNode { idx: *i as u32 })),
-            Node::Constant2(idx) => {
+            Node::Constant(idx) => {
                 let c = self.constants[*idx];
                 let i = crate::proto::BigUInt { value_le: c.to_le_bytes() };
                 Ok(crate::proto::node::Node::Constant(
@@ -505,7 +505,7 @@ impl<T: FieldOps> PartialEq for Nodes<T> {
             match (a, b) {
                 (Node::Unknown, Node::Unknown) => true,
                 (Node::Input(a), Node::Input(b)) => a == b,
-                (Node::Constant2(a), Node::Constant2(b)) => self.constants[*a] == self.constants[*b],
+                (Node::Constant(a), Node::Constant(b)) => self.constants[*a] == self.constants[*b],
                 (Node::UnoOp(a, b), Node::UnoOp(c, d)) => a == c && b == d,
                 (Node::Op(a, b, c), Node::Op(d, e, f)) => a == d && b == e && c == f,
                 (Node::TresOp(a, b, c, d), Node::TresOp(e, f, g, h)) => a == e && b == f && c == g && d == h,
@@ -520,7 +520,7 @@ impl<T: FieldOps> Debug for Nodes<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Nodes {{")?;
         for (i, n) in self.nodes.iter().enumerate() {
-            if let Node::Constant2(c_idx) = *n {
+            if let Node::Constant(c_idx) = *n {
                 let bs = self.constants[c_idx].to_le_bytes();
                 let n = U256::from_le_slice(&bs);
                 writeln!(f, "    {}, Constant({})", i, n)?;
@@ -616,7 +616,7 @@ where Vec<T>: FromIterator<<F as FieldOperations>::Type>
     for &node in nodes.iter() {
         let value = match node {
             Node::Unknown => panic!("Unknown node"),
-            Node::Constant2(i) => constants[i],
+            Node::Constant(i) => constants[i],
             Node::Input(i) => inputs[i],
             Node::Op(op, a, b) => {
                 ff.op_duo(op, values[a], values[b])
@@ -677,7 +677,7 @@ pub fn evaluate_parallel(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> 
             for &node in nodes.iter() {
                 let value = match node {
                     Node::Unknown => panic!("Unknown node"),
-                    Node::Constant2(_) => todo!(),
+                    Node::Constant(_) => todo!(),
                     Node::Input(i) => inputs[i],
                     Node::Op(op, a, b) => op.eval(values[a], values[b]),
                     Node::UnoOp(op, a) => op.eval(values[a]),
@@ -717,8 +717,8 @@ pub fn propagate<T: FieldOps + 'static>(nodes: &mut Nodes<T>) {
     for i in 0..nodes.len() {
         if let Node::Op(op, a, b) = nodes.nodes[i] {
             if let (
-                Node::Constant2(va),
-                Node::Constant2(vb)) = (nodes.nodes[a], nodes.nodes[b]) {
+                Node::Constant(va),
+                Node::Constant(vb)) = (nodes.nodes[a], nodes.nodes[b]) {
                 let v = (&nodes.ff).op_duo(
                     op, nodes.constants[va], nodes.constants[vb]);
                 nodes.nodes[i] = nodes.const_node_from_value(v);
@@ -737,15 +737,15 @@ pub fn propagate<T: FieldOps + 'static>(nodes: &mut Nodes<T>) {
                 }
             }
         } else if let Node::UnoOp(op, a) = nodes.nodes[i] {
-            if let Node::Constant2(va) = nodes.nodes[a] {
+            if let Node::Constant(va) = nodes.nodes[a] {
                 let v = (&nodes.ff).op_uno(op, nodes.constants[va]);
                 nodes.nodes[i] = nodes.const_node_from_value(v);
                 constants += 1;
             }
         } else if let Node::TresOp(op, a, b, c) = nodes.nodes[i] {
             if let (
-                Node::Constant2(va), Node::Constant2(vb),
-                Node::Constant2(vc)) = (
+                Node::Constant(va), Node::Constant(vb),
+                Node::Constant(vc)) = (
                 nodes.nodes[a], nodes.nodes[b], nodes.nodes[c]) {
 
                 let v = (&nodes.ff).op_tres(
@@ -858,7 +858,7 @@ fn random_eval<T: FieldOps + 'static>(nodes: &mut Nodes<T>) -> Vec<T> {
         let value = match node {
             Node::Unknown => panic!("Unknown node"),
 
-            Node::Constant2(c_idx) => nodes.constants[*c_idx],
+            Node::Constant(c_idx) => nodes.constants[*c_idx],
 
             // Algebraic Ops are evaluated directly
             // Since the field is large, by Swartz-Zippel if
@@ -940,7 +940,7 @@ pub fn constants<T: FieldOps + 'static>(nodes: &mut Nodes<T>) {
     // Find all nodes with the same value.
     let mut constants = 0;
     for i in 0..nodes.len() {
-        if let Node::Constant2(_) = nodes.nodes[i] {
+        if let Node::Constant(_) = nodes.nodes[i] {
             continue;
         }
         if values_a[i] == values_b[i] {
