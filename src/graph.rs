@@ -244,7 +244,6 @@ pub enum Node {
     #[default]
     Unknown,
     Input(usize),
-    Constant(U256),
     Constant2(usize),
     UnoOp(UnoOperation, usize),
     Op(Operation, usize, usize),
@@ -284,7 +283,6 @@ impl<T: FieldOps + 'static> Nodes<T> {
         let me = self.nodes.get(idx.0).ok_or(NodeConstErr::EmptyNode(idx))?;
         match me {
             Node::Unknown => panic!("Unknown node"),
-            Node::Constant(_) => todo!("remove this"),
             Node::Constant2(const_idx) => Ok(self.constants[*const_idx]),
             Node::UnoOp(op, a) => {
                 Ok((&self.ff).op_uno(*op,
@@ -324,7 +322,6 @@ impl<T: FieldOps + 'static> Nodes<T> {
     fn try_into_constant(&mut self, n: &Node) -> Result<Node, NodeConstErr> {
         match n {
             Node::Unknown => panic!("Unknown node"),
-            Node::Constant(..) => todo!("remove this"),
             Node::Constant2(c_idx) => Ok(Node::Constant2(*c_idx)),
             Node::UnoOp(op, a) => {
                 if let Node::Constant2(a_idx) = self.nodes[*a] {
@@ -389,7 +386,6 @@ impl<T: FieldOps + 'static> Nodes<T> {
             Node::Input(i) => Ok(
                 crate::proto::node::Node::Input (
                     crate::proto::InputNode { idx: *i as u32 })),
-            Node::Constant(_) => todo!("remove constant node"),
             Node::Constant2(idx) => {
                 let c = self.constants[*idx];
                 let i = crate::proto::BigUInt { value_le: c.to_le_bytes() };
@@ -509,7 +505,6 @@ impl<T: FieldOps> PartialEq for Nodes<T> {
             match (a, b) {
                 (Node::Unknown, Node::Unknown) => true,
                 (Node::Input(a), Node::Input(b)) => a == b,
-                (Node::Constant(_), Node::Constant(_)) => todo!("remove this"),
                 (Node::Constant2(a), Node::Constant2(b)) => self.constants[*a] == self.constants[*b],
                 (Node::UnoOp(a, b), Node::UnoOp(c, d)) => a == c && b == d,
                 (Node::Op(a, b, c), Node::Op(d, e, f)) => a == d && b == e && c == f,
@@ -621,7 +616,6 @@ where Vec<T>: FromIterator<<F as FieldOperations>::Type>
     for &node in nodes.iter() {
         let value = match node {
             Node::Unknown => panic!("Unknown node"),
-            Node::Constant(_) => todo!("remove embedded constants"),
             Node::Constant2(i) => constants[i],
             Node::Input(i) => inputs[i],
             Node::Op(op, a, b) => {
@@ -683,7 +677,6 @@ pub fn evaluate_parallel(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> 
             for &node in nodes.iter() {
                 let value = match node {
                     Node::Unknown => panic!("Unknown node"),
-                    Node::Constant(c) => c,
                     Node::Constant2(_) => todo!(),
                     Node::Input(i) => inputs[i],
                     Node::Op(op, a, b) => op.eval(values[a], values[b]),
@@ -864,9 +857,6 @@ fn random_eval<T: FieldOps + 'static>(nodes: &mut Nodes<T>) -> Vec<T> {
     for node in nodes.nodes.iter() {
         let value = match node {
             Node::Unknown => panic!("Unknown node"),
-
-            // Constants evaluate to themselves
-            Node::Constant(_) => todo!("remove me"),
 
             Node::Constant2(c_idx) => nodes.constants[*c_idx],
 
