@@ -7,35 +7,13 @@ use std::ops::{BitOr, BitXor, Not};
 use std::sync::{mpsc, Arc};
 use std::time::Instant;
 use crate::field::{Field, FieldOperations, FieldOps, M};
-use ark_bn254::Fr;
-use ark_ff::{BigInt, PrimeField};
 use rand::{RngCore};
 use ruint::aliases::U256;
 use serde::{Deserialize, Serialize};
 
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
 use compiler::intermediate_representation::ir_interface::OperatorType;
 use rand::prelude::ThreadRng;
 use ruint::uint;
-
-fn ark_se<S, A: CanonicalSerialize>(a: &A, s: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    let mut bytes = vec![];
-    a.serialize_with_mode(&mut bytes, Compress::Yes)
-        .map_err(serde::ser::Error::custom)?;
-    s.serialize_bytes(&bytes)
-}
-
-fn ark_de<'de, D, A: CanonicalDeserialize>(data: D) -> Result<A, D::Error>
-where
-    D: serde::de::Deserializer<'de>,
-{
-    let s: Vec<u8> = serde::de::Deserialize::deserialize(data)?;
-    let a = A::deserialize_with_mode(s.as_slice(), Compress::Yes, Validate::Yes);
-    a.map_err(serde::de::Error::custom)
-}
 
 #[derive(Hash, PartialEq, Eq, Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum Operation {
@@ -268,8 +246,6 @@ pub enum Node {
     Input(usize),
     Constant(U256),
     Constant2(usize),
-    #[serde(serialize_with = "ark_se", deserialize_with = "ark_de")]
-    MontConstant(Fr),
     UnoOp(UnoOperation, usize),
     Op(Operation, usize, usize),
     TresOp(TresOperation, usize, usize, usize),
@@ -326,9 +302,6 @@ impl<T: FieldOps + 'static> Nodes<T> {
                     self.to_const_recursive(NodeIdx(*c))?))
             }
             Node::Input(_) => Err(NodeConstErr::InputSignal),
-            Node::MontConstant(_) => {
-                panic!("MontConstant should not be used here")
-            }
         }
     }
 
@@ -392,7 +365,7 @@ impl<T: FieldOps + 'static> Nodes<T> {
                 }
             }
             Node::Input(_) => Err(NodeConstErr::InputSignal),
-            Node::MontConstant(_) => todo!("remove this"),        }
+        }
     }
 
     pub fn push_constant(&mut self, v: T) -> NodeIdx {
@@ -423,7 +396,6 @@ impl<T: FieldOps + 'static> Nodes<T> {
                 Ok(crate::proto::node::Node::Constant(
                     crate::proto::ConstantNode { value: Some(i) }))
             },
-            Node::MontConstant(_) => todo!("remove mont constant node"),
             Node::UnoOp(op, a) => Ok(
                 crate::proto::node::Node::UnoOp(
                     crate::proto::UnoOpNode {
@@ -539,7 +511,6 @@ impl<T: FieldOps> PartialEq for Nodes<T> {
                 (Node::Input(a), Node::Input(b)) => a == b,
                 (Node::Constant(_), Node::Constant(_)) => todo!("remove this"),
                 (Node::Constant2(a), Node::Constant2(b)) => self.constants[*a] == self.constants[*b],
-                (Node::MontConstant(_), Node::MontConstant(_)) => todo!("remove this"),
                 (Node::UnoOp(a, b), Node::UnoOp(c, d)) => a == c && b == d,
                 (Node::Op(a, b, c), Node::Op(d, e, f)) => a == d && b == e && c == f,
                 (Node::TresOp(a, b, c, d), Node::TresOp(e, f, g, h)) => a == e && b == f && c == g && d == h,
@@ -652,7 +623,6 @@ where Vec<T>: FromIterator<<F as FieldOperations>::Type>
             Node::Unknown => panic!("Unknown node"),
             Node::Constant(_) => todo!("remove embedded constants"),
             Node::Constant2(i) => constants[i],
-            Node::MontConstant(_) => todo!("remove usage of montgomery constants"),
             Node::Input(i) => inputs[i],
             Node::Op(op, a, b) => {
                 ff.op_duo(op, values[a], values[b])
@@ -715,7 +685,6 @@ pub fn evaluate_parallel(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> 
                     Node::Unknown => panic!("Unknown node"),
                     Node::Constant(c) => c,
                     Node::Constant2(_) => todo!(),
-                    Node::MontConstant(_) => todo!("remove montgomery constants"),
                     Node::Input(i) => inputs[i],
                     Node::Op(op, a, b) => op.eval(values[a], values[b]),
                     Node::UnoOp(op, a) => op.eval(values[a]),
@@ -901,8 +870,6 @@ fn random_eval<T: FieldOps + 'static>(nodes: &mut Nodes<T>) -> Vec<T> {
 
             Node::Constant2(c_idx) => nodes.constants[*c_idx],
 
-            Node::MontConstant(_) => todo!("remove me"),
-
             // Algebraic Ops are evaluated directly
             // Since the field is large, by Swartz-Zippel if
             // two values are the same then they are likely algebraically equal.
@@ -1044,14 +1011,6 @@ fn u_lt(a: &U256, b: &U256) -> U256 {
         (false, true) => uint!(0_U256),
         (true, true) => U256::from(a < b),
     }
-}
-
-pub fn fr_to_u256(x: &Fr) -> U256 {
-    U256::from_limbs(x.into_bigint().0)
-}
-
-pub fn u256_to_fr(x: &U256) -> Fr {
-    Fr::from_bigint(BigInt::new(x.into_limbs())).unwrap()
 }
 
 #[cfg(test)]
