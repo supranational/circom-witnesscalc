@@ -177,7 +177,7 @@ fn parse_args() -> Args {
 
     let usage = |err_msg: &str| -> String {
         eprintln!("{}", err_msg);
-        eprintln!("Usage: {} <circuit_file> <vm_out_file> [-l <link_library>]* [-i <inputs_file.json>] [-print-unoptimized] [-v] [-wtns <output.wtns]", args[0]);
+        eprintln!("Usage: {} <circuit_file> <vm_out_file> [-l <link_library>]* [-i <inputs_file.json>] [-v] [-wtns <output.wtns]", args[0]);
         std::process::exit(1);
     };
 
@@ -324,7 +324,7 @@ fn main() {
     let circuit = run_compiler(
         vcp,
         Config {
-            debug_output: true,
+            debug_output: false,
             produce_input_log: true,
             wat_flag: false,
         },

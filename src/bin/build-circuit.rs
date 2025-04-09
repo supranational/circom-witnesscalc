@@ -1,27 +1,31 @@
 use compiler::circuit_design::template::TemplateCode;
-use compiler::compiler_interface::{run_compiler, Circuit, Config};
+use compiler::compiler_interface::{run_compiler, Circuit, Config, VCP};
 use compiler::intermediate_representation::ir_interface::{AddressType, ComputeBucket, CreateCmpBucket, FinalData, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, ObtainMeta, ReturnBucket, ReturnType, StatusInput, StoreBucket, ValueBucket, ValueType};
 use constraint_generation::{build_circuit, BuildConfig};
 use program_structure::error_definition::Report;
-use ruint::aliases::U256;
 use std::collections::HashMap;
 use std::{env, fmt, fs};
 use std::error::Error;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Instant;
+use anyhow::anyhow;
 use code_producers::c_elements::IODef;
 use code_producers::components::TemplateInstanceIOMap;
 use compiler::circuit_design::function::FunctionCode;
+use indicatif::{ProgressBar, ProgressStyle};
+use ruint::aliases::U256;
 use type_analysis::check_types::check_types;
-use circom_witnesscalc::{deserialize_inputs, InputSignalsInfo};
-use circom_witnesscalc::graph::{optimize, Node, Operation, UnoOperation, TresOperation, Nodes, NodeConstErr, NodeIdx};
+use circom_witnesscalc::{InputSignalsInfo};
+use circom_witnesscalc::field::{Field, FieldOperations, FieldOps, U254, U64};
+use circom_witnesscalc::graph::{Node, Operation, UnoOperation, TresOperation, Nodes, NodeConstErr, NodeIdx, NodesInterface, optimize};
 use circom_witnesscalc::storage::serialize_witnesscalc_graph;
 
 // if instruction pointer is a store to the signal, return the signal index
 // and the src instruction to store to the signal
-fn try_signal_store<'a>(
-    ctx: &mut BuildCircuitContext,
-    cmp: &mut ComponentInstance,
+fn try_signal_store<'a, T: FieldOps + 'static>(
+    ctx: &mut BuildCircuitContext<T>,
+    cmp: &mut ComponentInstance<T>,
     inst: &'a InstructionPointer,
     print_debug: bool,
     call_stack: &Vec<String>,
@@ -52,9 +56,9 @@ fn try_signal_store<'a>(
     }
 }
 
-fn var_from_value_instruction_n(
-    value_bucket: &ValueBucket, nodes: &Nodes, n: usize,
-    call_stack: &[String]) -> Vec<Var> {
+fn var_from_value_instruction_n<T: FieldOps + 'static>(
+    value_bucket: &ValueBucket, nodes: &Nodes<T>, n: usize,
+    call_stack: &[String]) -> Vec<Var<T>> {
 
     match value_bucket.parse_as {
         ValueType::BigInt => {
@@ -76,15 +80,16 @@ fn var_from_value_instruction_n(
             assert_eq!(n, 1,
                 "for ValueType::U32 number of values is expected to be 1; {}",
                 call_stack.join(" -> "));
-            vec![Var::Value(U256::from(value_bucket.value))]
+            let v = (&nodes.ff).parse_usize(value_bucket.value).unwrap();
+            vec![Var::Value(v)]
         },
     }
 }
 
-fn operator_argument_instruction_n(
-    ctx: &mut BuildCircuitContext,
+fn operator_argument_instruction_n<T: FieldOps + 'static>(
+    ctx: &mut BuildCircuitContext<T>,
     inst: &InstructionPointer,
-    cmp: &mut ComponentInstance,
+    cmp: &mut ComponentInstance<T>,
     size: usize,
     print_debug: bool,
     call_stack: &Vec<String>,
@@ -202,7 +207,7 @@ fn operator_argument_instruction_n(
                                 result.push(idx);
                             },
                             Some(Var::Value(ref v)) => {
-                                result.push(ctx.nodes.push(Node::Constant(*v)).0);
+                                result.push(ctx.nodes.push_constant(*v).0);
                             }
                             None => { panic!("variable is not set: {}, {:?}",
                                              load_bucket.line, call_stack); }
@@ -219,9 +224,9 @@ fn operator_argument_instruction_n(
 }
 
 
-fn operator_argument_instruction(
-    ctx: &mut BuildCircuitContext,
-    cmp: &mut ComponentInstance,
+fn operator_argument_instruction<T: FieldOps + 'static>(
+    ctx: &mut BuildCircuitContext<T>,
+    cmp: &mut ComponentInstance<T>,
     inst: &InstructionPointer,
     print_debug: bool,
     call_stack: &Vec<String>,
@@ -302,7 +307,7 @@ fn operator_argument_instruction(
                             match cmp.vars[var_idx] {
                                 Some(Var::Node(idx)) => idx,
                                 Some(Var::Value(ref v)) => {
-                                    ctx.nodes.push(Node::Constant(*v)).0
+                                    ctx.nodes.push_constant(*v).0
                                 }
                                 None => { panic!("variable is not set"); }
                             }
@@ -342,9 +347,9 @@ fn operator_argument_instruction(
     }
 }
 
-fn node_from_compute_bucket(
-    ctx: &mut BuildCircuitContext,
-    cmp: &mut ComponentInstance,
+fn node_from_compute_bucket<T: FieldOps + 'static>(
+    ctx: &mut BuildCircuitContext<T>,
+    cmp: &mut ComponentInstance<T>,
     compute_bucket: &ComputeBucket,
     print_debug: bool,
     call_stack: &Vec<String>,
@@ -366,8 +371,8 @@ fn node_from_compute_bucket(
     }
 }
 
-fn calc_mapped_signal_idx(
-    ctx: &mut BuildCircuitContext, cmp: &mut ComponentInstance,
+fn calc_mapped_signal_idx<T: FieldOps + 'static>(
+    ctx: &mut BuildCircuitContext<T>, cmp: &mut ComponentInstance<T>,
     subcomponent_idx: usize, signal_code: usize,
     indexes: &[InstructionPointer], print_debug: bool,
     call_stack: &Vec<String>) -> (usize, String) {
@@ -418,20 +423,43 @@ fn calc_mapped_signal_idx(
     (map_access, template_def)
 }
 
-struct BuildCircuitContext<'a> {
-    nodes: &'a mut Nodes,
+struct BuildCircuitContext<'a, T: FieldOps> {
+    nodes: &'a mut Nodes<T>,
     signal_node_idx: &'a mut Vec<usize>,
-    // vars: &'a mut Vec<Option<Var>>,
-    // subcomponents: &'a mut Vec<Option<ComponentInstance>>,
+    signals_set: usize,
+    progress_bar: ProgressBar,
     templates: &'a Vec<TemplateCode>,
     functions: &'a Vec<FunctionCode>,
     io_map: &'a TemplateInstanceIOMap,
 }
 
-impl BuildCircuitContext<'_> {
+impl<T: FieldOps> BuildCircuitContext<'_, T> {
+    fn new<'a>(
+        nodes: &'a mut Nodes<T>, signal_node_idx: &'a mut Vec<usize>,
+        templates: &'a Vec<TemplateCode>, functions: &'a Vec<FunctionCode>,
+        io_map: &'a TemplateInstanceIOMap) -> BuildCircuitContext<'a, T> {
+
+        let pb = ProgressBar::new(signal_node_idx.len() as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})\n{msg}")
+                .unwrap()
+                .progress_chars("#>-")
+        );
+
+        BuildCircuitContext {
+            nodes,
+            signal_node_idx,
+            signals_set: 0,
+            progress_bar: pb,
+            templates,
+            functions,
+            io_map,
+        }
+    }
     fn new_component(
         &self, template_id: usize, signal_offset: usize,
-        component_offset: usize) -> ComponentInstance {
+        component_offset: usize) -> ComponentInstance<T> {
 
         let tmpl = &self.templates[template_id];
         let mut cmp = ComponentInstance {
@@ -445,11 +473,26 @@ impl BuildCircuitContext<'_> {
         cmp.subcomponents.resize_with(tmpl.number_of_components, || None);
         cmp
     }
+
+    fn associate_signal_to_node(
+        &mut self, signal_idx: usize, node_idx: usize, call_stack: &[String],
+        line_no: usize) {
+
+        if self.signal_node_idx[signal_idx] != usize::MAX {
+            panic!("signal is already set");
+        }
+        self.signal_node_idx[signal_idx] = node_idx;
+        self.signals_set += 1;
+        self.progress_bar.set_message(
+            format!("{}:{}", call_stack.join(" -> ", ), line_no));
+        self.progress_bar.inc(1);
+    }
 }
 
-fn process_instruction(
-    ctx: &mut BuildCircuitContext, inst: &InstructionPointer, print_debug: bool,
-    call_stack: &Vec<String>, cmp: &mut ComponentInstance) {
+fn process_instruction<T: FieldOps + 'static>(
+    ctx: &mut BuildCircuitContext<T>, inst: &InstructionPointer,
+    print_debug: bool, call_stack: &Vec<String>,
+    cmp: &mut ComponentInstance<T>) {
 
     match **inst {
         Instruction::Value(..) => {
@@ -493,14 +536,9 @@ fn process_instruction(
                             for (i, item) in node_idxs.iter()
                                 .enumerate().take(store_bucket.context.size) {
 
-                                if ctx.signal_node_idx[signal_idx + i] != usize::MAX {
-                                    panic!(
-                                        "signal is already set: {}, {}:{}",
-                                        signal_idx + i,
-                                        call_stack.join(" -> "),
-                                        store_bucket.get_line());
-                                }
-                                ctx.signal_node_idx[signal_idx + i] = *item;
+                                ctx.associate_signal_to_node(
+                                    signal_idx + i, *item, call_stack,
+                                    store_bucket.get_line());
                             }
                         }
                         // LocationRule::Mapped { signal_code, indexes } => {}
@@ -567,7 +605,7 @@ fn process_instruction(
             panic!("not implemented");
         }
         Instruction::Call(ref call_bucket) => {
-            let mut fn_vars: Vec<Option<Var>> = vec![None; call_bucket.arena_size];
+            let mut fn_vars: Vec<Option<Var<T>>> = vec![None; call_bucket.arena_size];
 
             let mut count: usize = 0;
             for (idx, inst2) in call_bucket.arguments.iter().enumerate() {
@@ -602,7 +640,7 @@ fn process_instruction(
                 ctx, &branch_bucket.cond, cmp, print_debug, call_stack);
             match cond.to_const(ctx.nodes) {
                 Ok(cond_val) => {
-                    let inst_list = if cond_val == U256::ZERO {
+                    let inst_list = if cond_val.is_zero() {
                         &branch_bucket.else_branch
                     } else {
                         &branch_bucket.if_branch
@@ -649,7 +687,10 @@ fn process_instruction(
                                 ctx, cmp, else_src, print_debug, call_stack);
 
                             let node = Node::TresOp(TresOperation::TernCond, node_idx, node_idx_if, node_idx_else);
-                            ctx.signal_node_idx[if_signal_idx] = ctx.nodes.push(node).0;
+                            let node_idx = ctx.nodes.push(node).0;
+                            ctx.associate_signal_to_node(
+                                if_signal_idx, node_idx, call_stack,
+                                branch_bucket.get_line());
                         }
                         _ => {
                             panic!(
@@ -740,9 +781,9 @@ fn process_instruction(
     }
 }
 
-fn store_function_return_results_into_variable(
-    final_data: &FinalData, src_vars: &[Option<Var>], ret: &FnReturn,
-    dst_vars: &mut Vec<Option<Var>>, nodes: &mut Nodes,
+fn store_function_return_results_into_variable<T: FieldOps + 'static>(
+    final_data: &FinalData, src_vars: &[Option<Var<T>>], ret: &FnReturn<T>,
+    dst_vars: &mut Vec<Option<Var<T>>>, nodes: &mut Nodes<T>,
     call_stack: &Vec<String>) {
 
     assert!(matches!(final_data.dest_address_type, AddressType::Variable));
@@ -781,10 +822,10 @@ fn store_function_return_results_into_variable(
     }
 }
 
-fn store_function_return_results_into_subsignal(
-    ctx: &mut BuildCircuitContext, final_data: &FinalData,
-    src_vars: &[Option<Var>], ret: &FnReturn, print_debug: bool,
-    call_stack: &Vec<String>, cmp: &mut ComponentInstance) {
+fn store_function_return_results_into_subsignal<T: FieldOps + 'static>(
+    ctx: &mut BuildCircuitContext<T>, final_data: &FinalData,
+    src_vars: &[Option<Var<T>>], ret: &FnReturn<T>, print_debug: bool,
+    call_stack: &Vec<String>, cmp: &mut ComponentInstance<T>) {
 
     let (cmp_address, input_information) = if let AddressType::SubcmpSignal {cmp_address, input_information, ..} = &final_data.dest_address_type {
         (cmp_address, input_information)
@@ -801,8 +842,7 @@ fn store_function_return_results_into_subsignal(
                         src_node_idxs.push(node_idx);
                     }
                     Some(Var::Value(v)) => {
-                        src_node_idxs.push(
-                            ctx.nodes.push(Node::Constant(v)).0);
+                        src_node_idxs.push(ctx.nodes.push_constant(v).0);
                     }
                     None => {
                         panic!("variable at index {} is not set", i);
@@ -818,7 +858,7 @@ fn store_function_return_results_into_subsignal(
                     src_node_idxs.push(*node_idx);
                 }
                 Var::Value(v) => {
-                    src_node_idxs.push(ctx.nodes.push(Node::Constant(*v)).0);
+                    src_node_idxs.push(ctx.nodes.push_constant(*v).0);
                 }
             }
         }
@@ -834,10 +874,10 @@ fn store_function_return_results_into_subsignal(
         ctx, &src_node_idxs, print_debug, call_stack, cmp, &dest);
 }
 
-fn store_function_return_results(
-    ctx: &mut BuildCircuitContext, final_data: &FinalData,
-    src_vars: &[Option<Var>], ret: &FnReturn, print_debug: bool,
-    call_stack: &Vec<String>, cmp: &mut ComponentInstance) {
+fn store_function_return_results<T: FieldOps + 'static>(
+    ctx: &mut BuildCircuitContext<T>, final_data: &FinalData,
+    src_vars: &[Option<Var<T>>], ret: &FnReturn<T>, print_debug: bool,
+    call_stack: &Vec<String>, cmp: &mut ComponentInstance<T>) {
 
     match &final_data.dest_address_type {
         AddressType::Signal => todo!("Signal"),
@@ -854,10 +894,10 @@ fn store_function_return_results(
     }
 }
 
-fn run_function(
+fn run_function<T: FieldOps + 'static>(
     fn_name: &str, functions: &Vec<FunctionCode>,
-    fn_vars: &mut Vec<Option<Var>>, nodes: &mut Nodes,
-    print_debug: bool, call_stack: &[String]) -> FnReturn {
+    fn_vars: &mut Vec<Option<Var<T>>>, nodes: &mut Nodes<T>,
+    print_debug: bool, call_stack: &[String]) -> FnReturn<T> {
 
     // for i in functions {
     //     println!("Function: {} {}", i.header, i.name);
@@ -875,7 +915,7 @@ fn run_function(
     let mut call_stack = call_stack.to_owned();
     call_stack.push(f.name.clone());
 
-    let mut r: Option<FnReturn> = None;
+    let mut r: Option<FnReturn<T>> = None;
     for i in &f.body {
         r = process_function_instruction(
             i, fn_vars, nodes, functions, print_debug, &call_stack);
@@ -891,9 +931,9 @@ fn run_function(
     }
     r
 }
-fn calc_function_expression_n(
-    inst: &InstructionPointer, fn_vars: &mut Vec<Option<Var>>,
-    nodes: &mut Nodes, n: usize, call_stack: &Vec<String>) -> Vec<Var> {
+fn calc_function_expression_n<T: FieldOps + 'static>(
+    inst: &InstructionPointer, fn_vars: &mut Vec<Option<Var<T>>>,
+    nodes: &mut Nodes<T>, n: usize, call_stack: &Vec<String>) -> Vec<Var<T>> {
 
     if n == 1 {
         let v = calc_function_expression(inst, fn_vars, nodes, call_stack);
@@ -942,9 +982,9 @@ fn calc_function_expression_n(
     }
 }
 
-fn calc_function_expression(
-    inst: &InstructionPointer, fn_vars: &mut Vec<Option<Var>>,
-    nodes: &mut Nodes, call_stack: &Vec<String>) -> Var {
+fn calc_function_expression<T: FieldOps + 'static>(
+    inst: &InstructionPointer, fn_vars: &mut Vec<Option<Var<T>>>,
+    nodes: &mut Nodes<T>, call_stack: &Vec<String>) -> Var<T> {
 
     match **inst {
         Instruction::Value(ref value_bucket) => {
@@ -953,7 +993,11 @@ fn calc_function_expression(
                     Some(Node::Constant(..)) => Var::Node(value_bucket.value),
                     _ => panic!("not a constant"),
                 },
-                ValueType::U32 => Var::Value(U256::from(value_bucket.value)),
+                ValueType::U32 => {
+                    let v = (&nodes.ff).parse_usize(value_bucket.value)
+                        .unwrap();
+                    Var::Value(v)
+                },
             }
         }
         Instruction::Load(ref load_bucket) => {
@@ -997,18 +1041,18 @@ fn calc_function_expression(
     }
 }
 
-fn node_from_var(v: &Var, nodes: &mut Nodes) -> usize {
+fn node_from_var<T: FieldOps + 'static>(v: &Var<T>, nodes: &mut Nodes<T>) -> usize {
     match v {
         Var::Value(ref v) => {
-            nodes.push(Node::Constant(*v)).0
+            nodes.push_constant(*v).0
         }
         Var::Node(node_idx) => *node_idx,
     }
 }
 
-fn compute_function_expression(
-    compute_bucket: &ComputeBucket, fn_vars: &mut Vec<Option<Var>>,
-    nodes: &mut Nodes, call_stack: &Vec<String>) -> Var {
+fn compute_function_expression<T: FieldOps + 'static>(
+    compute_bucket: &ComputeBucket, fn_vars: &mut Vec<Option<Var<T>>>,
+    nodes: &mut Nodes<T>, call_stack: &Vec<String>) -> Var<T> {
 
     if let Ok(op) = TryInto::<Operation>::try_into(compute_bucket.op) {
         assert_eq!(compute_bucket.stack.len(), 2);
@@ -1020,7 +1064,7 @@ fn compute_function_expression(
             nodes, call_stack);
         match (&a, &b) {
             (Var::Value(a), Var::Value(b)) => {
-                Var::Value(op.eval(*a, *b))
+                Var::Value((&nodes.ff).op_duo(op, *a, *b))
             }
             _ => {
                 let a_idx = node_from_var(&a, nodes);
@@ -1034,7 +1078,7 @@ fn compute_function_expression(
             compute_bucket.stack.first().unwrap(), fn_vars, nodes, call_stack);
         match &a {
             Var::Value(v) => {
-                Var::Value(op.eval(*v))
+                Var::Value((&nodes.ff).op_uno(op, *v))
             }
             Var::Node(node_idx) => {
                 Var::Node(nodes.push(Node::UnoOp(op, *node_idx)).0)
@@ -1047,14 +1091,14 @@ fn compute_function_expression(
     }
 }
 
-enum FnReturn {
+enum FnReturn<T: FieldOps> {
     FnVar{idx: usize, ln: usize},
-    Value(Var),
+    Value(Var<T>),
 }
 
-fn build_return(
-    return_bucket: &ReturnBucket, fn_vars: &mut Vec<Option<Var>>,
-    nodes: &mut Nodes, call_stack: &Vec<String>) -> FnReturn {
+fn build_return<T: FieldOps + 'static>(
+    return_bucket: &ReturnBucket, fn_vars: &mut Vec<Option<Var<T>>>,
+    nodes: &mut Nodes<T>, call_stack: &Vec<String>) -> FnReturn<T> {
 
     match *return_bucket.value {
         Instruction::Load(ref load_bucket) => {
@@ -1082,9 +1126,9 @@ fn build_return(
     }
 }
 
-fn calc_return_load_idx(
-    load_bucket: &LoadBucket, fn_vars: &mut Vec<Option<Var>>,
-    nodes: &mut Nodes, call_stack: &Vec<String>) -> usize {
+fn calc_return_load_idx<T: FieldOps + 'static>(
+    load_bucket: &LoadBucket, fn_vars: &mut Vec<Option<Var<T>>>,
+    nodes: &mut Nodes<T>, call_stack: &Vec<String>) -> usize {
 
     match &load_bucket.address_type {
         AddressType::Variable => {}, // OK
@@ -1102,9 +1146,9 @@ fn calc_return_load_idx(
 }
 
 // return variable value and it's index
-fn store_function_variable(
-    store_bucket: &StoreBucket, fn_vars: &mut Vec<Option<Var>>,
-    nodes: &mut Nodes, call_stack: &Vec<String>) -> (Var, usize) {
+fn store_function_variable<T: FieldOps + 'static>(
+    store_bucket: &StoreBucket, fn_vars: &mut Vec<Option<Var<T>>>,
+    nodes: &mut Nodes<T>, call_stack: &Vec<String>) -> (Var<T>, usize) {
 
     assert!(matches!(store_bucket.dest_address_type, AddressType::Variable),
             "functions can store only inside variables: dest_address_type: {}",
@@ -1139,10 +1183,10 @@ fn store_function_variable(
     (v, lvar_idx)
 }
 
-fn process_function_instruction(
-    inst: &InstructionPointer, fn_vars: &mut Vec<Option<Var>>,
-    nodes: &mut Nodes, functions: &Vec<FunctionCode>,
-    print_debug: bool, call_stack: &Vec<String>) -> Option<FnReturn> {
+fn process_function_instruction<T: FieldOps + 'static>(
+    inst: &InstructionPointer, fn_vars: &mut Vec<Option<Var<T>>>,
+    nodes: &mut Nodes<T>, functions: &Vec<FunctionCode>,
+    print_debug: bool, call_stack: &Vec<String>) -> Option<FnReturn<T>> {
 
     // println!("function instruction: {:?}", inst.to_string());
     match **inst {
@@ -1194,7 +1238,7 @@ fn process_function_instruction(
 
             match cond_const {
                 Ok(cond_const) => { // condition expression is static
-                    let branch = if cond_const.gt(&U256::ZERO) {
+                    let branch = if !cond_const.is_zero() {
                         &branch_bucket.if_branch
                     } else {
                         &branch_bucket.else_branch
@@ -1229,8 +1273,9 @@ fn process_function_instruction(
                         }
                         _ => {
                             panic!(
-                                "expected store operation in ternary operation of branch 'if': {}",
-                                call_stack.join(" -> "));
+                                "expected store operation in ternary operation of branch 'if': {}:{}",
+                                call_stack.join(" -> "),
+                                branch_bucket.if_branch[0].get_line());
                         }
                     };
                     let (var_else, var_else_idx) = match *branch_bucket.else_branch[0] {
@@ -1283,7 +1328,7 @@ fn process_function_instruction(
             None
         }
         Instruction::Call(ref call_bucket) => {
-            let mut new_fn_vars: Vec<Option<Var>> = vec![None; call_bucket.arena_size];
+            let mut new_fn_vars: Vec<Option<Var<T>>> = vec![None; call_bucket.arena_size];
 
             let mut count: usize = 0;
             for (idx, inst2) in call_bucket.arguments.iter().enumerate() {
@@ -1326,9 +1371,9 @@ fn process_function_instruction(
     }
 }
 
-fn check_continue_condition_function(
-    inst: &InstructionPointer, fn_vars: &mut Vec<Option<Var>>,
-    nodes: &mut Nodes, call_stack: &Vec<String>) -> bool {
+fn check_continue_condition_function<T: FieldOps + 'static>(
+    inst: &InstructionPointer, fn_vars: &mut Vec<Option<Var<T>>>,
+    nodes: &mut Nodes<T>, call_stack: &Vec<String>) -> bool {
 
     let val = calc_function_expression(inst, fn_vars, nodes, call_stack)
         .to_const(nodes)
@@ -1337,52 +1382,39 @@ fn check_continue_condition_function(
                 "condition is not a constant: {}: {}:{}",
                 e, call_stack.join(" -> "), inst.get_line()));
 
-    val != U256::ZERO
+    !val.is_zero()
 }
 
 fn find_function<'a>(name: &str, functions: &'a [FunctionCode]) -> &'a FunctionCode {
     functions.iter().find(|f| f.header == name).expect("function not found")
 }
 
-#[derive(Debug, Clone)]
-struct ValueTooBigError {}
-
-impl fmt::Display for ValueTooBigError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "value is too big")
-    }
-}
-
-impl Error for ValueTooBigError {}
-
-// Convert U256 to usize
-fn bigint_to_usize(value: &U256) -> Result<usize, Box<dyn Error>> {
-    let le_bytes = value.to_le_bytes::<32>(); // Convert to little-endian bytes
-    for item in le_bytes.iter().skip(size_of::<usize>()) {
+fn bigint_to_usize<T: FieldOps>(value: T) -> Result<usize, Box<dyn Error>> {
+    let bs = value.to_le_bytes();
+    for item in bs.iter().skip(size_of::<usize>()) {
         if *item != 0 {
-            return Err(Box::new(ValueTooBigError {}));
+            return Err(anyhow!("value is too big").into());
         }
     }
-    let usize_bytes: [u8; size_of::<usize>()] = le_bytes[..size_of::<usize>()]
-        .try_into()
-        .expect("slice with incorrect length");
+    let usize_bytes: [u8; size_of::<usize>()] = bs[..size_of::<usize>()]
+        .try_into()?;
     Ok(usize::from_le_bytes(usize_bytes))
 }
 
 
-struct ComponentInstance {
+struct ComponentInstance<T: FieldOps> {
     template_id: usize,
     signal_offset: usize,
     number_of_inputs: usize,
     component_offset: usize, // global component index
-    vars: Vec<Option<Var>>,
-    subcomponents: Vec<Option<ComponentInstance>>,
+    vars: Vec<Option<Var<T>>>,
+    subcomponents: Vec<Option<ComponentInstance<T>>>,
 }
 
-fn fmt_create_cmp_bucket(
-    ctx: &mut BuildCircuitContext,
+fn fmt_create_cmp_bucket<T: FieldOps + 'static>(
+    ctx: &mut BuildCircuitContext<T>,
     cmp_bucket: &CreateCmpBucket,
-    cmp: &mut ComponentInstance,
+    cmp: &mut ComponentInstance<T>,
     print_debug: bool,
     call_stack: &Vec<String>,
 ) -> String {
@@ -1427,12 +1459,12 @@ fn fmt_create_cmp_bucket(
 }
 
 #[derive(Clone, Debug)]
-enum Var {
-    Value(U256),
+enum Var<T: FieldOps> {
+    Value(T),
     Node(usize),
 }
 
-impl fmt::Display for Var {
+impl<T: FieldOps> fmt::Display for Var<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Var::Value(ref c) => write!(f, "Var::Value({})", c),
@@ -1442,21 +1474,21 @@ impl fmt::Display for Var {
 }
 
 
-impl Var {
-    fn to_const(&self, nodes: &Nodes) -> Result<U256, NodeConstErr> {
+impl<T: FieldOps + 'static> Var<T> {
+    fn to_const(&self, nodes: &Nodes<T>) -> Result<T, NodeConstErr> {
         match self {
             Var::Value(v) => Ok(*v),
-            Var::Node(node_idx) => nodes.to_const(NodeIdx::from(*node_idx)),
+            Var::Node(node_idx) => nodes.to_const_recursive(NodeIdx::from(*node_idx)),
         }
     }
 
-    fn to_const_usize(&self, nodes: &Nodes) -> Result<usize, Box<dyn Error>> {
+    fn to_const_usize(&self, nodes: &Nodes<T>) -> Result<usize, Box<dyn Error>> {
         let c = self.to_const(nodes)?;
-        bigint_to_usize(&c)
+        bigint_to_usize(c)
     }
 
     fn must_const_usize(
-        &self, nodes: &Nodes, call_stack: &[String]) -> usize {
+        &self, nodes: &Nodes<T>, call_stack: &[String]) -> usize {
 
         self.to_const_usize(nodes).unwrap_or_else(|e| {
             panic!("{}: {}", e, call_stack.join(" -> "));
@@ -1464,10 +1496,10 @@ impl Var {
     }
 }
 
-fn load_n(
-    ctx: &mut BuildCircuitContext, load_bucket: &LoadBucket,
-    cmp: &mut ComponentInstance, size: usize, print_debug: bool,
-    call_stack: &Vec<String>) -> Vec<Var> {
+fn load_n<T: FieldOps + 'static>(
+    ctx: &mut BuildCircuitContext<T>, load_bucket: &LoadBucket,
+    cmp: &mut ComponentInstance<T>, size: usize, print_debug: bool,
+    call_stack: &Vec<String>) -> Vec<Var<T>> {
 
     match load_bucket.address_type {
         AddressType::Signal => match &load_bucket.src {
@@ -1565,7 +1597,7 @@ fn load_n(
                 calc_expression(ctx, location, cmp, print_debug, call_stack)
                 .must_const_usize(ctx.nodes, call_stack);
 
-            let mut result: Vec<Var> = Vec::with_capacity(size);
+            let mut result: Vec<Var<T>> = Vec::with_capacity(size);
             for i in 0..size {
                 result.push(match cmp.vars[var_idx + i] {
                     Some(ref v) => v.clone(),
@@ -1577,21 +1609,21 @@ fn load_n(
     }
 }
 
-fn build_unary_op_var(
-    ctx: &mut BuildCircuitContext,
-    cmp: &mut ComponentInstance,
+fn build_unary_op_var<T: FieldOps + 'static>(
+    ctx: &mut BuildCircuitContext<T>,
+    cmp: &mut ComponentInstance<T>,
     op: UnoOperation,
     stack: &[InstructionPointer],
     print_debug: bool,
     call_stack: &Vec<String>,
-) -> Var {
+) -> Var<T> {
     assert_eq!(stack.len(), 1);
     let a = calc_expression(
         ctx, &stack[0], cmp, print_debug, call_stack);
 
     match &a {
         Var::Value(ref a) => {
-            Var::Value(op.eval(*a))
+            Var::Value((&ctx.nodes.ff).op_uno(op, *a))
         }
         Var::Node(node_idx) => {
             let node = Node::UnoOp(op, *node_idx);
@@ -1601,30 +1633,30 @@ fn build_unary_op_var(
 }
 
 // Create a Var from operation on two arguments a anb b
-fn build_binary_op_var(
-    ctx: &mut BuildCircuitContext,
-    cmp: &mut ComponentInstance,
+fn build_binary_op_var<T: FieldOps + 'static>(
+    ctx: &mut BuildCircuitContext<T>,
+    cmp: &mut ComponentInstance<T>,
     op: Operation,
     stack: &[InstructionPointer],
     print_debug: bool,
     call_stack: &Vec<String>,
-) -> Var {
+) -> Var<T> {
     assert_eq!(stack.len(), 2);
     let a = calc_expression(
         ctx, &stack[0], cmp, print_debug, call_stack);
     let b = calc_expression(
         ctx, &stack[1], cmp, print_debug, call_stack);
 
-    let mut node_idx = |v: &Var| match v {
+    let mut node_idx = |v: &Var<T>| match v {
         Var::Value(ref c) => {
-            ctx.nodes.push(Node::Constant(*c)).0
+            ctx.nodes.push_constant(*c).0
         }
         Var::Node(idx) => { *idx }
     };
 
     match (&a, &b) {
         (Var::Value(ref a), Var::Value(ref b)) => {
-            Var::Value(op.eval(*a, *b))
+            Var::Value((&ctx.nodes.ff).op_duo(op, *a, *b))
         }
         _ => {
             let node = Node::Op(op, node_idx(&a), node_idx(&b));
@@ -1635,13 +1667,13 @@ fn build_binary_op_var(
 
 // This function should calculate node based only on constant or variable
 // values. Not based on signal values.
-fn calc_expression(
-    ctx: &mut BuildCircuitContext,
+fn calc_expression<T: FieldOps + 'static>(
+    ctx: &mut BuildCircuitContext<T>,
     inst: &InstructionPointer,
-    cmp: &mut ComponentInstance,
+    cmp: &mut ComponentInstance<T>,
     print_debug: bool,
     call_stack: &Vec<String>,
-) -> Var {
+) -> Var<T> {
     match **inst {
         Instruction::Value(ref value_bucket) => {
             let mut vars = var_from_value_instruction_n(
@@ -1686,14 +1718,14 @@ fn calc_expression(
 
 // This function should calculate node based only on constant or variable
 // values. Not based on signal values.
-fn calc_expression_n(
-    ctx: &mut BuildCircuitContext,
+fn calc_expression_n<T: FieldOps + 'static>(
+    ctx: &mut BuildCircuitContext<T>,
     inst: &InstructionPointer,
-    cmp: &mut ComponentInstance,
+    cmp: &mut ComponentInstance<T>,
     size: usize,
     print_debug: bool,
     call_stack: &Vec<String>,
-) -> Vec<Var> {
+) -> Vec<Var<T>> {
     if size == 1 {
         return vec![calc_expression(ctx, inst, cmp, print_debug, call_stack)];
     }
@@ -1712,9 +1744,9 @@ fn calc_expression_n(
     }
 }
 
-fn check_continue_condition(
-    ctx: &mut BuildCircuitContext,
-    cmp: &mut ComponentInstance,
+fn check_continue_condition<T: FieldOps + 'static>(
+    ctx: &mut BuildCircuitContext<T>,
+    cmp: &mut ComponentInstance<T>,
     inst: &InstructionPointer,
     print_debug: bool,
     call_stack: &Vec<String>,
@@ -1726,78 +1758,47 @@ fn check_continue_condition(
                 "condition is not a constant: {}: {}",
                 e, call_stack.join(" -> ")));
 
-    val != U256::ZERO
+    !val.is_zero()
 }
 
-fn get_constants(circuit: &Circuit) -> Vec<Node> {
-    let mut constants: Vec<Node> = Vec::new();
+fn get_constants<T: FieldOps>(
+    ff: &Field<T>,
+    circuit: &Circuit) -> Result<Vec<T>, Box<dyn Error>> {
+
+    let mut constants: Vec<T> = Vec::new();
     for c in &circuit.c_producer.field_tracking {
-        constants.push(Node::Constant(U256::from_str_radix(c.as_str(), 10).unwrap()));
+        constants.push(ff.parse_str(c.as_str())?);
     }
-    constants
+    Ok(constants)
 }
 
-fn init_input_signals(
+fn init_input_signals<T: FieldOps + 'static>(
     circuit: &Circuit,
-    nodes: &mut Nodes,
+    nodes: &mut Nodes<T>,
     signal_node_idx: &mut [usize],
-    input_file: Option<String>,
-) -> (InputSignalsInfo, Vec<U256>) {
+) -> InputSignalsInfo {
+
     let input_list = circuit.c_producer.get_main_input_list();
-    let mut signal_values: Vec<U256> = Vec::new();
-    signal_values.push(U256::from(1));
+    let mut signal_values: Vec<T> = Vec::new();
+    signal_values.push(T::one());
     signal_node_idx[0] = nodes.push(Node::Input(signal_values.len() - 1)).0;
     let mut inputs_info = HashMap::new();
 
-    let inputs: Option<HashMap<String, Vec<U256>>> = match input_file {
-        Some(file) => {
-            let inputs_data = fs::read(file).expect("Failed to read input file");
-            let inputs = deserialize_inputs(&inputs_data).unwrap();
-            Some(inputs)
-        }
-        None => {
-            None
-        }
-    };
-
     for (name, offset, len) in input_list {
         inputs_info.insert(name.clone(), (signal_values.len(), *len));
-        match inputs {
-            Some(ref inputs) => {
-                match inputs.get(name) {
-                    Some(values) => {
-                        if values.len() != *len {
-                            panic!(
-                                "input signal {} has different length in inputs file, want {}, actual {}",
-                                name, *len, values.len());
-                        }
-                        for (i, v) in values.iter().enumerate() {
-                            signal_values.push(*v);
-                            signal_node_idx[offset + i] = nodes.push(
-                                Node::Input(signal_values.len() - 1)).0;
-                        }
-                    }
-                    None => {
-                        panic!("input signal {} is not found in inputs file", name);
-                    }
-                }
-            }
-            None => {
-                for i in 0..*len {
-                    signal_values.push(U256::ZERO);
-                    signal_node_idx[offset + i] = nodes.push(
-                        Node::Input(signal_values.len() - 1)).0;
-                }
-            }
+        for i in 0..*len {
+            signal_values.push(T::zero());
+            signal_node_idx[offset + i] = nodes.push(
+                Node::Input(signal_values.len() - 1)).0;
         }
     }
 
-    (inputs_info, signal_values)
+    inputs_info
 }
 
-fn run_template(
-    ctx: &mut BuildCircuitContext, print_debug: bool, call_stack: &[String],
-    cmp: &mut ComponentInstance) {
+fn run_template<T: FieldOps + 'static>(
+    ctx: &mut BuildCircuitContext<T>, print_debug: bool, call_stack: &[String],
+    cmp: &mut ComponentInstance<T>) {
 
     let tmpl = &ctx.templates[cmp.template_id];
 
@@ -1821,13 +1822,53 @@ fn run_template(
     // TODO: assert all components run
 }
 
+enum Prime {
+    Bn128,
+    // Bls12381,
+    Goldilocks,
+    Grumpkin,
+    // Pallas,
+    // Vesta,
+    // Secq256r1,
+}
+
+impl Prime {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Bn128 => "bn128",
+            Self::Goldilocks => "goldilocks",
+            Self::Grumpkin => "grumpkin",
+        }
+    }
+}
+
+impl FromStr for Prime {
+    type Err = Box<dyn Error>;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            s if s == Self::Bn128.as_str() => Ok(Prime::Bn128),
+            s if s == Self::Goldilocks.as_str() => Ok(Prime::Goldilocks),
+            s if s == Self::Grumpkin.as_str() => Ok(Prime::Grumpkin),
+            _ => Err(anyhow!("Invalid prime: {}", s).into()),
+        }
+    }
+}
+
+enum OptimizationLevel {
+    O0,
+    O1,
+    O2,
+}
+
 struct Args {
     circuit_file: String,
-    inputs_file: Option<String>,
     graph_file: String,
     link_libraries: Vec<PathBuf>,
-    print_unoptimized: bool,
     print_debug: bool,
+    prime: Prime,
+    r1cs: Option<String>,
+    optimization_level: Option<OptimizationLevel>,
 }
 
 fn parse_args() -> Args {
@@ -1837,12 +1878,18 @@ fn parse_args() -> Args {
     let mut graph_file: Option<String> = None;
     let mut link_libraries: Vec<PathBuf> = Vec::new();
     let mut inputs_file: Option<String> = None;
-    let mut print_unoptimized = false;
     let mut print_debug = false;
+    let mut r1cs_file: Option<String> = None;
+    let mut prime: Option<Prime> = None;
+    let mut optimization_level: Option<OptimizationLevel> = None;
 
     let usage = |err_msg: &str| -> String {
         eprintln!("{}", err_msg);
-        eprintln!("Usage: {} <circuit_file> <graph_file> [-l <link_library>]* [-i <inputs_file.json>] [-print-unoptimized] [-v]", args[0]);
+        eprintln!();
+        eprintln!("Usage: {} <circuit_file> <graph_file> [-l <link_library>]* [-i <inputs_file.json>] [-p <prime>] [--r1cs <r1cs_file>] [--O0 | --O1 | --O2] [-v]", args[0]);
+        eprintln!();
+        eprintln!("       Valid primes: bn128 (default), goldilocks, grumpkin");
+        eprintln!("       Default optimization level: --O2");
         std::process::exit(1);
     };
 
@@ -1871,10 +1918,48 @@ fn parse_args() -> Args {
             } else {
                 usage("multiple inputs files");
             }
-        } else if args[i] == "-print-unoptimized" {
-            print_unoptimized = true;
         } else if args[i] == "-v" {
             print_debug = true;
+        } else if args[i] == "--r1cs" {
+            i += 1;
+            if i >= args.len() {
+                usage("missing argument for --r1cs");
+            }
+            if r1cs_file.is_some() {
+                usage("multiple r1cs files");
+            }
+            r1cs_file = Some(args[i].clone());
+        } else if args[i] == "--O0" {
+            if optimization_level.is_some() {
+                usage("multiple optimization levels set");
+            }
+            optimization_level = Some(OptimizationLevel::O0);
+        } else if args[i] == "--O1" {
+            if optimization_level.is_some() {
+                usage("multiple optimization levels set");
+            }
+            optimization_level = Some(OptimizationLevel::O1);
+        } else if args[i] == "--O2" {
+            if optimization_level.is_some() {
+                usage("multiple optimization levels set");
+            }
+            optimization_level = Some(OptimizationLevel::O2);
+        } else if args[i] == "-p" {
+            i += 1;
+            if i >= args.len() {
+                usage("missing argument for -p");
+            }
+            if prime.is_some() {
+                usage("multiple primes specified");
+            }
+            match Prime::from_str(&args[i]) {
+                Err(e) => {
+                    usage(e.to_string().as_str());
+                }
+                Ok(p) => {
+                    prime = Some(p)
+                }
+            }
         } else if args[i].starts_with("-") {
             let message = format!("unknown argument: {}", args[i]);
             usage(&message);
@@ -1890,11 +1975,12 @@ fn parse_args() -> Args {
 
     Args {
         circuit_file: circuit_file.unwrap_or_else(|| { usage("missing circuit file") }),
-        inputs_file,
         graph_file: graph_file.unwrap_or_else(|| { usage("missing graph file") }),
         link_libraries,
-        print_unoptimized,
         print_debug,
+        prime: prime.unwrap_or(Prime::Bn128),
+        r1cs: r1cs_file,
+        optimization_level,
     }
 }
 
@@ -1933,28 +2019,51 @@ fn main() {
         }
     }
 
+    let (no_rounds, flag_s, flag_f) =
+        match args.optimization_level {
+            Some(OptimizationLevel::O0) => {
+                (0usize, false, true)
+            }
+            Some(OptimizationLevel::O1) => {
+                (0usize, true, false)
+            },
+            Some(OptimizationLevel::O2) | None => {
+                (usize::MAX, false, false)
+            }
+        };
+
     let build_config = BuildConfig {
-        no_rounds: usize::MAX,
+        no_rounds,
         flag_json_sub: false,
         json_substitutions: String::new(),
-        flag_s: false,
-        flag_f: false,
+        flag_s,
+        flag_f,
         flag_p: false,
         flag_verbose: false,
         flag_old_heuristics: false,
         inspect_constraints: false,
-        prime: String::from("bn128"),
+        prime: args.prime.as_str().to_string(),
     };
 
-    let (_, vcp) = build_circuit(program_archive, build_config).unwrap();
+    let custom_gates = program_archive.custom_gates;
 
-    let main_template_id = vcp.main_id;
-    let witness_list = vcp.get_witness_list().clone();
+    let (cw, vcp) =
+        build_circuit(program_archive, build_config)
+        .unwrap();
+
+    if let Some(r1cs_file) = &args.r1cs {
+        if cw.r1cs(r1cs_file, custom_gates).is_err() {
+            panic!(
+                "Could not write the output in the given path: {}",
+                r1cs_file);
+        }
+        println!("R1CS written successfully: {}", r1cs_file);
+    }
 
     let circuit = run_compiler(
-        vcp,
+        vcp.clone(),
         Config {
-            debug_output: true,
+            debug_output: false,
             produce_input_log: true,
             wat_flag: false,
         },
@@ -1966,16 +2075,49 @@ fn main() {
     println!("functions len: {}", circuit.functions.len());
     println!("main header: {}", circuit.c_producer.main_header);
 
+
+    let prime = U256::from_str_radix(
+        circuit.c_producer.prime.as_str(), 10).unwrap();
+    match prime.bit_len() {
+        64 => {
+            let prime = U64::from_str(
+                circuit.c_producer.prime.as_str()).unwrap();
+            build_graph(
+                prime, circuit.c_producer.prime_str.as_str(), &circuit, &args,
+                &vcp)
+        }
+        254 => {
+            let prime = <U254 as FieldOps>::from_str(
+                circuit.c_producer.prime.as_str()).unwrap();
+            build_graph(
+                prime, circuit.c_producer.prime_str.as_str(), &circuit, &args,
+                &vcp)
+        }
+        _ => {
+            panic!(
+                "unsupported prime size: {}, prime: {}",
+                prime.bit_len(), prime);
+        }
+    }
+}
+
+fn build_graph<T: FieldOps + 'static>(
+    prime: T, curve_name: &str, circuit: &Circuit,
+    args: &Args, vcp: &VCP) {
+
+    let mut nodes = Nodes::new(prime, curve_name);
+    let constants = get_constants(&nodes.ff, circuit).unwrap();
+    for c in constants {
+        nodes.push_constant(c);
+    }
+
     // The node indexes for each signal. For example in
     // signal_node_idx[3] stored the node index for signal 3.
     let mut signal_node_idx: Vec<usize> =
         vec![usize::MAX; circuit.c_producer.total_number_of_signals];
 
-    let mut nodes = Nodes::new();
-    nodes.0.extend(get_constants(&circuit));
-
-    let (input_signals, input_signal_values): (InputSignalsInfo, Vec<U256>) = init_input_signals(
-        &circuit, &mut nodes, &mut signal_node_idx, args.inputs_file);
+    let input_signals: InputSignalsInfo = init_input_signals(
+        circuit, &mut nodes, &mut signal_node_idx);
 
     // assert that template id is equal to index in templates list
     for (i, t) in circuit.templates.iter().enumerate() {
@@ -1985,19 +2127,19 @@ fn main() {
         }
     }
 
-    let mut ctx = BuildCircuitContext {
-        nodes: &mut nodes,
-        signal_node_idx: &mut signal_node_idx,
-        templates: &circuit.templates,
-        functions: &circuit.functions,
-        io_map: circuit.c_producer.get_io_map(),
-    };
+    let mut ctx = BuildCircuitContext::new(
+        &mut nodes, &mut signal_node_idx, &circuit.templates,
+        &circuit.functions, circuit.c_producer.get_io_map());
 
     let main_component_signal_start = 1usize;
+    let main_template_id = vcp.main_id;
     let mut main_component = ctx.new_component(
         main_template_id, main_component_signal_start, 0);
 
     run_template(&mut ctx, args.print_debug, &[], &mut main_component);
+
+    ctx.progress_bar.set_message("");
+    ctx.progress_bar.finish();
 
     for (idx, i) in signal_node_idx.iter().enumerate() {
         if *i == usize::MAX {
@@ -2005,6 +2147,7 @@ fn main() {
         }
     }
 
+    let witness_list = vcp.get_witness_list().clone();
     let mut witness_node_idxes = witness_list
         .iter().enumerate()
         .map(|(idx, i)| {
@@ -2013,14 +2156,9 @@ fn main() {
         })
         .collect::<Vec<_>>();
 
-    if args.print_unoptimized {
-        println!("Unoptimized graph:");
-        evaluate_unoptimized(&nodes, &input_signal_values, &signal_node_idx, &witness_list);
-    }
-
     println!("number of nodes {}, signals {}", nodes.len(), witness_node_idxes.len());
 
-    optimize(&mut nodes.0, &mut witness_node_idxes);
+    optimize(&mut nodes, &mut witness_node_idxes);
 
     println!(
         "number of nodes after optimize {}, signals {}",
@@ -2029,64 +2167,7 @@ fn main() {
     let f = fs::File::create(&args.graph_file).unwrap();
     serialize_witnesscalc_graph(f, &nodes, &witness_node_idxes, &input_signals).unwrap();
 
-    println!("circuit graph saved to file: {}", &args.graph_file)
-}
-
-fn evaluate_unoptimized(
-    nodes: &Nodes, inputs: &[U256], signal_node_idx: &[usize],
-    witness_signals: &[usize]) {
-
-    let mut node_idx_to_signal: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (signal_idx, &node_idx) in signal_node_idx.iter().enumerate() {
-        if node_idx == usize::MAX {
-            // signal was not set
-            continue;
-        }
-        node_idx_to_signal
-            .entry(node_idx)
-            .and_modify(|v| v.push(signal_idx))
-            .or_insert(vec![signal_idx]);
-    }
-
-    let mut signal_to_witness: HashMap<usize, Vec<usize>> = HashMap::new();
-    println!("Mapping from witness index to signal index:");
-    for (witness_idx, &signal_idx) in witness_signals.iter().enumerate() {
-        println!("witness {} -> {}", witness_idx, signal_idx);
-        signal_to_witness.entry(signal_idx).and_modify(|v| v.push(witness_idx)).or_insert(vec![witness_idx]);
-    }
-
-    let mut values = Vec::with_capacity(nodes.len());
-
-    println!("<node idx> <value> <signal indexes> <witness indexes> <node descr>");
-    for (node_idx, &node) in nodes.iter().enumerate() {
-        let value = match node {
-            Node::Unknown => { panic!("unknown node value") }
-            Node::Constant(c) => c,
-            Node::MontConstant(_) => { panic!("no montgomery constant expected in unoptimized graph") }
-            Node::Input(i) => inputs[i],
-            Node::Op(op, a, b) => op.eval(values[a], values[b]),
-            Node::UnoOp(op, a) => op.eval(values[a]),
-            Node::TresOp(op, a, b, c) => op.eval(values[a], values[b], values[c]),
-        };
-        values.push(value);
-
-        let empty_vec: Vec<usize> = Vec::new();
-        let signals_for_node: &Vec<usize> = node_idx_to_signal.get(&node_idx).unwrap_or(&empty_vec);
-
-        let signal_idxs = signals_for_node.iter()
-            .map(|&i| format!("{}_S", i))
-            .collect::<Vec<String>>().join(", ");
-
-        let mut witness_idxs: Vec<usize> = Vec::new();
-        for &signal_idx in signals_for_node {
-            witness_idxs.extend(signal_to_witness.get(&signal_idx).unwrap_or(&empty_vec));
-        }
-        let output_signals = witness_idxs.iter()
-            .map(|&i| format!("{}_W", i))
-            .collect::<Vec<String>>().join(", ");
-
-        println!("[{:4}] {:>77} ({:>4}) ({:>4}) {:?}", node_idx, value.to_string(), signal_idxs, output_signals, node);
-    }
+    println!("circuit graph saved to file: {}", &args.graph_file);
 }
 
 struct SignalDestination<'a> {
@@ -2095,9 +2176,9 @@ struct SignalDestination<'a> {
     dest: &'a LocationRule,
 }
 
-fn store_subcomponent_signals(
-    ctx: &mut BuildCircuitContext, src_node_idxs: &[usize], print_debug: bool,
-    call_stack: &Vec<String>, cmp: &mut ComponentInstance,
+fn store_subcomponent_signals<T: FieldOps + 'static>(
+    ctx: &mut BuildCircuitContext<T>, src_node_idxs: &[usize], print_debug: bool,
+    call_stack: &Vec<String>, cmp: &mut ComponentInstance<T>,
     dst: &SignalDestination) {
 
     let input_status: &StatusInput;
@@ -2145,10 +2226,9 @@ fn store_subcomponent_signals(
 
     let signal_idx = signal_offset + signal_idx;
     for (i, v) in src_node_idxs.iter().enumerate() {
-        if ctx.signal_node_idx[signal_idx + i] != usize::MAX {
-            panic!("subcomponent signal is already set");
-        }
-        ctx.signal_node_idx[signal_idx + i] = *v;
+        ctx.associate_signal_to_node(
+            signal_idx + i, *v, call_stack,
+            dst.cmp_address.get_line());
     }
     sub_cmp.number_of_inputs -= src_node_idxs.len();
 
@@ -2171,22 +2251,33 @@ fn store_subcomponent_signals(
 
 #[cfg(test)]
 mod tests {
-    use ruint::uint;
-    use ruint::aliases::U256;
+    use circom_witnesscalc::field::U254;
     use crate::bigint_to_usize;
+
+    fn u254(s: &str) -> U254 {
+        let x = U254::from_str_radix(s, 10).expect(s);
+        let prime = U254::from_str_radix(
+            "21888242871839275222246405745257275088548364400416034343698204186575808495617",
+            10)
+            .unwrap();
+        if x > prime {
+            panic!("{}", s)
+        };
+        x
+    }
 
     #[test]
     fn test_bigint_to_usize() {
-        let v = uint!(0_U256);
-        let r = bigint_to_usize(&v);
+        let v = u254("0");
+        let r = bigint_to_usize(v);
         assert!(matches!(r, Ok(0usize)));
 
-        let v = U256::from(usize::MAX);
-        let r = bigint_to_usize(&v);
+        let v = U254::from(usize::MAX);
+        let r = bigint_to_usize(v);
         assert!(matches!(r, Ok(usize::MAX)));
 
         let v = v + v;
-        let r = bigint_to_usize(&v);
+        let r = bigint_to_usize(v);
         assert!(r.is_err());
     }
 }

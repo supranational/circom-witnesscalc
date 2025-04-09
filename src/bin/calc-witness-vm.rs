@@ -10,25 +10,67 @@ use ruint::aliases::U256;
 use circom_witnesscalc::{wtns_from_u256_witness, Error};
 use circom_witnesscalc::Error::InputsUnmarshal;
 use circom_witnesscalc::storage::deserialize_witnesscalc_vm;
-use circom_witnesscalc::vm::{build_component, execute};
+use circom_witnesscalc::vm::{build_component, execute, Template};
 
 struct Args {
     vm_file: String,
     inputs_file: String,
     witness_file: String,
+    component_counter: bool
 }
 
 fn parse_args() -> Args {
     let args: Vec<String> = env::args().collect();
-    if args.len() != 4 {
-        eprintln!("Usage: {} <graph.bin> <inputs.json> <witness.wtns>", args[0]);
-        std::process::exit(1);
+    let mut wcd_file: Option<String> = None;
+    let mut inputs_file: Option<String> = None;
+    let mut wtns_file: Option<String> = None;
+    let mut component_counter = false;
+
+    let usage = |err_msg: &str| -> () {
+        if err_msg != "" {
+            eprintln!("ERROR: {}", err_msg);
+            eprintln!();
+        }
+        eprintln!("USAGE:");
+        eprintln!("    {} <wcd_file> <input_json> <output_path> [OPTIONS]", args[0]);
+        eprintln!();
+        eprintln!("ARGUMENTS:");
+        eprintln!("    <wcd_file>    Path to the WCD file with calculation graph");
+        eprintln!("    <input_json>  JSON file containing inputs for the circuit");
+        eprintln!("    <output_path> File where the witness will be saved");
+        eprintln!();
+        eprintln!("OPTIONS:");
+        eprintln!("    --help                Display this help message");
+        eprintln!("    --component-counter   Output statistics of component counters");
+        let exit_code = if err_msg != "" { 1i32 } else { 0i32 };
+        std::process::exit(exit_code);
+    };
+
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--component-counter" || args[i] == "-h" {
+            component_counter = true;
+        } else if args[i] == "--help" || args[i] == "-h" {
+            usage("");
+        } else if args[i].starts_with("-") {
+            usage(format!("Unknown option: {}", args[i]).as_str());
+        } else if wcd_file.is_none() {
+            wcd_file = Some(args[i].clone());
+        } else if inputs_file.is_none() {
+            inputs_file = Some(args[i].clone());
+        } else if wtns_file.is_none() {
+            wtns_file = Some(args[i].clone());
+        } else {
+            usage(format!("Unknown argument: {}", args[i]).as_str());
+        }
+        i += 1;
     }
 
     Args {
-        vm_file: args[1].clone(),
-        inputs_file: args[2].clone(),
-        witness_file: args[3].clone(),
+        vm_file: wcd_file.unwrap_or_else(|| { usage("missing WCD file"); String::new() }),
+        inputs_file: inputs_file.unwrap_or_else(|| { usage("missing inputs file"); String::new() }),
+        witness_file: wtns_file.unwrap_or_else(|| { usage("missing output .wtns file"); String::new() }),
+        component_counter,
     }
 }
 
@@ -118,6 +160,30 @@ pub fn deserialize_inputs(inputs_data: &[u8]) -> Result<HashMap<String, Vec<U256
     Ok(inputs)
 }
 
+fn templates_stats(tmpls: &[Template], main_template_id: usize) {
+    let mut counters: HashMap<String, usize> = HashMap::new();
+    templates_stats_int(tmpls, main_template_id, &mut counters);
+    println!("Template usage [begin]");
+    for (k, v) in counters.iter() {
+        println!("{}: {}", k, v);
+    }
+    println!("Template usage [begin]");
+}
+
+fn templates_stats_int(
+    templates: &[Template], template_id: usize,
+    counters: &mut HashMap<String, usize>) {
+
+    let key = templates[template_id].name.clone();
+    *counters.entry(key).or_insert(0) += 1;
+
+    for i in templates[template_id].components.iter() {
+        for _j in 0..i.number_of_cmp {
+            templates_stats_int(templates, i.template_id, counters);
+        }
+    }
+}
+
 fn main() {
     let args = parse_args();
 
@@ -140,6 +206,11 @@ fn main() {
     println!(
         "VM file read and parsed in {:?}. Templates: {}, functions: {}.",
         start.elapsed(), cs.templates.len(), cs.functions.len());
+
+
+    if args.component_counter {
+        templates_stats(&cs.templates, cs.main_template_id);
+    }
 
     let start = Instant::now();
     let main_component_signals_start = 1;

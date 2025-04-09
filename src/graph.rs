@@ -1,38 +1,19 @@
 use std::{collections::HashMap, ops::{BitAnd, Shl, Shr}, thread};
-use std::cmp::Ordering;
+use std::any::Any;
+use std::collections::hash_map::Entry;
 use std::error::Error;
-use std::ops::{BitOr, BitXor, Deref, Not};
+use std::fmt::Debug;
+use std::ops::{BitOr, BitXor, Not};
 use std::sync::{mpsc, Arc};
 use std::time::Instant;
-use crate::field::M;
-use ark_bn254::Fr;
-use ark_ff::{BigInt, PrimeField, BigInteger, Zero, One, Field};
-use rand::Rng;
+use crate::field::{Field, FieldOperations, FieldOps, M};
+use rand::{RngCore};
 use ruint::aliases::U256;
 use serde::{Deserialize, Serialize};
 
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
 use compiler::intermediate_representation::ir_interface::OperatorType;
+use rand::prelude::ThreadRng;
 use ruint::uint;
-
-fn ark_se<S, A: CanonicalSerialize>(a: &A, s: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    let mut bytes = vec![];
-    a.serialize_with_mode(&mut bytes, Compress::Yes)
-        .map_err(serde::ser::Error::custom)?;
-    s.serialize_bytes(&bytes)
-}
-
-fn ark_de<'de, D, A: CanonicalDeserialize>(data: D) -> Result<A, D::Error>
-where
-    D: serde::de::Deserializer<'de>,
-{
-    let s: Vec<u8> = serde::de::Deserialize::deserialize(data)?;
-    let a = A::deserialize_with_mode(s.as_slice(), Compress::Yes, Validate::Yes);
-    a.map_err(serde::de::Error::custom)
-}
 
 #[derive(Hash, PartialEq, Eq, Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum Operation {
@@ -59,7 +40,6 @@ pub enum Operation {
 }
 
 impl Operation {
-    // TODO: rewrite to &U256 type
     pub fn eval(&self, a: U256, b: U256) -> U256 {
         use Operation::*;
         match self {
@@ -96,51 +76,6 @@ impl Operation {
             //      bigger then modulus
             Bxor => a.bitxor(b),
             Idiv => if b == U256::ZERO { U256::ZERO } else { a / b },
-        }
-    }
-
-    pub fn eval_fr(&self, a: Fr, b: Fr) -> Fr {
-        use Operation::*;
-        match self {
-            Mul => a * b,
-            // We always should return something on the circuit execution.
-            // So in case of division by 0 we would return 0. And the proof
-            // should be invalid in the end.
-            Div => if b.is_zero() { Fr::zero() } else { a / b },
-            Add => a + b,
-            Sub => a - b,
-            Pow => a.pow(b.into_bigint()),
-            Idiv => if b.is_zero() {
-                Fr::zero()
-            } else {
-                let x = fr_to_u256(&a) / fr_to_u256(&b);
-                u256_to_fr(&x)
-            },
-            Mod => if b.is_zero() {
-                Fr::zero()
-            } else {
-                let x = fr_to_u256(&a) % fr_to_u256(&b);
-                u256_to_fr(&x)
-            },
-            Eq => match a.cmp(&b) {
-                Ordering::Equal => Fr::one(),
-                _ => Fr::zero(),
-            }
-            Neq => match a.cmp(&b) {
-                Ordering::Equal => Fr::zero(),
-                _ => Fr::one(),
-            },
-            Lt => u256_to_fr(&u_lt(&fr_to_u256(&a), &fr_to_u256(&b))),
-            Gt => u256_to_fr(&u_gt(&fr_to_u256(&a), &fr_to_u256(&b))),
-            Leq => u256_to_fr(&u_lte(&fr_to_u256(&a), &fr_to_u256(&b))),
-            Geq => u256_to_fr(&u_gte(&fr_to_u256(&a), &fr_to_u256(&b))),
-            Land => if a.is_zero() || b.is_zero() { Fr::zero() } else { Fr::one() },
-            Lor => if a.is_zero() && b.is_zero() { Fr::zero() } else { Fr::one() },
-            Shl => shl(a, b),
-            Shr => shr(a, b),
-            Bor => bit_or(a, b),
-            Band => bit_and(a, b),
-            Bxor => bit_xor(a, b),
         }
     }
 }
@@ -233,17 +168,6 @@ impl UnoOperation {
             },
         }
     }
-
-    pub fn eval_fr(&self, a: Fr) -> Fr {
-        match self {
-            UnoOperation::Neg => if a.is_zero() { Fr::zero() } else {
-                let mut x = Fr::MODULUS;
-                x.sub_with_borrow(&a.into_bigint());
-                Fr::from_bigint(x).unwrap()
-            },
-            _ => unimplemented!("uno operator {:?} not implemented for Montgomery", self),
-        }
-    }
 }
 
 impl From<&UnoOperation> for crate::proto::UnoOp {
@@ -305,12 +229,6 @@ impl TresOperation {
             TresOperation::TernCond => if a == U256::ZERO { c } else { b },
         }
     }
-
-    pub fn eval_fr(&self, a: Fr, b: Fr, c: Fr) -> Fr {
-        match self {
-            TresOperation::TernCond => if a.is_zero() { c } else { b },
-        }
-    }
 }
 
 impl From<&TresOperation> for crate::proto::TresOp {
@@ -326,100 +244,292 @@ pub enum Node {
     #[default]
     Unknown,
     Input(usize),
-    Constant(U256),
-    #[serde(serialize_with = "ark_se", deserialize_with = "ark_de")]
-    MontConstant(Fr),
+    Constant(usize),
     UnoOp(UnoOperation, usize),
     Op(Operation, usize, usize),
     TresOp(TresOperation, usize, usize, usize),
 }
 
-impl Node {
-    pub fn to_const(&self, nodes: &Nodes) -> Result<U256, NodeConstErr> {
-        match self {
-            Node::Constant(v) => Ok(*v),
-            Node::UnoOp(op, a) => {
-                if let Node::Constant(c) = nodes[*a] {
-                    Ok(op.eval(c))
-                } else {
-                    Err(NodeConstErr::NotConst)
-                }
-            }
-            Node::Op(op, a, b) => {
-                if let (Node::Constant(ca), Node::Constant(cb)) = (nodes[*a], nodes[*b]) {
-                    Ok(op.eval(ca, cb))
-                } else {
-                    Err(NodeConstErr::NotConst)
-                }
-            }
-            Node::TresOp(op, a, b, c) => {
-                if let (Node::Constant(ca), Node::Constant(cb), Node::Constant(cc)) = (nodes[*a], nodes[*b], nodes[*c]) {
-                    Ok(op.eval(ca, cb, cc))
-                } else {
-                    Err(NodeConstErr::NotConst)
-                }
-            }
-            _ =>  Err(NodeConstErr::InputSignal),
-        }
-    }
-
+pub trait NodesInterface: Any {
+    fn push_noopt(&mut self, n: Node) -> NodeIdx;
+    fn push(&mut self, n: Node) -> NodeIdx;
+    fn get_inputs_size(&self) -> usize;
+    fn as_any(&self) -> &dyn Any;
 }
 
-// TODO remove pub from Vec<Node>
-#[derive(Default)]
-pub struct Nodes(pub Vec<Node>);
+pub struct Nodes<T: FieldOps> {
+    prime_str: String,
+    // TODO maybe remove pub
+    pub ff: Field<T>,
+    // TODO remove pub
+    pub nodes: Vec<Node>,
+    pub constants: Vec<T>,
+    constants_idx: HashMap<T, usize>,
+}
 
-impl Nodes {
-    pub fn new() -> Self {
-        Nodes(Vec::new())
+impl<T: FieldOps + 'static> Nodes<T> {
+    pub fn new(prime: T, prime_str: &str) -> Self {
+        let ff = Field::new(prime);
+        Nodes {
+            ff,
+            nodes: Vec::new(),
+            constants: Vec::new(),
+            constants_idx: HashMap::new(),
+            prime_str: prime_str.to_string(),
+        }
     }
 
-    pub fn to_const(&self, idx: NodeIdx) -> Result<U256, NodeConstErr> {
-        let me = self.0.get(idx.0).ok_or(NodeConstErr::EmptyNode(idx))?;
+    pub fn to_const_recursive(&self, idx: NodeIdx) -> Result<T, NodeConstErr> {
+        let me = self.nodes.get(idx.0).ok_or(NodeConstErr::EmptyNode(idx))?;
         match me {
             Node::Unknown => panic!("Unknown node"),
-            Node::Constant(v) => Ok(*v),
+            Node::Constant(const_idx) => Ok(self.constants[*const_idx]),
             Node::UnoOp(op, a) => {
-                Ok(op.eval(
-                    self.to_const(NodeIdx(*a))?))
+                Ok((&self.ff).op_uno(*op,
+                    self.to_const_recursive(NodeIdx(*a))?))
             }
             Node::Op(op, a, b) => {
-                Ok(op.eval(
-                    self.to_const(NodeIdx(*a))?,
-                    self.to_const(NodeIdx(*b))?))
+                Ok((&self.ff).op_duo(*op,
+                    self.to_const_recursive(NodeIdx(*a))?,
+                    self.to_const_recursive(NodeIdx(*b))?))
             }
             Node::TresOp(op, a, b, c) => {
-                Ok(op.eval(
-                    self.to_const(NodeIdx(*a))?,
-                    self.to_const(NodeIdx(*b))?,
-                    self.to_const(NodeIdx(*c))?))
+                Ok((&self.ff).op_tres(*op,
+                    self.to_const_recursive(NodeIdx(*a))?,
+                    self.to_const_recursive(NodeIdx(*b))?,
+                    self.to_const_recursive(NodeIdx(*c))?))
             }
             Node::Input(_) => Err(NodeConstErr::InputSignal),
-            Node::MontConstant(_) => {
-                panic!("MontConstant should not be used here")
+        }
+    }
+
+    fn const_node_from_value(&mut self, v: T) -> Node {
+        match self.constants_idx.entry(v) {
+            Entry::Occupied(e) => {
+                Node::Constant(*e.get())
+            }
+            Entry::Vacant(e) => {
+                self.constants.push(v);
+                let idx = self.constants.len() - 1;
+                e.insert(idx);
+                Node::Constant(idx)
             }
         }
     }
 
-    pub fn push(&mut self, n: Node) -> NodeIdx {
-        let n = match n.to_const(self) {
-            Ok(v) => Node::Constant(v),
-            Err(_) => n,
-        };
-        self.0.push(n);
-        NodeIdx(self.0.len() - 1)
+    // try to return a constant node if operands are constant, otherwise return
+    // the unmodified node
+    fn try_into_constant(&mut self, n: &Node) -> Result<Node, NodeConstErr> {
+        match n {
+            Node::Unknown => panic!("Unknown node"),
+            Node::Constant(c_idx) => Ok(Node::Constant(*c_idx)),
+            Node::UnoOp(op, a) => {
+                if let Node::Constant(a_idx) = self.nodes[*a] {
+                    let v = (&self.ff).op_uno(*op, self.constants[a_idx]);
+                    Ok(self.const_node_from_value(v))
+                } else {
+                    Err(NodeConstErr::NotConst)
+                }
+            }
+            Node::Op(op, a, b) => {
+                if let (
+                    Node::Constant(a_idx),
+                    Node::Constant(b_idx)) = (
+                    self.nodes[*a],
+                    self.nodes[*b]) {
+
+                    let v = (&self.ff).op_duo(*op, self.constants[a_idx], self.constants[b_idx]);
+                    Ok(self.const_node_from_value(v))
+                } else {
+                    Err(NodeConstErr::NotConst)
+                }
+            }
+            Node::TresOp(op, a, b, c) => {
+                if let (
+                    Node::Constant(a_idx),
+                    Node::Constant(b_idx),
+                    Node::Constant(c_idx)) = (
+                    self.nodes[*a],
+                    self.nodes[*b],
+                    self.nodes[*c]) {
+
+                    let v = (&self.ff).op_tres(
+                        *op, self.constants[a_idx], self.constants[b_idx],
+                        self.constants[c_idx]);
+                    Ok(self.const_node_from_value(v))
+                } else {
+                    Err(NodeConstErr::NotConst)
+                }
+            }
+            Node::Input(_) => Err(NodeConstErr::InputSignal),
+        }
+    }
+
+    pub fn push_constant(&mut self, v: T) -> NodeIdx {
+        let n = self.const_node_from_value(v);
+        self.nodes.push(n);
+        NodeIdx(self.nodes.len() - 1)
     }
 
     pub fn get(&self, idx: NodeIdx) -> Option<&Node> {
-        self.0.get(idx.0)
+        self.nodes.get(idx.0)
+    }
+
+    pub fn to_proto(
+        &self,
+        idx: usize) -> Result<crate::proto::node::Node, NodeConstErr> {
+
+        let n = self.nodes.get(idx)
+            .ok_or(NodeConstErr::EmptyNode(NodeIdx(idx)))?;
+        match n {
+            Node::Unknown => panic!("unknown node"),
+            Node::Input(i) => Ok(
+                crate::proto::node::Node::Input (
+                    crate::proto::InputNode { idx: *i as u32 })),
+            Node::Constant(idx) => {
+                let c = self.constants[*idx];
+                let i = crate::proto::BigUInt { value_le: c.to_le_bytes() };
+                Ok(crate::proto::node::Node::Constant(
+                    crate::proto::ConstantNode { value: Some(i) }))
+            },
+            Node::UnoOp(op, a) => Ok(
+                crate::proto::node::Node::UnoOp(
+                    crate::proto::UnoOpNode {
+                        op: crate::proto::UnoOp::from(op) as i32,
+                        a_idx: *a as u32 })
+            ),
+            Node::Op(op, a, b) => Ok(
+                crate::proto::node::Node::DuoOp(
+                    crate::proto::DuoOpNode {
+                        op: crate::proto::DuoOp::from(op) as i32,
+                        a_idx: *a as u32,
+                        b_idx: *b as u32 })),
+            Node::TresOp(op, a, b, c) => Ok(
+                crate::proto::node::Node::TresOp(
+                    crate::proto::TresOpNode {
+                        op: crate::proto::TresOp::from(op) as i32,
+                        a_idx: *a as u32,
+                        b_idx: *b as u32,
+                        c_idx: *c as u32 })),
+        }
+    }
+
+    pub fn push_proto(&mut self, n: &crate::proto::node::Node) {
+        match n {
+            crate::proto::node::Node::Input(n2) => {
+                let idx: usize = n2.idx.try_into().unwrap();
+                self.push_noopt(Node::Input(idx));
+            },
+            crate::proto::node::Node::Constant(n2) => {
+                let c = (&self.ff)
+                    .parse_le_bytes(&n2.value.as_ref().unwrap().value_le)
+                    .unwrap();
+                self.push_constant(c);
+            },
+            crate::proto::node::Node::UnoOp(n2) => {
+                let op = crate::proto::UnoOp::try_from(n2.op).unwrap();
+                self.push_noopt(Node::UnoOp(op.into(), n2.a_idx as usize));
+            },
+            crate::proto::node::Node::DuoOp(n2) => {
+                let op = crate::proto::DuoOp::try_from(n2.op).unwrap();
+                self.push_noopt(
+                    Node::Op(op.into(), n2.a_idx as usize, n2.b_idx as usize));
+            },
+            crate::proto::node::Node::TresOp(n2) => {
+                let op = crate::proto::TresOp::try_from(n2.op).unwrap();
+                self.push_noopt(
+                    Node::TresOp(
+                        op.into(), n2.a_idx as usize, n2.b_idx as usize,
+                        n2.c_idx as usize));
+            },
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
+    pub fn prime(&self) -> T {
+        self.ff.prime
+    }
+
+    pub fn prime_str(&self) -> String {
+        self.prime_str.clone()
     }
 }
 
-impl Deref for Nodes {
-    type Target = Vec<Node>;
+impl<T: FieldOps + 'static> NodesInterface for Nodes<T> {
+    // push without optimization
+    fn push_noopt(&mut self, n: Node) -> NodeIdx {
+        self.nodes.push(n);
+        NodeIdx(self.nodes.len() - 1)
+    }
 
-    fn deref(&self) -> &Self::Target {
-        &self.0
+    fn push(&mut self, n: Node) -> NodeIdx {
+        let n = self.try_into_constant(&n).unwrap_or(n);
+        self.push_noopt(n)
+    }
+
+    fn get_inputs_size(&self) -> usize {
+        let mut start = false;
+        let mut max_index = 0usize;
+        for &node in self.nodes.iter() {
+            if let Node::Input(i) = node {
+                if i > max_index {
+                    max_index = i;
+                }
+                start = true
+            } else if start {
+                break;
+            }
+        }
+        max_index + 1
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[cfg(test)]
+impl<T: FieldOps> PartialEq for Nodes<T> {
+    fn eq(&self, other: &Self) -> bool {
+        if self.nodes.len() != other.nodes.len() {
+            return false;
+        }
+        self.nodes.iter().zip(other.nodes.iter()).all(|(a, b)| {
+            match (a, b) {
+                (Node::Unknown, Node::Unknown) => true,
+                (Node::Input(a), Node::Input(b)) => a == b,
+                (Node::Constant(a), Node::Constant(b)) => self.constants[*a] == self.constants[*b],
+                (Node::UnoOp(a, b), Node::UnoOp(c, d)) => a == c && b == d,
+                (Node::Op(a, b, c), Node::Op(d, e, f)) => a == d && b == e && c == f,
+                (Node::TresOp(a, b, c, d), Node::TresOp(e, f, g, h)) => a == e && b == f && c == g && d == h,
+                _ => false,
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+impl<T: FieldOps> Debug for Nodes<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Nodes {{")?;
+        for (i, n) in self.nodes.iter().enumerate() {
+            if let Node::Constant(c_idx) = *n {
+                let bs = self.constants[c_idx].to_le_bytes();
+                let n = U256::from_le_slice(&bs);
+                writeln!(f, "    {}, Constant({})", i, n)?;
+            } else {
+                writeln!(f, "    {}, {:?}", i, n)?;
+            }
+        }
+        writeln!(f, "}}")?;
+        Ok(())
     }
 }
 
@@ -485,15 +595,19 @@ fn assert_valid(nodes: &[Node]) {
     }
 }
 
-pub fn optimize(nodes: &mut Vec<Node>, outputs: &mut [usize]) {
-    tree_shake(nodes, outputs);
+pub fn optimize<T: FieldOps + 'static>(nodes: &mut Nodes<T>, outputs: &mut [usize]) {
+    tree_shake(&mut nodes.nodes, outputs);
     propagate(nodes);
     value_numbering(nodes, outputs);
     constants(nodes);
-    tree_shake(nodes, outputs);
+    tree_shake(&mut nodes.nodes, outputs);
 }
 
-pub fn evaluate(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<U256> {
+pub fn evaluate<T: FieldOps, F: FieldOperations<Type = T>>(
+    ff: F, nodes: &[Node], inputs: &[T], outputs: &[usize],
+    constants: &[T]) -> Vec<T>
+where Vec<T>: FromIterator<<F as FieldOperations>::Type>
+{
     // assert_valid(nodes);
 
     let start = Instant::now();
@@ -502,22 +616,31 @@ pub fn evaluate(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<U256>
     for &node in nodes.iter() {
         let value = match node {
             Node::Unknown => panic!("Unknown node"),
-            Node::Constant(c) => c,
-            Node::MontConstant(c) => fr_to_u256(&c),
+            Node::Constant(i) => constants[i],
             Node::Input(i) => inputs[i],
-            Node::Op(op, a, b) => op.eval(values[a], values[b]),
-            Node::UnoOp(op, a) => op.eval(values[a]),
-            Node::TresOp(op, a, b, c) => op.eval(values[a], values[b], values[c]),
+            Node::Op(op, a, b) => {
+                ff.op_duo(op, values[a], values[b])
+            },
+            Node::UnoOp(op, a) => {
+                ff.op_uno(op, values[a])
+            },
+            Node::TresOp(op, a, b, c) => {
+                match op {
+                    TresOperation::TernCond => {
+                        if values[a].is_zero() { values[c] } else { values[b] }
+                    },
+                }
+            },
         };
         values.push(value);
     }
 
     let r = outputs.iter().map(|&i| values[i]).collect();
-    println!("graph calculated in {:?}", start.elapsed());
+    println!("generic typed graph calculated in {:?}", start.elapsed());
     r
 }
 
-pub fn evaluate_parallel(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<Fr> {
+pub fn evaluate_parallel(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<U256> {
     let start = Instant::now();
     let inputs: Arc<[U256]> = Arc::from(inputs);
     println!("total nodes: {}", nodes.len());
@@ -554,17 +677,16 @@ pub fn evaluate_parallel(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> 
             for &node in nodes.iter() {
                 let value = match node {
                     Node::Unknown => panic!("Unknown node"),
-                    Node::Constant(c) => u256_to_fr(&c),
-                    Node::MontConstant(c) => c,
-                    Node::Input(i) => u256_to_fr(&inputs[i]),
-                    Node::Op(op, a, b) => op.eval_fr(values[a], values[b]),
-                    Node::UnoOp(op, a) => op.eval_fr(values[a]),
-                    Node::TresOp(op, a, b, c) => op.eval_fr(values[a], values[b], values[c]),
+                    Node::Constant(_) => todo!(),
+                    Node::Input(i) => inputs[i],
+                    Node::Op(op, a, b) => op.eval(values[a], values[b]),
+                    Node::UnoOp(op, a) => op.eval(values[a]),
+                    Node::TresOp(op, a, b, c) => op.eval(values[a], values[b], values[c]),
                 };
                 values.push(value);
             }
 
-            let witness_signals: Vec<Fr> = outputs.iter().map(|&i| values[i]).collect();
+            let witness_signals: Vec<U256> = outputs.iter().map(|&i| values[i]).collect();
             tx.send((i, witness_signals)).unwrap();
         });
         handles.push(handle);
@@ -589,13 +711,17 @@ pub fn evaluate_parallel(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> 
 }
 
 /// Constant propagation
-pub fn propagate(nodes: &mut [Node]) {
-    assert_valid(nodes);
+pub fn propagate<T: FieldOps + 'static>(nodes: &mut Nodes<T>) {
+    assert_valid(&nodes.nodes);
     let mut constants = 0_usize;
     for i in 0..nodes.len() {
-        if let Node::Op(op, a, b) = nodes[i] {
-            if let (Node::Constant(va), Node::Constant(vb)) = (nodes[a], nodes[b]) {
-                nodes[i] = Node::Constant(op.eval(va, vb));
+        if let Node::Op(op, a, b) = nodes.nodes[i] {
+            if let (
+                Node::Constant(va),
+                Node::Constant(vb)) = (nodes.nodes[a], nodes.nodes[b]) {
+                let v = (&nodes.ff).op_duo(
+                    op, nodes.constants[va], nodes.constants[vb]);
+                nodes.nodes[i] = nodes.const_node_from_value(v);
                 constants += 1;
             } else if a == b {
                 // Not constant but equal
@@ -605,18 +731,27 @@ pub fn propagate(nodes: &mut [Node]) {
                     Neq | Lt | Gt => Some(false),
                     _ => None,
                 } {
-                    nodes[i] = Node::Constant(U256::from(c));
+                    let v = T::from_bool(c);
+                    nodes.nodes[i] = nodes.const_node_from_value(v);
                     constants += 1;
                 }
             }
-        } else if let Node::UnoOp(op, a) = nodes[i] {
-            if let Node::Constant(va) = nodes[a] {
-                nodes[i] = Node::Constant(op.eval(va));
+        } else if let Node::UnoOp(op, a) = nodes.nodes[i] {
+            if let Node::Constant(va) = nodes.nodes[a] {
+                let v = (&nodes.ff).op_uno(op, nodes.constants[va]);
+                nodes.nodes[i] = nodes.const_node_from_value(v);
                 constants += 1;
             }
-        } else if let Node::TresOp(op, a, b, c) = nodes[i] {
-            if let (Node::Constant(va), Node::Constant(vb), Node::Constant(vc)) = (nodes[a], nodes[b], nodes[c]) {
-                nodes[i] = Node::Constant(op.eval(va, vb, vc));
+        } else if let Node::TresOp(op, a, b, c) = nodes.nodes[i] {
+            if let (
+                Node::Constant(va), Node::Constant(vb),
+                Node::Constant(vc)) = (
+                nodes.nodes[a], nodes.nodes[b], nodes.nodes[c]) {
+
+                let v = (&nodes.ff).op_tres(
+                    op, nodes.constants[va], nodes.constants[vb],
+                    nodes.constants[vc]);
+                nodes.nodes[i] = nodes.const_node_from_value(v);
                 constants += 1;
             }
         }
@@ -695,41 +830,56 @@ pub fn tree_shake(nodes: &mut Vec<Node>, outputs: &mut [usize]) {
     eprintln!("Removed {removed} unused nodes");
 }
 
+fn rnd<T: FieldOps>(ff: &Field<T>, rng: &mut ThreadRng) -> T {
+    let x: usize = (T::BITS + 7) / 8;
+    let mut bs = vec![0u8; x];
+    rng.fill_bytes(&mut bs);
+
+    let bits = T::BITS % 8;
+    if bits != 0 {
+        let mask = (1u16 << bits) - 1;
+        let last_idx = bs.len() - 1;
+        bs[last_idx] &= mask as u8;
+    }
+
+    ff.parse_le_bytes(&bs).unwrap()
+}
+
+
 /// Randomly evaluate the graph
-fn random_eval(nodes: &mut [Node]) -> Vec<U256> {
+fn random_eval<T: FieldOps + 'static>(nodes: &mut Nodes<T>) -> Vec<T> {
     let mut rng = rand::thread_rng();
     let mut values = Vec::with_capacity(nodes.len());
     let mut inputs = HashMap::new();
     let mut prfs = HashMap::new();
     let mut prfs_uno = HashMap::new();
     let mut prfs_tres = HashMap::new();
-    for node in nodes.iter() {
-        use Operation::*;
+    for node in nodes.nodes.iter() {
         let value = match node {
             Node::Unknown => panic!("Unknown node"),
 
-            // Constants evaluate to themselves
-            Node::Constant(c) => *c,
-
-            Node::MontConstant(_) => unimplemented!("should not be used"),
+            Node::Constant(c_idx) => nodes.constants[*c_idx],
 
             // Algebraic Ops are evaluated directly
             // Since the field is large, by Swartz-Zippel if
             // two values are the same then they are likely algebraically equal.
-            Node::Op(op @ (Add | Sub | Mul), a, b) => op.eval(values[*a], values[*b]),
+            Node::Op(op @ (Operation::Add | Operation::Sub | Operation::Mul), a, b) => {
+                (&nodes.ff).op_duo(*op, values[*a], values[*b])
+            },
 
             // Input and non-algebraic ops are random functions
             // TODO: https://github.com/recmo/uint/issues/95 and use .gen_range(..M)
-            Node::Input(i) => *inputs.entry(*i).or_insert_with(|| rng.gen::<U256>() % M),
+            Node::Input(i) => *inputs.entry(*i)
+                .or_insert_with(|| rnd(&nodes.ff, &mut rng)),
             Node::Op(op, a, b) => *prfs
                 .entry((*op, values[*a], values[*b]))
-                .or_insert_with(|| rng.gen::<U256>() % M),
+                .or_insert_with(|| rnd(&nodes.ff, &mut rng)),
             Node::UnoOp(op, a) => *prfs_uno
                 .entry((*op, values[*a]))
-                .or_insert_with(|| rng.gen::<U256>() % M),
+                .or_insert_with(|| rnd(&nodes.ff, &mut rng)),
             Node::TresOp(op, a, b, c) => *prfs_tres
                 .entry((*op, values[*a], values[*b], values[*c]))
-                .or_insert_with(|| rng.gen::<U256>() % M),
+                .or_insert_with(|| rnd(&nodes.ff, &mut rng)),
         };
         values.push(value);
     }
@@ -737,8 +887,10 @@ fn random_eval(nodes: &mut [Node]) -> Vec<U256> {
 }
 
 /// Value numbering
-pub fn value_numbering(nodes: &mut [Node], outputs: &mut [usize]) {
-    assert_valid(nodes);
+pub fn value_numbering<T: FieldOps + 'static>(
+    nodes: &mut Nodes<T>, outputs: &mut [usize]) {
+
+    assert_valid(&nodes.nodes);
 
     // Evaluate the graph in random field elements.
     let values = random_eval(nodes);
@@ -756,7 +908,7 @@ pub fn value_numbering(nodes: &mut [Node], outputs: &mut [usize]) {
     }
 
     // Renumber references.
-    for node in nodes.iter_mut() {
+    for node in nodes.nodes.iter_mut() {
         if let Node::Op(_, a, b) = node {
             *a = renumber[*a];
             *b = renumber[*b];
@@ -778,8 +930,8 @@ pub fn value_numbering(nodes: &mut [Node], outputs: &mut [usize]) {
 }
 
 /// Probabilistic constant determination
-pub fn constants(nodes: &mut [Node]) {
-    assert_valid(nodes);
+pub fn constants<T: FieldOps + 'static>(nodes: &mut Nodes<T>) {
+    assert_valid(&nodes.nodes);
 
     // Evaluate the graph in random field elements.
     let values_a = random_eval(nodes);
@@ -788,110 +940,15 @@ pub fn constants(nodes: &mut [Node]) {
     // Find all nodes with the same value.
     let mut constants = 0;
     for i in 0..nodes.len() {
-        if let Node::Constant(_) = nodes[i] {
+        if let Node::Constant(_) = nodes.nodes[i] {
             continue;
         }
         if values_a[i] == values_b[i] {
-            nodes[i] = Node::Constant(values_a[i]);
+            nodes.nodes[i] = nodes.const_node_from_value(values_a[i]);
             constants += 1;
         }
     }
     eprintln!("Found {} constants", constants);
-}
-
-fn shl(a: Fr, b: Fr) -> Fr {
-    if b.is_zero() {
-        return a;
-    }
-
-    if b.cmp(&Fr::from(Fr::MODULUS_BIT_SIZE)).is_ge() {
-        return Fr::zero();
-    }
-
-    let n = b.into_bigint().0[0] as u32;
-    Fr::from_bigint(a.into_bigint() << n).unwrap()
-}
-
-fn shr(a: Fr, b: Fr) -> Fr {
-    if b.is_zero() {
-        return a;
-    }
-
-    match b.cmp(&Fr::from(254u64)) {
-        Ordering::Equal  => {return Fr::zero()},
-        Ordering::Greater => {return Fr::zero()},
-        _ => (),
-    };
-
-    let mut n = b.into_bigint().to_bytes_le()[0];
-    let mut result = a.into_bigint();
-    let c = result.as_mut();
-    while n >= 64 {
-        for i in 0..3 {
-            c[i as usize] = c[(i + 1) as usize];
-        }
-        c[3] = 0;
-        n -= 64;
-    }
-
-    if n == 0 {
-        return Fr::from_bigint(result).unwrap();
-    }
-
-    let mask:u64 = (1<<n) - 1;
-    let mut carrier: u64 = c[3] & mask;
-    c[3] >>= n;
-    for i in (0..3).rev() {
-        let new_carrier = c[i] & mask;
-        c[i] = (c[i] >> n) | (carrier << (64 - n));
-        carrier = new_carrier;
-    }
-    Fr::from_bigint(result).unwrap()
-}
-
-fn bit_and(a: Fr, b: Fr) -> Fr {
-    let a = a.into_bigint();
-    let b = b.into_bigint();
-    let mut c: [u64; 4] = [0; 4];
-    for (i, item) in c.iter_mut().enumerate() {
-        *item = a.0[i] & b.0[i];
-    }
-    let mut d: BigInt<4> = BigInt::new(c);
-    if d > Fr::MODULUS {
-        d.sub_with_borrow(&Fr::MODULUS);
-    }
-
-    Fr::from_bigint(d).unwrap()
-}
-
-fn bit_or(a: Fr, b: Fr) -> Fr {
-    let a = a.into_bigint();
-    let b = b.into_bigint();
-    let mut c: [u64; 4] = [0; 4];
-    for (i, item) in c.iter_mut().enumerate() {
-        *item = a.0[i] | b.0[i];
-    }
-    let mut d: BigInt<4> = BigInt::new(c);
-    if d > Fr::MODULUS {
-        d.sub_with_borrow(&Fr::MODULUS);
-    }
-
-    Fr::from_bigint(d).unwrap()
-}
-
-fn bit_xor(a: Fr, b: Fr) -> Fr {
-    let a = a.into_bigint();
-    let b = b.into_bigint();
-    let mut c: [u64; 4] = [0; 4];
-    for (i, item) in c.iter_mut().enumerate() {
-        *item = a.0[i] ^ b.0[i];
-    }
-    let mut d: BigInt<4> = BigInt::new(c);
-    if d > Fr::MODULUS {
-        d.sub_with_borrow(&Fr::MODULUS);
-    }
-
-    Fr::from_bigint(d).unwrap()
 }
 
 // M / 2
@@ -946,68 +1003,65 @@ fn u_lt(a: &U256, b: &U256) -> U256 {
     }
 }
 
-pub fn fr_to_u256(x: &Fr) -> U256 {
-    U256::from_limbs(x.into_bigint().0)
-}
-
-pub fn u256_to_fr(x: &U256) -> Fr {
-    Fr::from_bigint(BigInt::new(x.into_limbs())).unwrap()
-}
-
 #[cfg(test)]
 mod tests {
     use std::ops::{Div};
     use super::*;
     use ruint::{uint};
-    use std::str::FromStr;
+    use crate::field::U254;
 
     #[test]
     fn test_ok() {
-        let a= Fr::from(4u64);
-        let b= Fr::from(2u64);
-        let c = shl(a, b);
-        assert_eq!(c.cmp(&Fr::from(16u64)), Ordering::Equal)
+        let prime = U254::from_str_radix(
+            "21888242871839275222246405745257275088548364400416034343698204186575808495617",
+            10).unwrap();
+        let ff = Field::new(prime);
+        let mut rng = rand::thread_rng();
+        let y = rnd(&ff, &mut rng);
+        // println!("{}", rnd::<U254>());
+        // let y = rng.gen::<[u8; 3]>();
+        println!("{:?}", y);
     }
 
     #[test]
     fn test_div() {
         assert_eq!(
-            Operation::Div.eval_fr(Fr::from(2u64), Fr::from(3u64)),
-            Fr::from_str("7296080957279758407415468581752425029516121466805344781232734728858602831873").unwrap());
+            Operation::Div.eval(U256::from(2u64), U256::from(3u64)),
+            U256::from_str_radix("7296080957279758407415468581752425029516121466805344781232734728858602831873", 10).unwrap());
 
         assert_eq!(
-            Operation::Div.eval_fr(Fr::from(6u64), Fr::from(2u64)),
-            Fr::from_str("3").unwrap());
+            Operation::Div.eval(U256::from(6u64), U256::from(2u64)),
+            U256::from_str_radix("3", 10).unwrap());
 
         assert_eq!(
-            Operation::Div.eval_fr(Fr::from(7u64), Fr::from(2u64)),
-            Fr::from_str("10944121435919637611123202872628637544274182200208017171849102093287904247812").unwrap());
+            Operation::Div.eval(U256::from(7u64), U256::from(2u64)),
+            U256::from_str_radix("10944121435919637611123202872628637544274182200208017171849102093287904247812", 10).unwrap());
     }
 
     #[test]
     fn test_idiv() {
         assert_eq!(
-            Operation::Idiv.eval_fr(Fr::from(2u64), Fr::from(3u64)),
-            Fr::from_str("0").unwrap());
+            Operation::Idiv.eval(U256::from(2u64), U256::from(3u64)),
+            U256::from(0));
 
         assert_eq!(
-            Operation::Idiv.eval_fr(Fr::from(6u64), Fr::from(2u64)),
-            Fr::from_str("3").unwrap());
+            Operation::Idiv.eval(U256::from(6u64), U256::from(2u64)),
+            U256::from(3));
 
         assert_eq!(
-            Operation::Idiv.eval_fr(Fr::from(7u64), Fr::from(2u64)),
-            Fr::from_str("3").unwrap());
+            Operation::Idiv.eval(U256::from(7u64), U256::from(2u64)),
+            U256::from(3));
     }
 
     #[test]
     fn test_fr_mod() {
         assert_eq!(
-            Operation::Mod.eval_fr(Fr::from(7u64), Fr::from(2u64)),
-            Fr::from_str("1").unwrap());
+            Operation::Mod.eval(U256::from(7u64), U256::from(2u64)),
+            U256::from(1));
 
         assert_eq!(
-            Operation::Mod.eval_fr(Fr::from(7u64), Fr::from(9u64)),
-            Fr::from_str("7").unwrap());
+            Operation::Mod.eval(U256::from(7u64), U256::from(9u64)),
+            U256::from(7));
     }
 
     #[test]
@@ -1090,14 +1144,6 @@ mod tests {
         let c = Operation::Pow.eval(a, b);
         let want = uint!(6741803673964058984617537840767809723100020752467791363717299927390655464193_U256);
         assert_eq!(c, want);
-
-        let af = u256_to_fr(&a);
-        let bf = u256_to_fr(&b);
-
-        // let cf = af.pow(bf.into_bigint());
-        let cf = Operation::Pow.eval_fr(af, bf);
-        let wantf = u256_to_fr(&want);
-        assert_eq!(cf, wantf);
     }
 
     #[test]
@@ -1151,5 +1197,31 @@ mod tests {
         assert_eq!(
             uint!(0_U256),
             UnoOperation::Lnot.eval(uint!(115792089237316195423570985008687907853269984665640564039457584007913129639935_U256)));
+    }
+
+    #[test]
+    fn test_half() {
+        // let h = M.div(U256::from(2));
+        let h = M.wrapping_shr(1);
+        type BN254 = ruint::Uint<254, 4>;
+
+        let m = BN254::from_str_radix(
+            "21888242871839275222246405745257275088548364400416034343698204186575808495617",
+            10).unwrap();
+        let a = BN254::from_str_radix(
+            "18583076334226168172367231819260574371431472897769128993835383390508861945746",
+            10).unwrap();
+        let a = a.not();
+        // let mask = BN254::ZERO.not().shr(m.leading_zeros());
+        // let a = a & mask;
+        let a = if a >= m { a - m } else { a };
+
+        let want = BN254::from_str_radix(
+            "10364945975102880683525514432911402591886023268641012016029012611469420464237",
+            10
+        ).unwrap();
+        assert_eq!(want, a);
+
+        assert_eq!(h, halfM);
     }
 }

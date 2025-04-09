@@ -26,16 +26,19 @@ To create a circuit graph file from a Circom 2 program, run the following comman
 
 ```shell
 # Using compiled binary
-./build-circuit <path_to_circuit.circom> <path_to_circuit_graph.bin> [-l <path_to_circom_libs/>]* [-i <inputs_file.json>] [-print-unoptimized]
+./build-circuit <path_to_circuit.circom> <path_to_circuit_graph.bin> [-l <path_to_circom_libs/>]* [-i <inputs_file.json>]
 # Or using `cargo` from the root of the repository
-cargo run --package circom-witnesscalc --bin build-circuit <path_to_circuit.circom> <path_to_circuit_graph.bin> [-l <path_to_circom_libs/>]* [-i <inputs_file.json>] [-print-unoptimized]
+cargo run --package circom-witnesscalc --bin build-circuit <path_to_circuit.circom> <path_to_circuit_graph.bin> [-l <path_to_circom_libs/>]* [-i <inputs_file.json>]
 ```
 
 Optional flags:
 
 * `-l <path_to_circom_libs/>` - Path to the circomlib directory. This flag can be used multiple times.
 * `-i <inputs_file.json>` - Path to the inputs file. If provided, the inputs will be used to generate the witness. Otherwise, inputs will be set to 0.
-* `-print-unoptimized` - Evaluate the graph with provided or default inputs and print it to stdout (useful for debugging).
+* `-p <prime>` - The prime field to use. Valid options are `bn128` (default), `goldilocks`, and `grumpkin`.
+* `--r1cs <r1cs_file>` - Path to the R1CS file. If provided, the R1CS file will be saved along with the generated graph.
+* `--O0` | `--O1` | `--O2` - Optimization level for circom. Default is `--O2`.
+* `-v` - Verbose mode.
 
 ## Calculate witness from circuit graph created on previous step
 

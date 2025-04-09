@@ -10,12 +10,14 @@ pub mod vm;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::slice::from_raw_parts;
+use anyhow::anyhow;
 use ruint::aliases::U256;
 use ruint::ParseError;
-use crate::graph::Node;
+use crate::graph::{evaluate, Nodes, NodesInterface};
 use wtns_file::FieldElement;
 use ark_bn254::Fr;
 use ark_ff::{BigInteger, PrimeField};
+use crate::field::{Field, FieldOperations, FieldOps, U254, U64};
 use crate::storage::proto_deserializer::deserialize_witnesscalc_graph_from_bytes;
 
 pub type InputSignalsInfo = HashMap<String, (usize, usize)>;
@@ -89,15 +91,13 @@ pub unsafe extern "C" fn gw_calc_witness(
         }
     }
 
-    let witness = match calc_witness(inputs_str, graph_data_r) {
+    let witness_data = match calc_witness(inputs_str, graph_data_r) {
         Ok(witness) => witness,
         Err(e) => {
             prepare_status(status, GW_ERROR_CODE_ERROR, format!("Failed to calculate witness: {:?}", e).as_str());
             return 1;
         }
     };
-
-    let witness_data = wtns_from_u256_witness(witness);
 
     unsafe {
         *wtns_len = witness_data.len();
@@ -134,63 +134,93 @@ fn wtns_from_witness(witness: Vec<FieldElement<32>>) -> Vec<u8> {
     buf
 }
 
-pub fn calc_witness(inputs: &str, graph_data: &[u8]) -> Result<Vec<U256>, Error> {
+fn wtns_from_witness2<const FS: usize, T: FieldOps>(
+    witness: Vec<FieldElement<FS>>, prime: T) -> Vec<u8> {
+
+    let mut buf = Vec::new();
+    let m: [u8; FS] = prime.to_le_bytes().as_slice().try_into().unwrap();
+    let mut wtns_f = wtns_file::WtnsFile::from_vec(witness, m.into());
+    wtns_f.version = 2;
+    // We write into the buffer, so we should not have any errors here.
+    // Panic in case of out of memory is fine.
+    wtns_f.write(&mut buf).unwrap();
+    buf
+}
+
+pub fn calc_witness(
+    inputs: &str,
+    graph_data: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 
     let start = std::time::Instant::now();
-    let inputs = deserialize_inputs(inputs.as_bytes())?;
+    // let inputs = deserialize_inputs(inputs.as_bytes())?;
     println!("Inputs loaded in {:?}", start.elapsed());
 
     let start = std::time::Instant::now();
-    let (nodes, signals, input_mapping): (Vec<Node>, Vec<usize>, InputSignalsInfo) =
+    let (nodes, signals, input_mapping): (Box<dyn NodesInterface>, Vec<usize>, InputSignalsInfo) =
         deserialize_witnesscalc_graph_from_bytes(graph_data).unwrap();
     println!("Graph loaded in {:?}", start.elapsed());
 
     let start = std::time::Instant::now();
-    let mut inputs_buffer = get_inputs_buffer(get_inputs_size(&nodes));
-    populate_inputs(&inputs, &input_mapping, &mut inputs_buffer);
+    // let mut inputs_buffer = get_inputs_buffer(nodes.get_inputs_size());
+    // populate_inputs(&inputs, &input_mapping, &mut inputs_buffer);
     println!("Inputs populated in {:?}", start.elapsed());
 
-    // graph::evaluate_parallel(&nodes, inputs_buffer.as_slice(), &signals);
-    Ok(graph::evaluate(&nodes, inputs_buffer.as_slice(), &signals))
+    if let Some(nodes) = nodes.as_any().downcast_ref::<Nodes<U254>>() {
+        let result = calc_witness_typed(nodes, inputs, &input_mapping, &signals)?;
+        let vec_witness: Vec<FieldElement<32>> = result
+            .iter()
+            .map(|a| TryInto::<[u8; 32]>::try_into(a.as_le_slice()).unwrap().into())
+            .collect();
+        Ok(wtns_from_witness2(vec_witness, nodes.prime()))
+    } else if let Some(nodes) = nodes.as_any().downcast_ref::<Nodes<U64>>() {
+        let result = calc_witness_typed(nodes, inputs, &input_mapping, &signals)?;
+        let vec_witness: Vec<FieldElement<8>> = result
+            .iter()
+            .map(|a| TryInto::<[u8; 8]>::try_into(a.as_le_slice()).unwrap().into())
+            .collect();
+        Ok(wtns_from_witness2(vec_witness, nodes.prime()))
+    } else {
+        Err(anyhow!("Invalid nodes type").into())
+    }
 }
 
-fn get_inputs_size(nodes: &[Node]) -> usize {
-    let mut start = false;
-    let mut max_index = 0usize;
-    for &node in nodes.iter() {
-        if let Node::Input(i) = node {
-            if i > max_index {
-                max_index = i;
-            }
-            start = true
-        } else if start {
-            break;
+fn calc_witness_typed<T: FieldOps>(
+    nodes: &Nodes<T>, inputs: &str, input_mapping: &InputSignalsInfo,
+    signals: &[usize]) -> Result<Vec<T>, Box<dyn std::error::Error>> {
+
+    let inputs = deserialize_inputs2(
+        inputs.as_bytes(), &nodes.ff)?;
+    let inputs = create_inputs(&inputs, input_mapping)?;
+    let result = evaluate(
+        &nodes.ff, &nodes.nodes, &inputs, signals,
+        &nodes.constants);
+    Ok(result)
+}
+
+fn create_inputs<T: FieldOps>(
+    input_list: &HashMap<String, Vec<T>>,
+    inputs_info: &InputSignalsInfo) -> Result<Vec<T>, Box<dyn std::error::Error>> {
+
+    let mut max_idx: usize = 0;
+    for (offset, len) in inputs_info.values() {
+        let idx = offset + len;
+        if idx > max_idx {
+            max_idx = idx;
         }
     }
-    max_index + 1
-}
-
-fn populate_inputs(
-    input_list: &HashMap<String, Vec<U256>>, inputs_info: &InputSignalsInfo,
-    input_buffer: &mut [U256]) {
+    let mut inputs = vec![T::zero(); max_idx + 1];
+    inputs[0] = T::one();
     for (key, value) in input_list {
         let (offset, len) = inputs_info[key];
         if len != value.len() {
-            panic!("Invalid input length for {}", key);
+            return Err(anyhow!("Invalid input length for {}", key).into());
         }
-        // println!("input {}, offset {}, len {}", key, offset, len);
 
         for (i, v) in value.iter().enumerate() {
-            input_buffer[offset + i] = *v;
+            inputs[offset + i] = *v;
         }
-    }
-}
-
-/// Allocates inputs vec with position 0 set to 1
-fn get_inputs_buffer(size: usize) -> Vec<U256> {
-    let mut inputs = vec![U256::ZERO; size];
-    inputs[0] = U256::from(1);
-    inputs
+    };
+    Ok(inputs)
 }
 
 #[derive(Debug)]
@@ -204,6 +234,7 @@ impl From<ParseError> for Error {
         Error::InputFieldNumberParseError(e)
     }
 }
+
 fn calc_len(vs: &Vec<serde_json::Value>) -> usize {
     let mut len = vs.len();
 
@@ -246,6 +277,39 @@ fn flatten_array(
     Ok(vals)
 }
 
+fn flatten_array2<T: FieldOps>(
+    key: &str,
+    vs: &Vec<serde_json::Value>,
+    ff: &Field<T>) -> Result<Vec<T>, Box<dyn std::error::Error>> {
+
+    let mut vals: Vec<T> = Vec::with_capacity(calc_len(vs));
+
+    for v in vs {
+        match v {
+            serde_json::Value::String(s) => {
+                let i = ff.parse_str(s)?;
+                vals.push(i);
+            }
+            serde_json::Value::Number(n) => {
+                if !n.is_u64() {
+                    return Err(anyhow!("signal value is not a positive integer").into());
+                }
+                let n = n.as_u64().unwrap().to_string();
+                let i = ff.parse_str(&n)?;
+                vals.push(i);
+            }
+            serde_json::Value::Array(arr) => {
+                vals.extend_from_slice(flatten_array2(key, arr, ff)?.as_slice());
+            }
+            _ => {
+                return Err(anyhow!("inputs must be a string: {}", key).into());
+            }
+        };
+
+    }
+    Ok(vals)
+}
+
 pub fn deserialize_inputs(inputs_data: &[u8]) -> Result<HashMap<String, Vec<U256>>, Error> {
     let v: serde_json::Value = serde_json::from_slice(inputs_data).unwrap();
 
@@ -277,6 +341,47 @@ pub fn deserialize_inputs(inputs_data: &[u8]) -> Result<HashMap<String, Vec<U256
                 return Err(Error::InputsUnmarshal(format!(
                     "value for key {} must be an a number as a string, as a number of an array of strings of numbers",
                     k.clone())));
+            }
+        }
+    }
+    Ok(inputs)
+}
+
+pub fn deserialize_inputs2<T: FieldOps>(
+    inputs_data: &[u8],
+    ff: &Field<T>) -> Result<HashMap<String, Vec<T>>, Box<dyn std::error::Error>> {
+
+    let v: serde_json::Value = serde_json::from_slice(inputs_data)?;
+
+    let map = if let serde_json::Value::Object(map) = v {
+        map
+    } else {
+        return Err(anyhow!("inputs must be an object").into());
+    };
+
+    let mut inputs: HashMap<String, Vec<T>> = HashMap::new();
+    for (k, v) in map {
+        match v {
+            serde_json::Value::String(s) => {
+                let i = ff.parse_str(s.as_str())?;
+                inputs.insert(k.clone(), vec![i]);
+            }
+            serde_json::Value::Number(n) => {
+                if !n.is_u64() {
+                    return Err(anyhow!("signal value is not a positive integer").into());
+                }
+                let s = format!("{}", n.as_u64().unwrap());
+                let i = ff.parse_str(&s)?;
+                inputs.insert(k.clone(), vec![i]);
+            }
+            serde_json::Value::Array(ss) => {
+                let vals: Vec<T> = flatten_array2(k.as_str(), &ss, ff)?;
+                inputs.insert(k.clone(), vals);
+            }
+            _ => {
+                return Err(anyhow!(
+                    "value for key {} must be an a number as a string, as a number of an array of strings of numbers",
+                    k.clone()).into());
             }
         }
     }
