@@ -43,6 +43,7 @@ anyhow = "1.0.97"
 opt-level = 3
 lto = "fat"
 codegen-units = 1
+# debug = true
 
 [lib]
 crate-type = ["lib", "staticlib", "cdylib"]

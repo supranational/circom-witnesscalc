@@ -1237,8 +1237,9 @@ fn process_function_instruction<T: FieldOps + 'static>(
                         }
                         _ => {
                             panic!(
-                                "expected store operation in ternary operation of branch 'if': {}",
-                                call_stack.join(" -> "));
+                                "expected store operation in ternary operation of branch 'if': {}:{}",
+                                call_stack.join(" -> "),
+                                branch_bucket.if_branch[0].get_line());
                         }
                     };
                     let (var_else, var_else_idx) = match *branch_bucket.else_branch[0] {
@@ -1818,6 +1819,12 @@ impl FromStr for Prime {
     }
 }
 
+enum OptimizationLevel {
+    O0,
+    O1,
+    O2,
+}
+
 struct Args {
     circuit_file: String,
     graph_file: String,
@@ -1825,6 +1832,7 @@ struct Args {
     print_debug: bool,
     prime: Prime,
     r1cs: Option<String>,
+    optimization_level: Option<OptimizationLevel>,
 }
 
 fn parse_args() -> Args {
@@ -1837,13 +1845,15 @@ fn parse_args() -> Args {
     let mut print_debug = false;
     let mut r1cs_file: Option<String> = None;
     let mut prime: Option<Prime> = None;
+    let mut optimization_level: Option<OptimizationLevel> = None;
 
     let usage = |err_msg: &str| -> String {
         eprintln!("{}", err_msg);
         eprintln!();
-        eprintln!("Usage: {} <circuit_file> <graph_file> [-l <link_library>]* [-i <inputs_file.json>] [-p <prime>] [-r1cs <r1cs_file>] [-v]", args[0]);
+        eprintln!("Usage: {} <circuit_file> <graph_file> [-l <link_library>]* [-i <inputs_file.json>] [-p <prime>] [--r1cs <r1cs_file>] [--O0 | --O1 | --O2] [-v]", args[0]);
         eprintln!();
         eprintln!("       Valid primes: bn128 (default), goldilocks, grumpkin");
+        eprintln!("       Default optimization level: --O2");
         std::process::exit(1);
     };
 
@@ -1874,15 +1884,30 @@ fn parse_args() -> Args {
             }
         } else if args[i] == "-v" {
             print_debug = true;
-        } else if args[i] == "-r1cs" {
+        } else if args[i] == "--r1cs" {
             i += 1;
             if i >= args.len() {
-                usage("missing argument for -r1cs");
+                usage("missing argument for --r1cs");
             }
             if r1cs_file.is_some() {
                 usage("multiple r1cs files");
             }
             r1cs_file = Some(args[i].clone());
+        } else if args[i] == "--O0" {
+            if optimization_level.is_some() {
+                usage("multiple optimization levels set");
+            }
+            optimization_level = Some(OptimizationLevel::O0);
+        } else if args[i] == "--O1" {
+            if optimization_level.is_some() {
+                usage("multiple optimization levels set");
+            }
+            optimization_level = Some(OptimizationLevel::O1);
+        } else if args[i] == "--O2" {
+            if optimization_level.is_some() {
+                usage("multiple optimization levels set");
+            }
+            optimization_level = Some(OptimizationLevel::O2);
         } else if args[i] == "-p" {
             i += 1;
             if i >= args.len() {
@@ -1919,6 +1944,7 @@ fn parse_args() -> Args {
         print_debug,
         prime: prime.unwrap_or(Prime::Bn128),
         r1cs: r1cs_file,
+        optimization_level,
     }
 }
 
@@ -1957,12 +1983,25 @@ fn main() {
         }
     }
 
+    let (no_rounds, flag_s, flag_f) =
+        match args.optimization_level {
+            Some(OptimizationLevel::O0) => {
+                (0usize, false, true)
+            }
+            Some(OptimizationLevel::O1) => {
+                (0usize, true, false)
+            },
+            Some(OptimizationLevel::O2) | None => {
+                (usize::MAX, false, false)
+            }
+        };
+
     let build_config = BuildConfig {
-        no_rounds: usize::MAX,
+        no_rounds,
         flag_json_sub: false,
         json_substitutions: String::new(),
-        flag_s: false,
-        flag_f: false,
+        flag_s,
+        flag_f,
         flag_p: false,
         flag_verbose: false,
         flag_old_heuristics: false,
@@ -1988,7 +2027,7 @@ fn main() {
     let circuit = run_compiler(
         vcp.clone(),
         Config {
-            debug_output: true,
+            debug_output: false,
             produce_input_log: true,
             wat_flag: false,
         },

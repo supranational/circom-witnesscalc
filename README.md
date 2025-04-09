@@ -36,7 +36,8 @@ Optional flags:
 * `-l <path_to_circom_libs/>` - Path to the circomlib directory. This flag can be used multiple times.
 * `-i <inputs_file.json>` - Path to the inputs file. If provided, the inputs will be used to generate the witness. Otherwise, inputs will be set to 0.
 * `-p <prime>` - The prime field to use. Valid options are `bn128` (default), `goldilocks`, and `grumpkin`.
-* `-r1cs <r1cs_file>` - Path to the R1CS file. If provided, the R1CS file will be saved along with the generated graph.
+* `--r1cs <r1cs_file>` - Path to the R1CS file. If provided, the R1CS file will be saved along with the generated graph.
+* `--O0` | `--O1` | `--O2` - Optimization level for circom. Default is `--O2`.
 * `-v` - Verbose mode.
 
 ## Calculate witness from circuit graph created on previous step

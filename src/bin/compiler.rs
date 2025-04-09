@@ -324,7 +324,7 @@ fn main() {
     let circuit = run_compiler(
         vcp,
         Config {
-            debug_output: true,
+            debug_output: false,
             produce_input_log: true,
             wat_flag: false,
         },
