@@ -13,6 +13,7 @@ use anyhow::anyhow;
 use code_producers::c_elements::IODef;
 use code_producers::components::TemplateInstanceIOMap;
 use compiler::circuit_design::function::FunctionCode;
+use indicatif::{ProgressBar, ProgressStyle};
 use ruint::aliases::U256;
 use type_analysis::check_types::check_types;
 use circom_witnesscalc::{InputSignalsInfo};
@@ -425,14 +426,37 @@ fn calc_mapped_signal_idx<T: FieldOps + 'static>(
 struct BuildCircuitContext<'a, T: FieldOps> {
     nodes: &'a mut Nodes<T>,
     signal_node_idx: &'a mut Vec<usize>,
-    // vars: &'a mut Vec<Option<Var>>,
-    // subcomponents: &'a mut Vec<Option<ComponentInstance>>,
+    signals_set: usize,
+    progress_bar: ProgressBar,
     templates: &'a Vec<TemplateCode>,
     functions: &'a Vec<FunctionCode>,
     io_map: &'a TemplateInstanceIOMap,
 }
 
 impl<T: FieldOps> BuildCircuitContext<'_, T> {
+    fn new<'a>(
+        nodes: &'a mut Nodes<T>, signal_node_idx: &'a mut Vec<usize>,
+        templates: &'a Vec<TemplateCode>, functions: &'a Vec<FunctionCode>,
+        io_map: &'a TemplateInstanceIOMap) -> BuildCircuitContext<'a, T> {
+
+        let pb = ProgressBar::new(signal_node_idx.len() as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})\n{msg}")
+                .unwrap()
+                .progress_chars("#>-")
+        );
+
+        BuildCircuitContext {
+            nodes,
+            signal_node_idx,
+            signals_set: 0,
+            progress_bar: pb,
+            templates,
+            functions,
+            io_map,
+        }
+    }
     fn new_component(
         &self, template_id: usize, signal_offset: usize,
         component_offset: usize) -> ComponentInstance<T> {
@@ -448,6 +472,20 @@ impl<T: FieldOps> BuildCircuitContext<'_, T> {
         };
         cmp.subcomponents.resize_with(tmpl.number_of_components, || None);
         cmp
+    }
+
+    fn associate_signal_to_node(
+        &mut self, signal_idx: usize, node_idx: usize, call_stack: &[String],
+        line_no: usize) {
+
+        if self.signal_node_idx[signal_idx] != usize::MAX {
+            panic!("signal is already set");
+        }
+        self.signal_node_idx[signal_idx] = node_idx;
+        self.signals_set += 1;
+        self.progress_bar.set_message(
+            format!("{}:{}", call_stack.join(" -> ", ), line_no));
+        self.progress_bar.inc(1);
     }
 }
 
@@ -498,14 +536,9 @@ fn process_instruction<T: FieldOps + 'static>(
                             for (i, item) in node_idxs.iter()
                                 .enumerate().take(store_bucket.context.size) {
 
-                                if ctx.signal_node_idx[signal_idx + i] != usize::MAX {
-                                    panic!(
-                                        "signal is already set: {}, {}:{}",
-                                        signal_idx + i,
-                                        call_stack.join(" -> "),
-                                        store_bucket.get_line());
-                                }
-                                ctx.signal_node_idx[signal_idx + i] = *item;
+                                ctx.associate_signal_to_node(
+                                    signal_idx + i, *item, call_stack,
+                                    store_bucket.get_line());
                             }
                         }
                         // LocationRule::Mapped { signal_code, indexes } => {}
@@ -654,7 +687,10 @@ fn process_instruction<T: FieldOps + 'static>(
                                 ctx, cmp, else_src, print_debug, call_stack);
 
                             let node = Node::TresOp(TresOperation::TernCond, node_idx, node_idx_if, node_idx_else);
-                            ctx.signal_node_idx[if_signal_idx] = ctx.nodes.push(node).0;
+                            let node_idx = ctx.nodes.push(node).0;
+                            ctx.associate_signal_to_node(
+                                if_signal_idx, node_idx, call_stack,
+                                branch_bucket.get_line());
                         }
                         _ => {
                             panic!(
@@ -2091,13 +2127,9 @@ fn build_graph<T: FieldOps + 'static>(
         }
     }
 
-    let mut ctx = BuildCircuitContext {
-        nodes: &mut nodes,
-        signal_node_idx: &mut signal_node_idx,
-        templates: &circuit.templates,
-        functions: &circuit.functions,
-        io_map: circuit.c_producer.get_io_map(),
-    };
+    let mut ctx = BuildCircuitContext::new(
+        &mut nodes, &mut signal_node_idx, &circuit.templates,
+        &circuit.functions, circuit.c_producer.get_io_map());
 
     let main_component_signal_start = 1usize;
     let main_template_id = vcp.main_id;
@@ -2105,6 +2137,9 @@ fn build_graph<T: FieldOps + 'static>(
         main_template_id, main_component_signal_start, 0);
 
     run_template(&mut ctx, args.print_debug, &[], &mut main_component);
+
+    ctx.progress_bar.set_message("");
+    ctx.progress_bar.finish();
 
     for (idx, i) in signal_node_idx.iter().enumerate() {
         if *i == usize::MAX {
@@ -2191,10 +2226,9 @@ fn store_subcomponent_signals<T: FieldOps + 'static>(
 
     let signal_idx = signal_offset + signal_idx;
     for (i, v) in src_node_idxs.iter().enumerate() {
-        if ctx.signal_node_idx[signal_idx + i] != usize::MAX {
-            panic!("subcomponent signal is already set");
-        }
-        ctx.signal_node_idx[signal_idx + i] = *v;
+        ctx.associate_signal_to_node(
+            signal_idx + i, *v, call_stack,
+            dst.cmp_address.get_line());
     }
     sub_cmp.number_of_inputs -= src_node_idxs.len();
 
