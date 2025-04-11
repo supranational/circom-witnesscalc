@@ -1,10 +1,9 @@
-use std::{collections::HashMap, ops::{BitAnd, Shl, Shr}, thread};
+use std::{collections::HashMap, ops::{BitAnd, Shl, Shr}};
 use std::any::Any;
 use std::collections::hash_map::Entry;
 use std::error::Error;
 use std::fmt::Debug;
-use std::ops::{BitOr, BitXor, Not};
-use std::sync::{mpsc, Arc};
+use std::ops::{BitOr, BitXor, Index, IndexMut, Not};
 use std::time::Instant;
 use crate::field::{Field, FieldOperations, FieldOps, M};
 use rand::{RngCore};
@@ -257,12 +256,75 @@ pub trait NodesInterface: Any {
     fn as_any(&self) -> &dyn Any;
 }
 
+type NodesStorage = VecNodes;
+
+struct MMapNodes {
+
+}
+
+pub struct VecNodes {
+    nodes: Vec<Node>,
+}
+
+impl VecNodes {
+    fn new() -> Self {
+        VecNodes {
+            nodes: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, n: Node) {
+        self.nodes.push(n);
+    }
+
+    fn get(&self, idx: usize) -> Option<&Node> {
+        self.nodes.get(idx)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &Node> {
+        self.nodes.iter()
+    }
+
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut Node> {
+        self.nodes.iter_mut()
+    }
+
+    fn retain<F>(&mut self, f: F)
+    where
+        F: FnMut(&Node) -> bool,
+    {
+        self.nodes.retain(f);
+    }
+
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+}
+
+impl Index<usize> for VecNodes {
+    type Output = Node;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.nodes[index]
+    }
+}
+
+impl IndexMut<usize> for VecNodes {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut self.nodes[index]
+    }
+}
+
 pub struct Nodes<T: FieldOps> {
     prime_str: String,
     // TODO maybe remove pub
     pub ff: Field<T>,
     // TODO remove pub
-    pub nodes: Vec<Node>,
+    pub nodes: NodesStorage,
     pub constants: Vec<T>,
     constants_idx: HashMap<T, usize>,
 }
@@ -272,7 +334,7 @@ impl<T: FieldOps + 'static> Nodes<T> {
         let ff = Field::new(prime);
         Nodes {
             ff,
-            nodes: Vec::new(),
+            nodes: NodesStorage::new(),
             constants: Vec::new(),
             constants_idx: HashMap::new(),
             prime_str: prime_str.to_string(),
@@ -580,7 +642,7 @@ fn compute_shr_uint(a: U256, b: U256) -> U256 {
 }
 
 /// All references must be backwards.
-fn assert_valid(nodes: &[Node]) {
+fn assert_valid(nodes: &NodesStorage) {
     for (i, &node) in nodes.iter().enumerate() {
         if let Node::Op(_, a, b) = node {
             assert!(a < i);
@@ -604,7 +666,7 @@ pub fn optimize<T: FieldOps + 'static>(nodes: &mut Nodes<T>, outputs: &mut [usiz
 }
 
 pub fn evaluate<T: FieldOps, F: FieldOperations<Type = T>>(
-    ff: F, nodes: &[Node], inputs: &[T], outputs: &[usize],
+    ff: F, nodes: &NodesStorage, inputs: &[T], outputs: &[usize],
     constants: &[T]) -> Vec<T>
 where Vec<T>: FromIterator<<F as FieldOperations>::Type>
 {
@@ -640,75 +702,75 @@ where Vec<T>: FromIterator<<F as FieldOperations>::Type>
     r
 }
 
-pub fn evaluate_parallel(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<U256> {
-    let start = Instant::now();
-    let inputs: Arc<[U256]> = Arc::from(inputs);
-    println!("total nodes: {}", nodes.len());
-    let mut nodes_splitted = 0;
-    let sz = outputs.len() / 4;
-
-    let mut outputs2 = Vec::new();
-    let mut subgraphs = Vec::new();
-
-    for (i, chunk) in outputs.chunks(sz).enumerate() {
-        let mut nodes = Vec::from(nodes);
-        let mut chunk = Vec::from(chunk);
-        tree_shake(&mut nodes, &mut chunk);
-        nodes_splitted += nodes.len();
-        println!("chunk #{}: {} nodes", i, nodes.len());
-
-        outputs2.push(chunk);
-        subgraphs.push(nodes);
-    }
-    println!("total nodes splitted: {}", nodes_splitted);
-    println!("graph splitted in {:?}", start.elapsed());
-    // assert_valid(nodes);
-
-    let start = Instant::now();
-
-    let mut handles = Vec::new();
-    let threads_num = subgraphs.len();
-    let (tx, rx) = mpsc::channel();
-    for (i, (nodes, outputs)) in subgraphs.into_iter().zip(outputs2).enumerate() {
-        let inputs = Arc::clone(&inputs);
-        let tx = tx.clone();
-        let handle = thread::spawn(move || {
-            let mut values = Vec::with_capacity(nodes.len());
-            for &node in nodes.iter() {
-                let value = match node {
-                    Node::Unknown => panic!("Unknown node"),
-                    Node::Constant(_) => todo!(),
-                    Node::Input(i) => inputs[i],
-                    Node::Op(op, a, b) => op.eval(values[a], values[b]),
-                    Node::UnoOp(op, a) => op.eval(values[a]),
-                    Node::TresOp(op, a, b, c) => op.eval(values[a], values[b], values[c]),
-                };
-                values.push(value);
-            }
-
-            let witness_signals: Vec<U256> = outputs.iter().map(|&i| values[i]).collect();
-            tx.send((i, witness_signals)).unwrap();
-        });
-        handles.push(handle);
-    }
-
-    let mut final_results = vec![Vec::new(); threads_num];
-
-    for handle in handles {
-        handle.join().unwrap();
-    }
-
-    for _ in 0..threads_num {
-        if let Ok((i, signals)) = rx.recv() {
-            final_results[i] = signals;
-        }
-    }
-
-    let r = final_results.into_iter().flatten().collect();
-    println!("graph calculated in parallel in {:?}", start.elapsed());
-
-    r
-}
+// pub fn evaluate_parallel(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<U256> {
+//     let start = Instant::now();
+//     let inputs: Arc<[U256]> = Arc::from(inputs);
+//     println!("total nodes: {}", nodes.len());
+//     let mut nodes_splitted = 0;
+//     let sz = outputs.len() / 4;
+//
+//     let mut outputs2 = Vec::new();
+//     let mut subgraphs = Vec::new();
+//
+//     for (i, chunk) in outputs.chunks(sz).enumerate() {
+//         let mut nodes = Vec::from(nodes);
+//         let mut chunk = Vec::from(chunk);
+//         tree_shake(&mut nodes, &mut chunk);
+//         nodes_splitted += nodes.len();
+//         println!("chunk #{}: {} nodes", i, nodes.len());
+//
+//         outputs2.push(chunk);
+//         subgraphs.push(nodes);
+//     }
+//     println!("total nodes splitted: {}", nodes_splitted);
+//     println!("graph splitted in {:?}", start.elapsed());
+//     // assert_valid(nodes);
+//
+//     let start = Instant::now();
+//
+//     let mut handles = Vec::new();
+//     let threads_num = subgraphs.len();
+//     let (tx, rx) = mpsc::channel();
+//     for (i, (nodes, outputs)) in subgraphs.into_iter().zip(outputs2).enumerate() {
+//         let inputs = Arc::clone(&inputs);
+//         let tx = tx.clone();
+//         let handle = thread::spawn(move || {
+//             let mut values = Vec::with_capacity(nodes.len());
+//             for &node in nodes.iter() {
+//                 let value = match node {
+//                     Node::Unknown => panic!("Unknown node"),
+//                     Node::Constant(_) => todo!(),
+//                     Node::Input(i) => inputs[i],
+//                     Node::Op(op, a, b) => op.eval(values[a], values[b]),
+//                     Node::UnoOp(op, a) => op.eval(values[a]),
+//                     Node::TresOp(op, a, b, c) => op.eval(values[a], values[b], values[c]),
+//                 };
+//                 values.push(value);
+//             }
+//
+//             let witness_signals: Vec<U256> = outputs.iter().map(|&i| values[i]).collect();
+//             tx.send((i, witness_signals)).unwrap();
+//         });
+//         handles.push(handle);
+//     }
+//
+//     let mut final_results = vec![Vec::new(); threads_num];
+//
+//     for handle in handles {
+//         handle.join().unwrap();
+//     }
+//
+//     for _ in 0..threads_num {
+//         if let Ok((i, signals)) = rx.recv() {
+//             final_results[i] = signals;
+//         }
+//     }
+//
+//     let r = final_results.into_iter().flatten().collect();
+//     println!("graph calculated in parallel in {:?}", start.elapsed());
+//
+//     r
+// }
 
 /// Constant propagation
 pub fn propagate<T: FieldOps + 'static>(nodes: &mut Nodes<T>) {
@@ -761,7 +823,7 @@ pub fn propagate<T: FieldOps + 'static>(nodes: &mut Nodes<T>) {
 }
 
 /// Remove unused nodes
-pub fn tree_shake(nodes: &mut Vec<Node>, outputs: &mut [usize]) {
+pub fn tree_shake(nodes: &mut NodesStorage, outputs: &mut [usize]) {
     assert_valid(nodes);
 
     // Mark all nodes that are used.

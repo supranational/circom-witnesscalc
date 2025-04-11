@@ -26,8 +26,8 @@ fn parse_args() -> Args {
     let mut wtns_file: Option<String> = None;
     let mut component_counter = false;
 
-    let usage = |err_msg: &str| -> () {
-        if err_msg != "" {
+    let usage = |err_msg: &str| {
+        if !err_msg.is_empty() {
             eprintln!("ERROR: {}", err_msg);
             eprintln!();
         }
@@ -42,7 +42,7 @@ fn parse_args() -> Args {
         eprintln!("OPTIONS:");
         eprintln!("    --help                Display this help message");
         eprintln!("    --component-counter   Output statistics of component counters");
-        let exit_code = if err_msg != "" { 1i32 } else { 0i32 };
+        let exit_code = if !err_msg.is_empty() { 1i32 } else { 0i32 };
         std::process::exit(exit_code);
     };
 
