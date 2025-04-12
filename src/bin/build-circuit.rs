@@ -13,10 +13,10 @@ use anyhow::anyhow;
 use code_producers::c_elements::IODef;
 use code_producers::components::TemplateInstanceIOMap;
 use compiler::circuit_design::function::FunctionCode;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::ProgressBar;
 use ruint::aliases::U256;
 use type_analysis::check_types::check_types;
-use circom_witnesscalc::{InputSignalsInfo};
+use circom_witnesscalc::{progress_bar, InputSignalsInfo};
 use circom_witnesscalc::field::{Field, FieldOperations, FieldOps, U254, U64};
 use circom_witnesscalc::graph::{Node, Operation, UnoOperation, TresOperation, Nodes, NodeConstErr, NodeIdx, NodesInterface, optimize};
 use circom_witnesscalc::storage::serialize_witnesscalc_graph;
@@ -433,25 +433,19 @@ struct BuildCircuitContext<'a, T: FieldOps> {
     io_map: &'a TemplateInstanceIOMap,
 }
 
-impl<T: FieldOps> BuildCircuitContext<'_, T> {
+impl<T: FieldOps + 'static> BuildCircuitContext<'_, T> {
     fn new<'a>(
         nodes: &'a mut Nodes<T>, signal_node_idx: &'a mut Vec<usize>,
         templates: &'a Vec<TemplateCode>, functions: &'a Vec<FunctionCode>,
         io_map: &'a TemplateInstanceIOMap) -> BuildCircuitContext<'a, T> {
 
-        let pb = ProgressBar::new(signal_node_idx.len() as u64);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})\n{msg}")
-                .unwrap()
-                .progress_chars("#>-")
-        );
+        let signal_nodes_num = signal_node_idx.len();
 
         BuildCircuitContext {
             nodes,
             signal_node_idx,
             signals_set: 0,
-            progress_bar: pb,
+            progress_bar: progress_bar(signal_nodes_num),
             templates,
             functions,
             io_map,
@@ -483,8 +477,11 @@ impl<T: FieldOps> BuildCircuitContext<'_, T> {
         }
         self.signal_node_idx[signal_idx] = node_idx;
         self.signals_set += 1;
+        let nodes_num: u64 = self.nodes.len().try_into().unwrap();
         self.progress_bar.set_message(
-            format!("{}:{}", call_stack.join(" -> ", ), line_no));
+            format!(
+                "nodes: {}\n{}:{}", indicatif::HumanCount(nodes_num),
+                call_stack.join(" -> ", ), line_no));
         self.progress_bar.inc(1);
     }
 }
@@ -2141,11 +2138,17 @@ fn build_graph<T: FieldOps + 'static>(
     ctx.progress_bar.set_message("");
     ctx.progress_bar.finish();
 
-    for (idx, i) in signal_node_idx.iter().enumerate() {
-        if *i == usize::MAX {
-            println!("[warning] signal #{} is not set", idx);
-        }
+    let unset_signals_num = signal_node_idx.iter()
+        .filter(|s| **s == usize::MAX)
+        .count();
+    if unset_signals_num > 0 {
+        println!("[warning] {} signals are not set", unset_signals_num);
     }
+    // for (idx, i) in signal_node_idx.iter().enumerate() {
+    //     if *i == usize::MAX {
+    //         println!("[warning] signal #{} is not set", idx);
+    //     }
+    // }
 
     let witness_list = vcp.get_witness_list().clone();
     let mut witness_node_idxes = witness_list

@@ -17,6 +17,7 @@ use crate::graph::{evaluate, Nodes, NodesInterface};
 use wtns_file::FieldElement;
 use ark_bn254::Fr;
 use ark_ff::{BigInteger, PrimeField};
+use indicatif::{ProgressBar, ProgressStyle};
 use crate::field::{Field, FieldOperations, FieldOps, U254, U64};
 use crate::storage::proto_deserializer::deserialize_witnesscalc_graph_from_bytes;
 
@@ -386,6 +387,18 @@ pub fn deserialize_inputs2<T: FieldOps>(
         }
     }
     Ok(inputs)
+}
+
+pub fn progress_bar(n: usize) -> ProgressBar {
+    let n: u64 = n.try_into().unwrap();
+    let pb = ProgressBar::new(n);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})\n{msg}")
+            .unwrap()
+            .progress_chars("#>-")
+    );
+    pb
 }
 
 #[cfg(test)]

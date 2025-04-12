@@ -39,6 +39,8 @@ num-bigint = "0.4.6"
 num-traits = "0.2.19"
 anyhow = "1.0.97"
 indicatif = "0.17.11"
+memmap2 = "0.9.5"
+tempfile = "3.19.1"
 
 [profile.release]
 opt-level = 3
