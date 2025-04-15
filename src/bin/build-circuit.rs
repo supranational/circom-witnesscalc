@@ -1914,14 +1914,33 @@ fn parse_args() -> Args {
     let mut prime: Option<Prime> = None;
     let mut optimization_level: Option<OptimizationLevel> = None;
 
-    let usage = |err_msg: &str| -> String {
-        eprintln!("{}", err_msg);
+    let usage = |err_msg: &str| {
+        if !err_msg.is_empty() {
+            eprintln!("ERROR:");
+            eprintln!("    {}", err_msg);
+            eprintln!();
+        }
+        eprintln!("USAGE:");
+        eprintln!("    {} <circuit_file> <wcd_file> [OPTIONS]", args[0]);
         eprintln!();
-        eprintln!("Usage: {} <circuit_file> <graph_file> [-l <link_library>]* [-i <inputs_file.json>] [-p <prime>] [--r1cs <r1cs_file>] [--O0 | --O1 | --O2] [-v]", args[0]);
+        eprintln!("ARGUMENTS:");
+        eprintln!("    <circuit_file>    Path to the Circom file with main template");
+        eprintln!("    <wcd_file>        File where the witness calculation description will be saved");
         eprintln!();
-        eprintln!("       Valid primes: bn128 (default), goldilocks, grumpkin");
-        eprintln!("       Default optimization level: --O2");
-        std::process::exit(1);
+        eprintln!("OPTIONS:");
+        eprintln!("    -h | --help             Display this help message");
+        eprintln!("    -l <link_libraries>...  Adds directory to library search path.");
+        eprintln!("                            Can be used multiple times.");
+        eprintln!("    -i <inputs_file.json>   Path to the inputs file. If provided, the inputs will be used");
+        eprintln!("                            to generate the witness. Otherwise, inputs will be set to 0");
+        eprintln!("    -p <prime>              The prime field to use. Valid options are 'bn128' (default),");
+        eprintln!("                            'goldilocks', and 'grumpkin'");
+        eprintln!("    --r1cs <r1cs_file>      Path to the R1CS file. If provided, the R1CS file will be");
+        eprintln!("                            saved along with the generated graph");
+        eprintln!("    --O0, --O1, --O2        Optimization level for circom. Default is --O2");
+        eprintln!("    -v                      Verbose mode");
+        let ret_code = if err_msg.is_empty() { 0 } else { 1 };
+        std::process::exit(ret_code);
     };
 
     while i < args.len() {
@@ -1931,6 +1950,8 @@ fn parse_args() -> Args {
                 usage("missing argument for -l");
             }
             link_libraries.push(args[i].clone().into());
+        } else if args[i] == "--help" || args[i] == "-h" {
+            usage("");
         } else if args[i].starts_with("-l") {
             link_libraries.push(args[i][2..].to_string().into())
         } else if args[i] == "-i" {

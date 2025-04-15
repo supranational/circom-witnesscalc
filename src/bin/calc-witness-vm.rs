@@ -28,7 +28,8 @@ fn parse_args() -> Args {
 
     let usage = |err_msg: &str| {
         if !err_msg.is_empty() {
-            eprintln!("ERROR: {}", err_msg);
+            eprintln!("ERROR:");
+            eprintln!("    {}", err_msg);
             eprintln!();
         }
         eprintln!("USAGE:");
