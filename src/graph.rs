@@ -5,6 +5,7 @@ use std::error::Error;
 use std::fmt::Debug;
 use std::fs::File;
 use std::ops::{BitOr, BitXor, Not};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use crate::field::{Field, FieldOperations, FieldOps, M};
 use rand::{RngCore};
@@ -448,6 +449,7 @@ impl TempFile {
 }
 
 pub struct MMapNodes {
+    tmp_dir_path: PathBuf,
     file: TempFile,
     mm: MmapMut,
     cap: usize,
@@ -457,15 +459,16 @@ pub struct MMapNodes {
 impl MMapNodes {
     const init_size: usize = 1_000_000;
 
-    fn new(named: bool) -> Self {
-        Self::with_capacity(Self::init_size, named)
+    fn new(named: bool, temp_dir: &PathBuf) -> Self {
+        Self::with_capacity(Self::init_size, named, temp_dir)
     }
 
-    fn with_capacity(cap: usize, named: bool) -> Self {
+    fn with_capacity(cap: usize, named: bool, temp_dir: &PathBuf) -> Self {
         let cap = cap * Node::SIZE;
-        let file = Self::create_file(named, cap);
+        let file = Self::create_file(temp_dir.as_path(), named, cap);
         let mm = unsafe { MmapMut::map_mut(file.as_file()).unwrap() };
         MMapNodes {
+            tmp_dir_path: temp_dir.clone(),
             file,
             mm,
             cap,
@@ -515,15 +518,15 @@ impl MMapNodes {
         self.ln == 0
     }
 
-    fn create_file(named: bool, size: usize) -> TempFile {
+    fn create_file(in_dir: &Path, named: bool, size: usize) -> TempFile {
         if named {
-            let file = NamedTempFile::new().unwrap();
+            let file = NamedTempFile::new_in(in_dir).unwrap();
             println!(
                 "Created node storage file: {}", file.path().to_str().unwrap());
             file.as_file().set_len(size.try_into().unwrap()).unwrap();
             TempFile::Named(file)
         } else {
-            let file = tempfile::tempfile().unwrap();
+            let file = tempfile::tempfile_in(in_dir).unwrap();
             file.set_len(size.try_into().unwrap()).unwrap();
             TempFile::Unnamed(file)
         }
@@ -538,7 +541,8 @@ impl MMapNodes {
             TempFile::Unnamed(_) => false
         };
         let cap = self.ln;
-        let file = Self::create_file(named, self.cap);
+        let file = Self::create_file(
+            self.tmp_dir_path.as_path(), named, self.cap);
         let mut mm = unsafe { MmapMut::map_mut(file.as_file()).unwrap() };
 
         let mut dst: usize = 0;
@@ -611,11 +615,14 @@ pub struct Nodes<T: FieldOps> {
 }
 
 impl<T: FieldOps + 'static> Nodes<T> {
-    pub fn new(prime: T, prime_str: &str, named_temp: bool) -> Self {
+    pub fn new(
+        prime: T, prime_str: &str, named_temp: bool,
+        temp_path: &PathBuf) -> Self {
+
         let ff = Field::new(prime);
         Nodes {
             ff,
-            nodes: NodesStorage::new(named_temp),
+            nodes: NodesStorage::new(named_temp, temp_path),
             constants: Vec::new(),
             constants_idx: HashMap::new(),
             prime_str: prime_str.to_string(),
@@ -1641,7 +1648,8 @@ mod tests {
     fn test_MMapNodes() {
         let x1 = Node::TresOp(TresOperation::TernCond, 1, 2, 3);
         let x2 = Node::Input(4);
-        let mut nodes = MMapNodes::new(true);
+        let mut nodes = MMapNodes::new(
+            true, &std::env::temp_dir());
         nodes.push(x1);
         nodes.push(x2);
         let y1 = nodes.get(0).unwrap();
@@ -1668,7 +1676,8 @@ mod tests {
 
     #[test]
     fn test_MMapNodes_grow_named() {
-        let mut nodes = MMapNodes::with_capacity(2, true);
+        let mut nodes = MMapNodes::with_capacity(
+            2, true, &std::env::temp_dir());
         assert_eq!(nodes.cap, 2 * Node::SIZE);
         assert_eq!(nodes.ln, 0);
         nodes.push(Node::TresOp(TresOperation::TernCond, 1, 2, 3));
@@ -1686,7 +1695,8 @@ mod tests {
 
     #[test]
     fn test_MMapNodes_grow_unnamed() {
-        let mut nodes = MMapNodes::with_capacity(2, false);
+        let mut nodes = MMapNodes::with_capacity(
+            2, false, &std::env::temp_dir());
         assert_eq!(nodes.cap, 2 * Node::SIZE);
         assert_eq!(nodes.ln, 0);
         nodes.push(Node::TresOp(TresOperation::TernCond, 1, 2, 3));
@@ -1704,7 +1714,8 @@ mod tests {
 
     #[test]
     fn test_MMapNodes_retain() {
-        let mut nodes = MMapNodes::new(true);
+        let mut nodes = MMapNodes::new(
+            true, &std::env::temp_dir());
         nodes.push(Node::TresOp(TresOperation::TernCond, 1, 2, 3));
         nodes.push(Node::TresOp(TresOperation::TernCond, 4, 5, 6));
         nodes.push(Node::TresOp(TresOperation::TernCond, 7, 8, 9));

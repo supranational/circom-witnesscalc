@@ -1,3 +1,4 @@
+use std::env;
 use std::io::{Cursor, Error, ErrorKind};
 use crate::field::{FieldOperations, FieldOps, U254, U64};
 use crate::graph::{Node, Nodes, NodesInterface, Operation, TresOperation, UnoOperation};
@@ -49,7 +50,8 @@ pub fn deserialize_witnesscalc_graph_from_bytes(
             let prime = U64::from_le_bytes(
                 &<U254 as FieldOps>::to_le_bytes(&prime))
                 .unwrap();
-            let mut nodes = Nodes::new(prime, curve_name, false);
+            let mut nodes = Nodes::new(
+                prime, curve_name, false, &env::temp_dir());
             for _ in 0..nodes_num {
                 let (msg_len, int_len) = decode_varint_u32(&bytes[idx..])?;
                 idx += int_len;
@@ -59,7 +61,8 @@ pub fn deserialize_witnesscalc_graph_from_bytes(
             Box::new(nodes)
         }
         254 => {
-            let mut nodes = Nodes::new(prime, curve_name, false);
+            let mut nodes = Nodes::new(
+                prime, curve_name, false, &env::temp_dir());
             for _ in 0..nodes_num {
                 let (msg_len, int_len) = decode_varint_u32(&bytes[idx..])?;
                 idx += int_len;

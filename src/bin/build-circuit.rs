@@ -1901,6 +1901,7 @@ struct Args {
     r1cs: Option<String>,
     optimization_level: Option<OptimizationLevel>,
     named_temp: bool,
+    temp_dir: PathBuf,
 }
 
 fn parse_args() -> Args {
@@ -1915,6 +1916,7 @@ fn parse_args() -> Args {
     let mut prime: Option<Prime> = None;
     let mut optimization_level: Option<OptimizationLevel> = None;
     let mut named_temp: bool = false;
+    let mut temp_dir: Option<PathBuf> = None;
 
     let usage = |err_msg: &str| {
         if !err_msg.is_empty() {
@@ -1946,6 +1948,9 @@ fn parse_args() -> Args {
         eprintln!("                            create a named file so it can be inspected if needed. It is");
         eprintln!("                            usually removed on exit, but if the process is killed abnormally,");
         eprintln!("                            the file may remain");
+        eprintln!("    --temp-dir              Directory for creating the temporary file with nodes.");
+        eprintln!("                            Even for unnamed temporary files, this directory can specify");
+        eprintln!("                            the target partition");
         let ret_code = if err_msg.is_empty() { 0 } else { 1 };
         std::process::exit(ret_code);
     };
@@ -2021,6 +2026,15 @@ fn parse_args() -> Args {
             }
         } else if args[i] == "--named-temp" {
             named_temp = true;
+        } else if args[i] == "--temp-dir" {
+            i += 1;
+            if i >= args.len() {
+                usage("missing argument for --temp-dir");
+            }
+            if temp_dir.is_some() {
+                usage("multiple --temp-dir specified");
+            }
+            temp_dir = Some(args[i].clone().into());
         } else if args[i].starts_with("-") {
             let message = format!("unknown argument: {}", args[i]);
             usage(&message);
@@ -2043,6 +2057,7 @@ fn parse_args() -> Args {
         r1cs: r1cs_file,
         optimization_level,
         named_temp,
+        temp_dir: temp_dir.unwrap_or_else(|| env::temp_dir()),
     }
 }
 
@@ -2146,14 +2161,14 @@ fn main() {
                 circuit.c_producer.prime.as_str()).unwrap();
             build_graph(
                 prime, circuit.c_producer.prime_str.as_str(), &circuit, &args,
-                &vcp, args.named_temp)
+                &vcp, args.named_temp, &args.temp_dir)
         }
         254 => {
             let prime = <U254 as FieldOps>::from_str(
                 circuit.c_producer.prime.as_str()).unwrap();
             build_graph(
                 prime, circuit.c_producer.prime_str.as_str(), &circuit, &args,
-                &vcp, args.named_temp)
+                &vcp, args.named_temp, &args.temp_dir)
         }
         _ => {
             panic!(
@@ -2165,9 +2180,10 @@ fn main() {
 
 fn build_graph<T: FieldOps + 'static>(
     prime: T, curve_name: &str, circuit: &Circuit,
-    args: &Args, vcp: &VCP, named_temp: bool) {
+    args: &Args, vcp: &VCP, named_temp: bool, temp_dir: &PathBuf) {
 
-    let mut nodes = Nodes::new(prime, curve_name, named_temp);
+    let mut nodes = Nodes::new(
+        prime, curve_name, named_temp, temp_dir);
     let constants = get_constants(&nodes.ff, circuit).unwrap();
     for c in constants.iter() {
         nodes.const_node_idx_from_value(*c);
