@@ -419,7 +419,7 @@ pub fn deserialize_witnesscalc_graph(
             }
         }
 
-        let mut nodes = Nodes::new(prime, "bn128");
+        let mut nodes = Nodes::new(prime, "bn128", false);
         for n in nodes_pb.iter() {
             match &n.node {
                 Some(n) => nodes.push_proto(n),
@@ -565,7 +565,7 @@ mod tests {
         let prime = U254::from_str_radix(
             "21888242871839275222246405745257275088548364400416034343698204186575808495617",
             10).unwrap();
-        let mut nodes = Nodes::new(prime, "bn128");
+        let mut nodes = Nodes::new(prime, "bn128", false);
         nodes.push(Node::Input(0));
         let c = (&nodes.ff).parse_str("1").unwrap();
         nodes.const_node_idx_from_value(c);
@@ -621,7 +621,7 @@ mod tests {
     #[test]
     fn test_deserialize_inputs() {
         let prime = <U254 as FieldOps>::from_str("21888242871839275222246405745257275088548364400416034343698204186575808495617").unwrap();
-        let mut nodes = Nodes::new(prime, "bn128");
+        let mut nodes = Nodes::new(prime, "bn128", false);
         nodes.push(Node::Input(0));
         let c = (&nodes.ff).parse_str("1").unwrap();
         nodes.const_node_idx_from_value(c);

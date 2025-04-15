@@ -3,6 +3,7 @@ use std::any::Any;
 use std::collections::hash_map::Entry;
 use std::error::Error;
 use std::fmt::Debug;
+use std::fs::File;
 use std::ops::{BitOr, BitXor, Not};
 use std::time::Instant;
 use crate::field::{Field, FieldOperations, FieldOps, M};
@@ -432,8 +433,22 @@ pub trait NodesInterface: Any {
 
 type NodesStorage = MMapNodes;
 
+enum TempFile {
+    Named(NamedTempFile),
+    Unnamed(File),
+}
+
+impl TempFile {
+    fn as_file(&self) -> &File {
+        match self {
+            TempFile::Named(file) => file.as_file(),
+            TempFile::Unnamed(file) => file,
+        }
+    }
+}
+
 pub struct MMapNodes {
-    file: NamedTempFile,
+    file: TempFile,
     mm: MmapMut,
     cap: usize,
     ln: usize,
@@ -442,16 +457,13 @@ pub struct MMapNodes {
 impl MMapNodes {
     const init_size: usize = 1_000_000;
 
-    fn new() -> Self {
-        Self::with_capacity(Self::init_size)
+    fn new(named: bool) -> Self {
+        Self::with_capacity(Self::init_size, named)
     }
 
-    fn with_capacity(cap: usize) -> Self {
-        let file = NamedTempFile::new().unwrap();
-        println!("Created node storage file: {}", file.path().to_str().unwrap());
-        // let file = tempfile::tempfile().unwrap();
+    fn with_capacity(cap: usize, named: bool) -> Self {
         let cap = cap * Node::SIZE;
-        file.as_file().set_len(cap.try_into().unwrap()).unwrap();
+        let file = Self::create_file(named, cap);
         let mm = unsafe { MmapMut::map_mut(file.as_file()).unwrap() };
         MMapNodes {
             file,
@@ -477,7 +489,7 @@ impl MMapNodes {
         self.cap = inc + self.cap;
         let new_size: u64 = self.cap.try_into().unwrap();
         self.file.as_file().set_len(new_size).unwrap();
-        self.mm = unsafe { MmapMut::map_mut(&self.file).unwrap() };
+        self.mm = unsafe { MmapMut::map_mut(self.file.as_file()).unwrap() };
     }
 
     fn get(&self, idx: usize) -> Option<Node> {
@@ -503,15 +515,31 @@ impl MMapNodes {
         self.ln == 0
     }
 
+    fn create_file(named: bool, size: usize) -> TempFile {
+        if named {
+            let file = NamedTempFile::new().unwrap();
+            println!(
+                "Created node storage file: {}", file.path().to_str().unwrap());
+            file.as_file().set_len(size.try_into().unwrap()).unwrap();
+            TempFile::Named(file)
+        } else {
+            let file = tempfile::tempfile().unwrap();
+            file.set_len(size.try_into().unwrap()).unwrap();
+            TempFile::Unnamed(file)
+        }
+    }
+
     fn retain<F>(&mut self, mut f: F)
     where
         F: FnMut() -> bool,
     {
-        let file = NamedTempFile::new().unwrap();
-        println!("re-created node storage file: {}", file.path().to_str().unwrap());
+        let named = match self.file {
+            TempFile::Named(_) => true,
+            TempFile::Unnamed(_) => false
+        };
         let cap = self.ln;
-        file.as_file().set_len(cap.try_into().unwrap()).unwrap();
-        let mut mm = unsafe { MmapMut::map_mut(&file).unwrap() };
+        let file = Self::create_file(named, self.cap);
+        let mut mm = unsafe { MmapMut::map_mut(file.as_file()).unwrap() };
 
         let mut dst: usize = 0;
         for i in 0..self.len() {
@@ -583,11 +611,11 @@ pub struct Nodes<T: FieldOps> {
 }
 
 impl<T: FieldOps + 'static> Nodes<T> {
-    pub fn new(prime: T, prime_str: &str) -> Self {
+    pub fn new(prime: T, prime_str: &str, named_temp: bool) -> Self {
         let ff = Field::new(prime);
         Nodes {
             ff,
-            nodes: NodesStorage::new(),
+            nodes: NodesStorage::new(named_temp),
             constants: Vec::new(),
             constants_idx: HashMap::new(),
             prime_str: prime_str.to_string(),
@@ -1613,7 +1641,7 @@ mod tests {
     fn test_MMapNodes() {
         let x1 = Node::TresOp(TresOperation::TernCond, 1, 2, 3);
         let x2 = Node::Input(4);
-        let mut nodes = MMapNodes::new();
+        let mut nodes = MMapNodes::new(true);
         nodes.push(x1);
         nodes.push(x2);
         let y1 = nodes.get(0).unwrap();
@@ -1639,8 +1667,26 @@ mod tests {
     }
 
     #[test]
-    fn test_MMapNodes_grow() {
-        let mut nodes = MMapNodes::with_capacity(2);
+    fn test_MMapNodes_grow_named() {
+        let mut nodes = MMapNodes::with_capacity(2, true);
+        assert_eq!(nodes.cap, 2 * Node::SIZE);
+        assert_eq!(nodes.ln, 0);
+        nodes.push(Node::TresOp(TresOperation::TernCond, 1, 2, 3));
+        assert_eq!(nodes.cap, 2 * Node::SIZE);
+        assert_eq!(nodes.ln, 1 * Node::SIZE);
+
+        nodes.push(Node::TresOp(TresOperation::TernCond, 1, 2, 3));
+        assert_eq!(nodes.cap, 2 * Node::SIZE);
+        assert_eq!(nodes.ln, 2 * Node::SIZE);
+
+        nodes.push(Node::TresOp(TresOperation::TernCond, 1, 2, 3));
+        assert_eq!(nodes.cap, 1002 * Node::SIZE);
+        assert_eq!(nodes.ln, 3 * Node::SIZE);
+    }
+
+    #[test]
+    fn test_MMapNodes_grow_unnamed() {
+        let mut nodes = MMapNodes::with_capacity(2, false);
         assert_eq!(nodes.cap, 2 * Node::SIZE);
         assert_eq!(nodes.ln, 0);
         nodes.push(Node::TresOp(TresOperation::TernCond, 1, 2, 3));
@@ -1658,7 +1704,7 @@ mod tests {
 
     #[test]
     fn test_MMapNodes_retain() {
-        let mut nodes = MMapNodes::new();
+        let mut nodes = MMapNodes::new(true);
         nodes.push(Node::TresOp(TresOperation::TernCond, 1, 2, 3));
         nodes.push(Node::TresOp(TresOperation::TernCond, 4, 5, 6));
         nodes.push(Node::TresOp(TresOperation::TernCond, 7, 8, 9));

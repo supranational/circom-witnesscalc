@@ -49,7 +49,7 @@ pub fn deserialize_witnesscalc_graph_from_bytes(
             let prime = U64::from_le_bytes(
                 &<U254 as FieldOps>::to_le_bytes(&prime))
                 .unwrap();
-            let mut nodes = Nodes::new(prime, curve_name);
+            let mut nodes = Nodes::new(prime, curve_name, false);
             for _ in 0..nodes_num {
                 let (msg_len, int_len) = decode_varint_u32(&bytes[idx..])?;
                 idx += int_len;
@@ -59,7 +59,7 @@ pub fn deserialize_witnesscalc_graph_from_bytes(
             Box::new(nodes)
         }
         254 => {
-            let mut nodes = Nodes::new(prime, curve_name);
+            let mut nodes = Nodes::new(prime, curve_name, false);
             for _ in 0..nodes_num {
                 let (msg_len, int_len) = decode_varint_u32(&bytes[idx..])?;
                 idx += int_len;

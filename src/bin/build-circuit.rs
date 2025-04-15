@@ -1900,6 +1900,7 @@ struct Args {
     prime: Prime,
     r1cs: Option<String>,
     optimization_level: Option<OptimizationLevel>,
+    named_temp: bool,
 }
 
 fn parse_args() -> Args {
@@ -1913,6 +1914,7 @@ fn parse_args() -> Args {
     let mut r1cs_file: Option<String> = None;
     let mut prime: Option<Prime> = None;
     let mut optimization_level: Option<OptimizationLevel> = None;
+    let mut named_temp: bool = false;
 
     let usage = |err_msg: &str| {
         if !err_msg.is_empty() {
@@ -1939,6 +1941,11 @@ fn parse_args() -> Args {
         eprintln!("                            saved along with the generated graph");
         eprintln!("    --O0, --O1, --O2        Optimization level for circom. Default is --O2");
         eprintln!("    -v                      Verbose mode");
+        eprintln!("    --named-temp            Normally, we create an unnamed temporary file that the OS");
+        eprintln!("                            deletes when the process exits. With this flag enabled, we");
+        eprintln!("                            create a named file so it can be inspected if needed. It is");
+        eprintln!("                            usually removed on exit, but if the process is killed abnormally,");
+        eprintln!("                            the file may remain");
         let ret_code = if err_msg.is_empty() { 0 } else { 1 };
         std::process::exit(ret_code);
     };
@@ -2012,6 +2019,8 @@ fn parse_args() -> Args {
                     prime = Some(p)
                 }
             }
+        } else if args[i] == "--named-temp" {
+            named_temp = true;
         } else if args[i].starts_with("-") {
             let message = format!("unknown argument: {}", args[i]);
             usage(&message);
@@ -2033,6 +2042,7 @@ fn parse_args() -> Args {
         prime: prime.unwrap_or(Prime::Bn128),
         r1cs: r1cs_file,
         optimization_level,
+        named_temp,
     }
 }
 
@@ -2136,14 +2146,14 @@ fn main() {
                 circuit.c_producer.prime.as_str()).unwrap();
             build_graph(
                 prime, circuit.c_producer.prime_str.as_str(), &circuit, &args,
-                &vcp)
+                &vcp, args.named_temp)
         }
         254 => {
             let prime = <U254 as FieldOps>::from_str(
                 circuit.c_producer.prime.as_str()).unwrap();
             build_graph(
                 prime, circuit.c_producer.prime_str.as_str(), &circuit, &args,
-                &vcp)
+                &vcp, args.named_temp)
         }
         _ => {
             panic!(
@@ -2155,9 +2165,9 @@ fn main() {
 
 fn build_graph<T: FieldOps + 'static>(
     prime: T, curve_name: &str, circuit: &Circuit,
-    args: &Args, vcp: &VCP) {
+    args: &Args, vcp: &VCP, named_temp: bool) {
 
-    let mut nodes = Nodes::new(prime, curve_name);
+    let mut nodes = Nodes::new(prime, curve_name, named_temp);
     let constants = get_constants(&nodes.ff, circuit).unwrap();
     for c in constants.iter() {
         nodes.const_node_idx_from_value(*c);
