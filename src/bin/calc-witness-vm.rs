@@ -40,7 +40,7 @@ fn parse_args() -> Args {
         eprintln!("    <output_path> File where the witness will be saved");
         eprintln!();
         eprintln!("OPTIONS:");
-        eprintln!("    --help                Display this help message");
+        eprintln!("    -h | --help                Display this help message");
         eprintln!("    --component-counter   Output statistics of component counters");
         let exit_code = if !err_msg.is_empty() { 1i32 } else { 0i32 };
         std::process::exit(exit_code);
@@ -48,7 +48,7 @@ fn parse_args() -> Args {
 
     let mut i = 1;
     while i < args.len() {
-        if args[i] == "--component-counter" || args[i] == "-h" {
+        if args[i] == "--component-counter" {
             component_counter = true;
         } else if args[i] == "--help" || args[i] == "-h" {
             usage("");
