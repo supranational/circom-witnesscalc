@@ -461,7 +461,7 @@ fn decode_constant_node<T: FieldOps + 'static>(
     let v = (&nodes.ff).parse_le_bytes(&n).map_err(|_| {
         Error::new(ErrorKind::InvalidData, "Invalid BigInt bytes")
     })?;
-    nodes.push_constant(v);
+    nodes.const_node_idx_from_value(v);
     Ok(())
 }
 

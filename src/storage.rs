@@ -568,7 +568,7 @@ mod tests {
         let mut nodes = Nodes::new(prime, "bn128");
         nodes.push(Node::Input(0));
         let c = (&nodes.ff).parse_str("1").unwrap();
-        nodes.push_constant(c);
+        nodes.const_node_idx_from_value(c);
         nodes.push(Node::UnoOp(UnoOperation::Id, 1));
         nodes.push(Node::Op(Operation::Add, 1, 2));
         nodes.push(Node::TresOp(TresOperation::TernCond, 1, 2, 2));
@@ -624,9 +624,9 @@ mod tests {
         let mut nodes = Nodes::new(prime, "bn128");
         nodes.push(Node::Input(0));
         let c = (&nodes.ff).parse_str("1").unwrap();
-        nodes.push_constant(c);
+        nodes.const_node_idx_from_value(c);
         let c = (&nodes.ff).parse_str("0").unwrap();
-        nodes.push_constant(c);
+        nodes.const_node_idx_from_value(c);
         nodes.push_noopt(Node::UnoOp(UnoOperation::Id, 0));
         nodes.push_noopt(Node::Op(Operation::Mul, 1, 2));
         nodes.push_noopt(Node::TresOp(TresOperation::TernCond, 1, 2, 3));
