@@ -18,13 +18,13 @@ use ruint::aliases::U256;
 use type_analysis::check_types::check_types;
 use circom_witnesscalc::{progress_bar, InputSignalsInfo};
 use circom_witnesscalc::field::{Field, FieldOperations, FieldOps, U254, U64};
-use circom_witnesscalc::graph::{Node, Operation, UnoOperation, TresOperation, Nodes, NodeConstErr, NodeIdx, NodesInterface, optimize};
+use circom_witnesscalc::graph::{Node, Operation, UnoOperation, TresOperation, Nodes, NodeConstErr, NodeIdx, NodesInterface, optimize, MMapNodes, NodesStorage};
 use circom_witnesscalc::storage::serialize_witnesscalc_graph;
 
 // if instruction pointer is a store to the signal, return the signal index
 // and the src instruction to store to the signal
-fn try_signal_store<'a, T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>,
+fn try_signal_store<'a, T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>,
     cmp: &mut ComponentInstance<T>,
     inst: &'a InstructionPointer,
     print_debug: bool,
@@ -56,9 +56,12 @@ fn try_signal_store<'a, T: FieldOps + 'static>(
     }
 }
 
-fn var_from_value_instruction_n<T: FieldOps + 'static>(
-    value_bucket: &ValueBucket, nodes: &Nodes<T>, n: usize,
-    call_stack: &[String]) -> Vec<Var<T>> {
+fn var_from_value_instruction_n<T, NS>(
+    value_bucket: &ValueBucket, nodes: &Nodes<T, NS>, n: usize,
+    call_stack: &[String]) -> Vec<Var<T>>
+where
+    T: FieldOps + 'static,
+    NS: NodesStorage + 'static {
 
     match value_bucket.parse_as {
         ValueType::BigInt => {
@@ -86,14 +89,14 @@ fn var_from_value_instruction_n<T: FieldOps + 'static>(
     }
 }
 
-fn operator_argument_instruction_n<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>,
-    inst: &InstructionPointer,
-    cmp: &mut ComponentInstance<T>,
-    size: usize,
-    print_debug: bool,
-    call_stack: &Vec<String>,
-) -> Vec<usize> {
+fn operator_argument_instruction_n<T, NS>(
+    ctx: &mut BuildCircuitContext<T, NS>, inst: &InstructionPointer,
+    cmp: &mut ComponentInstance<T>, size: usize, print_debug: bool,
+    call_stack: &Vec<String>) -> Vec<usize>
+where
+    T: FieldOps + 'static,
+    NS: NodesStorage + 'static {
+
     assert!(size > 0, "size = {}", size);
 
     if size == 1 {
@@ -225,13 +228,14 @@ fn operator_argument_instruction_n<T: FieldOps + 'static>(
 }
 
 
-fn operator_argument_instruction<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>,
-    cmp: &mut ComponentInstance<T>,
-    inst: &InstructionPointer,
-    print_debug: bool,
-    call_stack: &Vec<String>,
-) -> usize {
+fn operator_argument_instruction<T, NS>(
+    ctx: &mut BuildCircuitContext<T, NS>, cmp: &mut ComponentInstance<T>,
+    inst: &InstructionPointer, print_debug: bool,
+    call_stack: &Vec<String>) -> usize
+where
+    T: FieldOps + 'static,
+    NS: NodesStorage + 'static {
+
     match **inst {
         Instruction::Load(ref load_bucket) => {
             match load_bucket.address_type {
@@ -348,8 +352,8 @@ fn operator_argument_instruction<T: FieldOps + 'static>(
     }
 }
 
-fn node_from_compute_bucket<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>,
+fn node_from_compute_bucket<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>,
     cmp: &mut ComponentInstance<T>,
     compute_bucket: &ComputeBucket,
     print_debug: bool,
@@ -372,8 +376,8 @@ fn node_from_compute_bucket<T: FieldOps + 'static>(
     }
 }
 
-fn calc_mapped_signal_idx<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>, cmp: &mut ComponentInstance<T>,
+fn calc_mapped_signal_idx<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>, cmp: &mut ComponentInstance<T>,
     subcomponent_idx: usize, signal_code: usize,
     indexes: &[InstructionPointer], print_debug: bool,
     call_stack: &Vec<String>) -> (usize, String) {
@@ -424,8 +428,8 @@ fn calc_mapped_signal_idx<T: FieldOps + 'static>(
     (map_access, template_def)
 }
 
-struct BuildCircuitContext<'a, T: FieldOps> {
-    nodes: &'a mut Nodes<T>,
+struct BuildCircuitContext<'a, T: FieldOps, NS: NodesStorage> {
+    nodes: &'a mut Nodes<T, NS>,
     signal_node_idx: &'a mut Vec<usize>,
     signals_set: usize,
     progress_bar: ProgressBar,
@@ -436,11 +440,15 @@ struct BuildCircuitContext<'a, T: FieldOps> {
     stack_fmt: String,
 }
 
-impl<T: FieldOps + 'static> BuildCircuitContext<'_, T> {
+impl<T, NS> BuildCircuitContext<'_, T, NS>
+where
+    T: FieldOps + 'static,
+    NS: NodesStorage + 'static {
+
     fn new<'a>(
-        nodes: &'a mut Nodes<T>, signal_node_idx: &'a mut Vec<usize>,
+        nodes: &'a mut Nodes<T, NS>, signal_node_idx: &'a mut Vec<usize>,
         templates: &'a Vec<TemplateCode>, functions: &'a Vec<FunctionCode>,
-        io_map: &'a TemplateInstanceIOMap) -> BuildCircuitContext<'a, T> {
+        io_map: &'a TemplateInstanceIOMap) -> BuildCircuitContext<'a, T, NS> {
 
         let signal_nodes_num = signal_node_idx.len();
 
@@ -510,8 +518,8 @@ impl<T: FieldOps + 'static> BuildCircuitContext<'_, T> {
     }
 }
 
-fn process_instruction<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>, inst: &InstructionPointer,
+fn process_instruction<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>, inst: &InstructionPointer,
     print_debug: bool, call_stack: &Vec<String>,
     cmp: &mut ComponentInstance<T>) {
 
@@ -803,10 +811,13 @@ fn process_instruction<T: FieldOps + 'static>(
     }
 }
 
-fn store_function_return_results_into_variable<T: FieldOps + 'static>(
+fn store_function_return_results_into_variable<T, NS>(
     final_data: &FinalData, src_vars: &[Option<Var<T>>], ret: &FnReturn<T>,
-    dst_vars: &mut Vec<Option<Var<T>>>, nodes: &mut Nodes<T>,
-    call_stack: &Vec<String>) {
+    dst_vars: &mut Vec<Option<Var<T>>>, nodes: &mut Nodes<T, NS>,
+    call_stack: &Vec<String>)
+where
+    T: FieldOps + 'static,
+    NS: NodesStorage + 'static {
 
     assert!(matches!(final_data.dest_address_type, AddressType::Variable));
 
@@ -844,10 +855,13 @@ fn store_function_return_results_into_variable<T: FieldOps + 'static>(
     }
 }
 
-fn store_function_return_results_into_subsignal<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>, final_data: &FinalData,
+fn store_function_return_results_into_subsignal<T, NS>(
+    ctx: &mut BuildCircuitContext<T, NS>, final_data: &FinalData,
     src_vars: &[Option<Var<T>>], ret: &FnReturn<T>, print_debug: bool,
-    call_stack: &Vec<String>, cmp: &mut ComponentInstance<T>, line_no: usize) {
+    call_stack: &Vec<String>, cmp: &mut ComponentInstance<T>, line_no: usize)
+where
+    T: FieldOps + 'static,
+    NS: NodesStorage + 'static {
 
     let (cmp_address, input_information) = if let AddressType::SubcmpSignal {cmp_address, input_information, ..} = &final_data.dest_address_type {
         (cmp_address, input_information)
@@ -897,10 +911,13 @@ fn store_function_return_results_into_subsignal<T: FieldOps + 'static>(
         ctx, &src_node_idxs, print_debug, call_stack, cmp, &dest, line_no);
 }
 
-fn store_function_return_results<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>, final_data: &FinalData,
+fn store_function_return_results<T, NS> (
+    ctx: &mut BuildCircuitContext<T, NS>, final_data: &FinalData,
     src_vars: &[Option<Var<T>>], ret: &FnReturn<T>, print_debug: bool,
-    call_stack: &Vec<String>, cmp: &mut ComponentInstance<T>, line_no: usize) {
+    call_stack: &Vec<String>, cmp: &mut ComponentInstance<T>, line_no: usize)
+where
+    T: FieldOps + 'static,
+    NS: NodesStorage + 'static {
 
     match &final_data.dest_address_type {
         AddressType::Signal => todo!("Signal"),
@@ -917,8 +934,8 @@ fn store_function_return_results<T: FieldOps + 'static>(
     }
 }
 
-fn run_function<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>, fn_name: &str,
+fn run_function<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>, fn_name: &str,
     fn_vars: &mut Vec<Option<Var<T>>>, print_debug: bool,
     call_stack: &[String], line_no: usize) -> FnReturn<T> {
 
@@ -958,9 +975,13 @@ fn run_function<T: FieldOps + 'static>(
     }
     r
 }
-fn calc_function_expression_n<T: FieldOps + 'static>(
+fn calc_function_expression_n<T, NS>(
     inst: &InstructionPointer, fn_vars: &mut Vec<Option<Var<T>>>,
-    nodes: &mut Nodes<T>, n: usize, call_stack: &Vec<String>) -> Vec<Var<T>> {
+    nodes: &mut Nodes<T, NS>, n: usize,
+    call_stack: &Vec<String>) -> Vec<Var<T>>
+where
+    T: FieldOps + 'static,
+    NS: NodesStorage + 'static{
 
     if n == 1 {
         let v = calc_function_expression(inst, fn_vars, nodes, call_stack);
@@ -1009,9 +1030,9 @@ fn calc_function_expression_n<T: FieldOps + 'static>(
     }
 }
 
-fn calc_function_expression<T: FieldOps + 'static>(
+fn calc_function_expression<T: FieldOps + 'static, NS: NodesStorage + 'static>(
     inst: &InstructionPointer, fn_vars: &mut Vec<Option<Var<T>>>,
-    nodes: &mut Nodes<T>, call_stack: &Vec<String>) -> Var<T> {
+    nodes: &mut Nodes<T, NS>, call_stack: &Vec<String>) -> Var<T> {
 
     match **inst {
         Instruction::Value(ref value_bucket) => {
@@ -1068,7 +1089,9 @@ fn calc_function_expression<T: FieldOps + 'static>(
     }
 }
 
-fn node_from_var<T: FieldOps + 'static>(v: &Var<T>, nodes: &mut Nodes<T>) -> usize {
+fn node_from_var<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    v: &Var<T>, nodes: &mut Nodes<T, NS>) -> usize {
+
     match v {
         Var::Value(ref v) => {
             nodes.const_node_idx_from_value(*v)
@@ -1077,9 +1100,12 @@ fn node_from_var<T: FieldOps + 'static>(v: &Var<T>, nodes: &mut Nodes<T>) -> usi
     }
 }
 
-fn compute_function_expression<T: FieldOps + 'static>(
+fn compute_function_expression<T, NS>(
     compute_bucket: &ComputeBucket, fn_vars: &mut Vec<Option<Var<T>>>,
-    nodes: &mut Nodes<T>, call_stack: &Vec<String>) -> Var<T> {
+    nodes: &mut Nodes<T, NS>, call_stack: &Vec<String>) -> Var<T>
+where
+    T: FieldOps + 'static,
+    NS: NodesStorage + 'static {
 
     if let Ok(op) = TryInto::<Operation>::try_into(compute_bucket.op) {
         assert_eq!(compute_bucket.stack.len(), 2);
@@ -1123,9 +1149,9 @@ enum FnReturn<T: FieldOps> {
     Value(Var<T>),
 }
 
-fn build_return<T: FieldOps + 'static>(
+fn build_return<T: FieldOps + 'static, NS: NodesStorage + 'static>(
     return_bucket: &ReturnBucket, fn_vars: &mut Vec<Option<Var<T>>>,
-    nodes: &mut Nodes<T>, call_stack: &Vec<String>) -> FnReturn<T> {
+    nodes: &mut Nodes<T, NS>, call_stack: &Vec<String>) -> FnReturn<T> {
 
     match *return_bucket.value {
         Instruction::Load(ref load_bucket) => {
@@ -1153,9 +1179,9 @@ fn build_return<T: FieldOps + 'static>(
     }
 }
 
-fn calc_return_load_idx<T: FieldOps + 'static>(
+fn calc_return_load_idx<T: FieldOps + 'static, NS: NodesStorage + 'static>(
     load_bucket: &LoadBucket, fn_vars: &mut Vec<Option<Var<T>>>,
-    nodes: &mut Nodes<T>, call_stack: &Vec<String>) -> usize {
+    nodes: &mut Nodes<T, NS>, call_stack: &Vec<String>) -> usize {
 
     match &load_bucket.address_type {
         AddressType::Variable => {}, // OK
@@ -1173,9 +1199,9 @@ fn calc_return_load_idx<T: FieldOps + 'static>(
 }
 
 // return variable value and it's index
-fn store_function_variable<T: FieldOps + 'static>(
+fn store_function_variable<T: FieldOps + 'static, NS: NodesStorage + 'static>(
     store_bucket: &StoreBucket, fn_vars: &mut Vec<Option<Var<T>>>,
-    nodes: &mut Nodes<T>, call_stack: &Vec<String>) -> (Var<T>, usize) {
+    nodes: &mut Nodes<T, NS>, call_stack: &Vec<String>) -> (Var<T>, usize) {
 
     assert!(matches!(store_bucket.dest_address_type, AddressType::Variable),
             "functions can store only inside variables: dest_address_type: {}",
@@ -1210,10 +1236,13 @@ fn store_function_variable<T: FieldOps + 'static>(
     (v, lvar_idx)
 }
 
-fn process_function_instruction<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>, inst: &InstructionPointer,
+fn process_function_instruction<T, NS>(
+    ctx: &mut BuildCircuitContext<T, NS>, inst: &InstructionPointer,
     fn_vars: &mut Vec<Option<Var<T>>>, print_debug: bool,
-    call_stack: &Vec<String>) -> Option<FnReturn<T>> {
+    call_stack: &Vec<String>) -> Option<FnReturn<T>>
+where
+    T: FieldOps + 'static,
+    NS: NodesStorage + 'static {
 
     // println!("function instruction: {:?}", inst.to_string());
     match **inst {
@@ -1399,9 +1428,12 @@ fn process_function_instruction<T: FieldOps + 'static>(
     }
 }
 
-fn check_continue_condition_function<T: FieldOps + 'static>(
+fn check_continue_condition_function<T, NS>(
     inst: &InstructionPointer, fn_vars: &mut Vec<Option<Var<T>>>,
-    nodes: &mut Nodes<T>, call_stack: &Vec<String>) -> bool {
+    nodes: &mut Nodes<T, NS>, call_stack: &Vec<String>) -> bool
+where
+    T: FieldOps + 'static,
+    NS: NodesStorage + 'static {
 
     let val = calc_function_expression(inst, fn_vars, nodes, call_stack)
         .to_const(nodes)
@@ -1439,8 +1471,8 @@ struct ComponentInstance<T: FieldOps> {
     subcomponents: Vec<Option<ComponentInstance<T>>>,
 }
 
-fn fmt_create_cmp_bucket<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>,
+fn fmt_create_cmp_bucket<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>,
     cmp_bucket: &CreateCmpBucket,
     cmp: &mut ComponentInstance<T>,
     print_debug: bool,
@@ -1503,20 +1535,24 @@ impl<T: FieldOps> fmt::Display for Var<T> {
 
 
 impl<T: FieldOps + 'static> Var<T> {
-    fn to_const(&self, nodes: &Nodes<T>) -> Result<T, NodeConstErr> {
+    fn to_const<NS: NodesStorage + 'static>(
+        &self, nodes: &Nodes<T, NS>) -> Result<T, NodeConstErr> {
+
         match self {
             Var::Value(v) => Ok(*v),
             Var::Node(node_idx) => nodes.to_const_recursive(NodeIdx::from(*node_idx)),
         }
     }
 
-    fn to_const_usize(&self, nodes: &Nodes<T>) -> Result<usize, Box<dyn Error>> {
+    fn to_const_usize<NS: NodesStorage + 'static>(
+        &self, nodes: &Nodes<T, NS>) -> Result<usize, Box<dyn Error>> {
+
         let c = self.to_const(nodes)?;
         bigint_to_usize(c)
     }
 
-    fn must_const_usize(
-        &self, nodes: &Nodes<T>, call_stack: &[String]) -> usize {
+    fn must_const_usize<NS: NodesStorage + 'static>(
+        &self, nodes: &Nodes<T, NS>, call_stack: &[String]) -> usize {
 
         self.to_const_usize(nodes).unwrap_or_else(|e| {
             panic!("{}: {}", e, call_stack.join(" -> "));
@@ -1524,8 +1560,8 @@ impl<T: FieldOps + 'static> Var<T> {
     }
 }
 
-fn load_n<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>, load_bucket: &LoadBucket,
+fn load_n<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>, load_bucket: &LoadBucket,
     cmp: &mut ComponentInstance<T>, size: usize, print_debug: bool,
     call_stack: &Vec<String>) -> Vec<Var<T>> {
 
@@ -1637,8 +1673,8 @@ fn load_n<T: FieldOps + 'static>(
     }
 }
 
-fn build_unary_op_var<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>,
+fn build_unary_op_var<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>,
     cmp: &mut ComponentInstance<T>,
     op: UnoOperation,
     stack: &[InstructionPointer],
@@ -1661,8 +1697,8 @@ fn build_unary_op_var<T: FieldOps + 'static>(
 }
 
 // Create a Var from operation on two arguments a anb b
-fn build_binary_op_var<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>,
+fn build_binary_op_var<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>,
     cmp: &mut ComponentInstance<T>,
     op: Operation,
     stack: &[InstructionPointer],
@@ -1695,8 +1731,8 @@ fn build_binary_op_var<T: FieldOps + 'static>(
 
 // This function should calculate node based only on constant or variable
 // values. Not based on signal values.
-fn calc_expression<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>,
+fn calc_expression<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>,
     inst: &InstructionPointer,
     cmp: &mut ComponentInstance<T>,
     print_debug: bool,
@@ -1746,8 +1782,8 @@ fn calc_expression<T: FieldOps + 'static>(
 
 // This function should calculate node based only on constant or variable
 // values. Not based on signal values.
-fn calc_expression_n<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>,
+fn calc_expression_n<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>,
     inst: &InstructionPointer,
     cmp: &mut ComponentInstance<T>,
     size: usize,
@@ -1772,8 +1808,8 @@ fn calc_expression_n<T: FieldOps + 'static>(
     }
 }
 
-fn check_continue_condition<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>,
+fn check_continue_condition<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>,
     cmp: &mut ComponentInstance<T>,
     inst: &InstructionPointer,
     print_debug: bool,
@@ -1800,9 +1836,9 @@ fn get_constants<T: FieldOps>(
     Ok(constants)
 }
 
-fn init_input_signals<T: FieldOps + 'static>(
+fn init_input_signals<T: FieldOps + 'static, NS: NodesStorage + 'static>(
     circuit: &Circuit,
-    nodes: &mut Nodes<T>,
+    nodes: &mut Nodes<T, NS>,
     signal_node_idx: &mut [usize],
 ) -> InputSignalsInfo {
 
@@ -1824,8 +1860,8 @@ fn init_input_signals<T: FieldOps + 'static>(
     inputs_info
 }
 
-fn run_template<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>, print_debug: bool, call_stack: &[String],
+fn run_template<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>, print_debug: bool, call_stack: &[String],
     cmp: &mut ComponentInstance<T>, line_no: usize) {
 
     let tmpl = &ctx.templates[cmp.template_id];
@@ -2182,8 +2218,9 @@ fn build_graph<T: FieldOps + 'static>(
     prime: T, curve_name: &str, circuit: &Circuit,
     args: &Args, vcp: &VCP, named_temp: bool, temp_dir: &PathBuf) {
 
+    let nodes_storage = MMapNodes::new(named_temp, temp_dir);
     let mut nodes = Nodes::new(
-        prime, curve_name, named_temp, temp_dir);
+        prime, curve_name, nodes_storage);
     let constants = get_constants(&nodes.ff, circuit).unwrap();
     for c in constants.iter() {
         nodes.const_node_idx_from_value(*c);
@@ -2265,10 +2302,13 @@ struct SignalDestination<'a> {
     dest: &'a LocationRule,
 }
 
-fn store_subcomponent_signals<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>, src_node_idxs: &[usize],
+fn store_subcomponent_signals<T, NS>(
+    ctx: &mut BuildCircuitContext<T, NS>, src_node_idxs: &[usize],
     print_debug: bool, call_stack: &Vec<String>, cmp: &mut ComponentInstance<T>,
-    dst: &SignalDestination, line_no: usize) {
+    dst: &SignalDestination, line_no: usize)
+where
+    T: FieldOps + 'static,
+    NS: NodesStorage + 'static {
 
     let input_status: &StatusInput;
     if let InputInformation::Input { ref status } = dst.input_information {

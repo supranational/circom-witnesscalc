@@ -432,7 +432,16 @@ pub trait NodesInterface: Any {
     fn as_any(&self) -> &dyn Any;
 }
 
-type NodesStorage = MMapNodes;
+pub trait NodesStorage {
+    fn len(&self) -> usize;
+    fn get(&self, idx: usize) -> Option<Node>;
+    fn set(&mut self, idx: usize, n: Node);
+    fn push(&mut self, n: Node);
+    fn is_empty(&self) -> bool;
+    fn retain<F>(&mut self, f: F)
+    where
+        F: FnMut() -> bool;
+}
 
 enum TempFile {
     Named(NamedTempFile),
@@ -459,7 +468,7 @@ pub struct MMapNodes {
 impl MMapNodes {
     const init_size: usize = 1_000_000;
 
-    fn new(named: bool, temp_dir: &PathBuf) -> Self {
+    pub fn new(named: bool, temp_dir: &PathBuf) -> Self {
         Self::with_capacity(Self::init_size, named, temp_dir)
     }
 
@@ -476,14 +485,6 @@ impl MMapNodes {
         }
     }
 
-    fn push(&mut self, n: Node) {
-        if self.ln + Node::SIZE > self.cap {
-            self.grow();
-        }
-        n.write_bytes(self.mm[self.ln..self.ln + Node::SIZE].as_mut());
-        self.ln += Node::SIZE;
-    }
-
     fn grow(&mut self) {
         let mut inc = self.cap / 3;
         if inc < 1000 * Node::SIZE {
@@ -493,6 +494,26 @@ impl MMapNodes {
         let new_size: u64 = self.cap.try_into().unwrap();
         self.file.as_file().set_len(new_size).unwrap();
         self.mm = unsafe { MmapMut::map_mut(self.file.as_file()).unwrap() };
+    }
+
+    fn create_file(in_dir: &Path, named: bool, size: usize) -> TempFile {
+        if named {
+            let file = NamedTempFile::new_in(in_dir).unwrap();
+            println!(
+                "Created node storage file: {}", file.path().to_str().unwrap());
+            file.as_file().set_len(size.try_into().unwrap()).unwrap();
+            TempFile::Named(file)
+        } else {
+            let file = tempfile::tempfile_in(in_dir).unwrap();
+            file.set_len(size.try_into().unwrap()).unwrap();
+            TempFile::Unnamed(file)
+        }
+    }
+}
+
+impl NodesStorage for MMapNodes {
+    fn len(&self) -> usize {
+        self.ln / Node::SIZE
     }
 
     fn get(&self, idx: usize) -> Option<Node> {
@@ -510,26 +531,16 @@ impl MMapNodes {
         n.write_bytes(self.mm[idx * Node::SIZE..(idx + 1) * Node::SIZE].as_mut());
     }
 
-    pub fn len(&self) -> usize {
-        self.ln / Node::SIZE
+    fn push(&mut self, n: Node) {
+        if self.ln + Node::SIZE > self.cap {
+            self.grow();
+        }
+        n.write_bytes(self.mm[self.ln..self.ln + Node::SIZE].as_mut());
+        self.ln += Node::SIZE;
     }
 
     fn is_empty(&self) -> bool {
         self.ln == 0
-    }
-
-    fn create_file(in_dir: &Path, named: bool, size: usize) -> TempFile {
-        if named {
-            let file = NamedTempFile::new_in(in_dir).unwrap();
-            println!(
-                "Created node storage file: {}", file.path().to_str().unwrap());
-            file.as_file().set_len(size.try_into().unwrap()).unwrap();
-            TempFile::Named(file)
-        } else {
-            let file = tempfile::tempfile_in(in_dir).unwrap();
-            file.set_len(size.try_into().unwrap()).unwrap();
-            TempFile::Unnamed(file)
-        }
     }
 
     fn retain<F>(&mut self, mut f: F)
@@ -561,7 +572,6 @@ impl MMapNodes {
         self.cap = cap;
         self.ln = dst * Node::SIZE;
     }
-
 }
 
 pub struct VecNodes {
@@ -569,14 +579,16 @@ pub struct VecNodes {
 }
 
 impl VecNodes {
-    fn new() -> Self {
+    pub fn new() -> Self {
         VecNodes {
             nodes: Vec::new(),
         }
     }
+}
 
-    fn push(&mut self, n: Node) {
-        self.nodes.push(n);
+impl NodesStorage for VecNodes {
+    fn len(&self) -> usize {
+        self.nodes.len()
     }
 
     fn get(&self, idx: usize) -> Option<Node> {
@@ -587,42 +599,41 @@ impl VecNodes {
         self.nodes[index] = n;
     }
 
+    fn push(&mut self, n: Node) {
+        self.nodes.push(n);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
     fn retain<F>(&mut self, mut f: F)
     where
         F: FnMut() -> bool,
     {
         self.nodes.retain(|_| f());
     }
-
-    pub fn len(&self) -> usize {
-        self.nodes.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
-    }
 }
 
-pub struct Nodes<T: FieldOps> {
+pub struct Nodes<T: FieldOps, NS: NodesStorage> {
     prime_str: String,
     // TODO maybe remove pub
     pub ff: Field<T>,
     // TODO remove pub
-    pub nodes: NodesStorage,
+    pub nodes: NS,
     pub constants: Vec<T>,
     // Mapping from a const value to a node index
     constants_idx: HashMap<T, usize>,
 }
 
-impl<T: FieldOps + 'static> Nodes<T> {
-    pub fn new(
-        prime: T, prime_str: &str, named_temp: bool,
-        temp_path: &PathBuf) -> Self {
+impl<T: FieldOps + 'static, NS: NodesStorage + 'static> Nodes<T, NS> {
+    pub fn new(prime: T, prime_str: &str, nodes_storage: NS) -> Self {
 
         let ff = Field::new(prime);
         Nodes {
             ff,
-            nodes: NodesStorage::new(named_temp, temp_path),
+            // nodes: NodesStorage::new(named_temp, temp_path),
+            nodes: nodes_storage,
             constants: Vec::new(),
             constants_idx: HashMap::new(),
             prime_str: prime_str.to_string(),
@@ -823,7 +834,7 @@ impl<T: FieldOps + 'static> Nodes<T> {
     }
 }
 
-impl<T: FieldOps + 'static> NodesInterface for Nodes<T> {
+impl<T: FieldOps + 'static, NS: NodesStorage + 'static> NodesInterface for Nodes<T, NS> {
     // push without optimization
     fn push_noopt(&mut self, n: Node) -> NodeIdx {
         self.nodes.push(n);
@@ -858,7 +869,7 @@ impl<T: FieldOps + 'static> NodesInterface for Nodes<T> {
 }
 
 #[cfg(test)]
-impl<T: FieldOps> PartialEq for Nodes<T> {
+impl<T: FieldOps, NS: NodesStorage> PartialEq for Nodes<T, NS> {
     fn eq(&self, other: &Self) -> bool {
         if self.nodes.len() != other.nodes.len() {
             return false;
@@ -885,7 +896,7 @@ impl<T: FieldOps> PartialEq for Nodes<T> {
 }
 
 #[cfg(test)]
-impl<T: FieldOps> Debug for Nodes<T> {
+impl<T: FieldOps, NS: NodesStorage> Debug for Nodes<T, NS> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Nodes {{")?;
         for i in 0..self.nodes.len() {
@@ -950,7 +961,7 @@ fn compute_shr_uint(a: U256, b: U256) -> U256 {
 }
 
 /// All references must be backwards.
-fn assert_valid(nodes: &NodesStorage) {
+fn assert_valid<NS: NodesStorage>(nodes: &NS) {
     for i in 0..nodes.len() {
         let node = nodes.get(i).unwrap();
         if let Node::Op(_, a, b) = node {
@@ -966,7 +977,9 @@ fn assert_valid(nodes: &NodesStorage) {
     }
 }
 
-pub fn optimize<T: FieldOps + 'static>(nodes: &mut Nodes<T>, outputs: &mut [usize]) {
+pub fn optimize<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    nodes: &mut Nodes<T, NS>, outputs: &mut [usize]) {
+
     tree_shake(nodes, outputs);
     propagate(nodes);
     value_numbering(nodes, outputs);
@@ -974,8 +987,8 @@ pub fn optimize<T: FieldOps + 'static>(nodes: &mut Nodes<T>, outputs: &mut [usiz
     tree_shake(nodes, outputs);
 }
 
-pub fn evaluate<T: FieldOps, F: FieldOperations<Type = T>>(
-    ff: F, nodes: &NodesStorage, inputs: &[T], outputs: &[usize],
+pub fn evaluate<T: FieldOps, F: FieldOperations<Type = T>, NS: NodesStorage>(
+    ff: F, nodes: &NS, inputs: &[T], outputs: &[usize],
     constants: &[T]) -> Vec<T>
 where Vec<T>: FromIterator<<F as FieldOperations>::Type>
 {
@@ -1083,7 +1096,9 @@ where Vec<T>: FromIterator<<F as FieldOperations>::Type>
 // }
 
 /// Constant propagation
-pub fn propagate<T: FieldOps + 'static>(nodes: &mut Nodes<T>) {
+pub fn propagate<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    nodes: &mut Nodes<T, NS>) {
+
     assert_valid(&nodes.nodes);
     let mut constants = 0_usize;
     for i in 0..nodes.len() {
@@ -1143,7 +1158,9 @@ pub fn propagate<T: FieldOps + 'static>(nodes: &mut Nodes<T>) {
 }
 
 /// Remove unused nodes
-pub fn tree_shake<T: FieldOps + 'static>(nodes: &mut Nodes<T>, outputs: &mut [usize]) {
+pub fn tree_shake<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    nodes: &mut Nodes<T, NS>, outputs: &mut [usize]) {
+
     assert_valid(&nodes.nodes);
 
     println!("[tree shake start]");
@@ -1258,7 +1275,9 @@ fn rnd<T: FieldOps>(ff: &Field<T>, rng: &mut ThreadRng) -> T {
 
 
 /// Randomly evaluate the graph
-fn random_eval<T: FieldOps + 'static>(nodes: &mut Nodes<T>) -> Vec<T> {
+fn random_eval<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    nodes: &mut Nodes<T, NS>) -> Vec<T> {
+
     let mut rng = rand::thread_rng();
     let mut values = Vec::with_capacity(nodes.len());
     let mut inputs = HashMap::new();
@@ -1299,8 +1318,8 @@ fn random_eval<T: FieldOps + 'static>(nodes: &mut Nodes<T>) -> Vec<T> {
 }
 
 /// Value numbering
-pub fn value_numbering<T: FieldOps + 'static>(
-    nodes: &mut Nodes<T>, outputs: &mut [usize]) {
+pub fn value_numbering<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    nodes: &mut Nodes<T, NS>, outputs: &mut [usize]) {
 
     assert_valid(&nodes.nodes);
 
@@ -1343,7 +1362,9 @@ pub fn value_numbering<T: FieldOps + 'static>(
 }
 
 /// Probabilistic constant determination
-pub fn find_constants<T: FieldOps + 'static>(nodes: &mut Nodes<T>) {
+pub fn find_constants<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    nodes: &mut Nodes<T, NS>) {
+
     assert_valid(&nodes.nodes);
 
     // Evaluate the graph in random field elements.

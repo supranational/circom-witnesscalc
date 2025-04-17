@@ -13,7 +13,7 @@ use std::slice::from_raw_parts;
 use anyhow::anyhow;
 use ruint::aliases::U256;
 use ruint::ParseError;
-use crate::graph::{evaluate, Nodes, NodesInterface};
+use crate::graph::{evaluate, Nodes, NodesInterface, NodesStorage, VecNodes};
 use wtns_file::FieldElement;
 use ark_bn254::Fr;
 use ark_ff::{BigInteger, PrimeField};
@@ -166,14 +166,14 @@ pub fn calc_witness(
     // populate_inputs(&inputs, &input_mapping, &mut inputs_buffer);
     println!("Inputs populated in {:?}", start.elapsed());
 
-    if let Some(nodes) = nodes.as_any().downcast_ref::<Nodes<U254>>() {
+    if let Some(nodes) = nodes.as_any().downcast_ref::<Nodes<U254, VecNodes>>() {
         let result = calc_witness_typed(nodes, inputs, &input_mapping, &signals)?;
         let vec_witness: Vec<FieldElement<32>> = result
             .iter()
             .map(|a| TryInto::<[u8; 32]>::try_into(a.as_le_slice()).unwrap().into())
             .collect();
         Ok(wtns_from_witness2(vec_witness, nodes.prime()))
-    } else if let Some(nodes) = nodes.as_any().downcast_ref::<Nodes<U64>>() {
+    } else if let Some(nodes) = nodes.as_any().downcast_ref::<Nodes<U64, VecNodes>>() {
         let result = calc_witness_typed(nodes, inputs, &input_mapping, &signals)?;
         let vec_witness: Vec<FieldElement<8>> = result
             .iter()
@@ -185,8 +185,8 @@ pub fn calc_witness(
     }
 }
 
-fn calc_witness_typed<T: FieldOps>(
-    nodes: &Nodes<T>, inputs: &str, input_mapping: &InputSignalsInfo,
+fn calc_witness_typed<T: FieldOps, NS: NodesStorage>(
+    nodes: &Nodes<T, NS>, inputs: &str, input_mapping: &InputSignalsInfo,
     signals: &[usize]) -> Result<Vec<T>, Box<dyn std::error::Error>> {
 
     let inputs = deserialize_inputs2(

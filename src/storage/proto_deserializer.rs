@@ -1,7 +1,6 @@
-use std::env;
 use std::io::{Cursor, Error, ErrorKind};
 use crate::field::{FieldOperations, FieldOps, U254, U64};
-use crate::graph::{Node, Nodes, NodesInterface, Operation, TresOperation, UnoOperation};
+use crate::graph::{Node, Nodes, NodesInterface, NodesStorage, Operation, TresOperation, UnoOperation, VecNodes};
 use crate::InputSignalsInfo;
 use crate::storage::{read_message, WriteBackReader, WITNESSCALC_GRAPH_MAGIC};
 
@@ -50,8 +49,9 @@ pub fn deserialize_witnesscalc_graph_from_bytes(
             let prime = U64::from_le_bytes(
                 &<U254 as FieldOps>::to_le_bytes(&prime))
                 .unwrap();
+            let node_storage = VecNodes::new();
             let mut nodes = Nodes::new(
-                prime, curve_name, false, &env::temp_dir());
+                prime, curve_name, node_storage);
             for _ in 0..nodes_num {
                 let (msg_len, int_len) = decode_varint_u32(&bytes[idx..])?;
                 idx += int_len;
@@ -61,8 +61,9 @@ pub fn deserialize_witnesscalc_graph_from_bytes(
             Box::new(nodes)
         }
         254 => {
+            let node_storage = VecNodes::new();
             let mut nodes = Nodes::new(
-                prime, curve_name, false, &env::temp_dir());
+                prime, curve_name, node_storage);
             for _ in 0..nodes_num {
                 let (msg_len, int_len) = decode_varint_u32(&bytes[idx..])?;
                 idx += int_len;
@@ -120,8 +121,8 @@ impl TryFrom<u8> for WireType {
 }
 
 /// Decodes a protobuf Node message into a Node enum
-pub fn decode_node<T: FieldOps + 'static>(
-    bytes: &[u8], nodes: &mut Nodes<T>) -> Result<(), Error> {
+pub fn decode_node<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    bytes: &[u8], nodes: &mut Nodes<T, NS>) -> Result<(), Error> {
 
     if bytes.is_empty() {
         return Err(Error::new(
@@ -163,8 +164,8 @@ pub fn decode_node<T: FieldOps + 'static>(
     }
 }
 
-fn decode_input_node<T: FieldOps + 'static>(
-    bytes: &[u8], nodes: &mut Nodes<T>) -> Result<(), Error> {
+fn decode_input_node<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    bytes: &[u8], nodes: &mut Nodes<T, NS>) -> Result<(), Error> {
 
     if bytes.is_empty() {
         nodes.push_noopt(Node::Input(0));
@@ -236,8 +237,8 @@ fn decode_big_le_bytes(bytes: &[u8]) -> Result<Vec<u8>, Error> {
 }
 
 /// Decodes a UnoOpNode message into an Operation and two indices
-fn decode_uno_op_node<T: FieldOps + 'static>(
-    bytes: &[u8], nodes: &mut Nodes<T>) -> Result<(), Error> {
+fn decode_uno_op_node<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    bytes: &[u8], nodes: &mut Nodes<T, NS>) -> Result<(), Error> {
 
     if bytes.is_empty() {
         nodes.push_noopt(Node::UnoOp(UnoOperation::Neg, 0));
@@ -291,8 +292,8 @@ fn decode_uno_op_node<T: FieldOps + 'static>(
 }
 
 /// Decodes a DuoOpNode message into an Operation and two indices
-fn decode_duo_op_node<T: FieldOps + 'static>(
-    bytes: &[u8], nodes: &mut Nodes<T>) -> Result<(), Error> {
+fn decode_duo_op_node<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    bytes: &[u8], nodes: &mut Nodes<T, NS>) -> Result<(), Error> {
 
     if bytes.is_empty() {
         nodes.push_noopt(Node::Op(Operation::Mul, 0, 0));
@@ -365,8 +366,8 @@ fn decode_duo_op_node<T: FieldOps + 'static>(
     Ok(())
 }
 
-fn decode_tres_op_node<T: FieldOps + 'static>(
-    bytes: &[u8], nodes: &mut Nodes<T>) -> Result<(), Error> {
+fn decode_tres_op_node<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    bytes: &[u8], nodes: &mut Nodes<T, NS>) -> Result<(), Error> {
 
     if bytes.is_empty() {
         nodes.push_noopt(Node::TresOp(TresOperation::TernCond, 0, 0, 0));
@@ -424,8 +425,8 @@ fn decode_tres_op_node<T: FieldOps + 'static>(
     Ok(())
 }
 
-fn decode_constant_node<T: FieldOps + 'static>(
-    bytes: &[u8], nodes: &mut Nodes<T>) -> Result<(), Error> {
+fn decode_constant_node<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    bytes: &[u8], nodes: &mut Nodes<T, NS>) -> Result<(), Error> {
 
     if bytes.is_empty() {
         return Err(Error::new(
