@@ -176,9 +176,9 @@ impl TryFrom<u8> for Operation {
     }
 }
 
-impl Into<u8> for &Operation {
-    fn into(self) -> u8 {
-        match self {
+impl From<&Operation> for u8 {
+    fn from(val: &Operation) -> Self {
+        match val {
             Operation::Mul => 0,
             Operation::Div => 1,
             Operation::Add => 2,
@@ -291,9 +291,9 @@ impl TryFrom<u8> for UnoOperation {
     }
 }
 
-impl Into<u8> for &UnoOperation {
-    fn into(self) -> u8 {
-        match self {
+impl From<&UnoOperation> for u8 {
+    fn from(val: &UnoOperation) -> Self {
+        match val {
             UnoOperation::Neg => 0,
             UnoOperation::Id => 1,
             UnoOperation::Lnot => 2,
@@ -334,9 +334,9 @@ impl TryFrom<u8> for TresOperation {
     }
 }
 
-impl Into<u8> for &TresOperation {
-    fn into(self) -> u8 {
-        match self {
+impl From<&TresOperation> for u8 {
+    fn from(val: &TresOperation) -> Self {
+        match val {
             TresOperation::TernCond => 0,
         }
     }
@@ -468,16 +468,16 @@ pub struct MMapNodes {
 impl MMapNodes {
     const init_size: usize = 1_000_000;
 
-    pub fn new(named: bool, temp_dir: &PathBuf) -> Self {
+    pub fn new(named: bool, temp_dir: &Path) -> Self {
         Self::with_capacity(Self::init_size, named, temp_dir)
     }
 
-    fn with_capacity(cap: usize, named: bool, temp_dir: &PathBuf) -> Self {
+    fn with_capacity(cap: usize, named: bool, temp_dir: &Path) -> Self {
         let cap = cap * Node::SIZE;
-        let file = Self::create_file(temp_dir.as_path(), named, cap);
+        let file = Self::create_file(temp_dir, named, cap);
         let mm = unsafe { MmapMut::map_mut(file.as_file()).unwrap() };
         MMapNodes {
-            tmp_dir_path: temp_dir.clone(),
+            tmp_dir_path: temp_dir.to_path_buf(),
             file,
             mm,
             cap,
@@ -490,7 +490,7 @@ impl MMapNodes {
         if inc < 1000 * Node::SIZE {
             inc = 1000 * Node::SIZE;
         }
-        self.cap = inc + self.cap;
+        self.cap += inc;
         let new_size: u64 = self.cap.try_into().unwrap();
         self.file.as_file().set_len(new_size).unwrap();
         self.mm = unsafe { MmapMut::map_mut(self.file.as_file()).unwrap() };
@@ -586,13 +586,19 @@ impl VecNodes {
     }
 }
 
+impl Default for VecNodes {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NodesStorage for VecNodes {
     fn len(&self) -> usize {
         self.nodes.len()
     }
 
     fn get(&self, idx: usize) -> Option<Node> {
-        self.nodes.get(idx).map(|n| n.clone())
+        self.nodes.get(idx).copied()
     }
 
     fn set(&mut self, index: usize, n: Node) {
@@ -683,7 +689,7 @@ impl<T: FieldOps + 'static, NS: NodesStorage + 'static> Nodes<T, NS> {
         for i in 0..self.nodes.len() {
             let node = self.nodes.get(i).unwrap();
             if let Node::Constant(c_idx) = node {
-                self.constants_idx.insert(self.constants[c_idx].clone(), i);
+                self.constants_idx.insert(self.constants[c_idx], i);
             }
         }
     }
@@ -741,7 +747,7 @@ impl<T: FieldOps + 'static, NS: NodesStorage + 'static> Nodes<T, NS> {
     }
 
     pub fn get(&self, idx: NodeIdx) -> Option<Node> {
-        self.nodes.get(idx.0).map(|n| n.clone())
+        self.nodes.get(idx.0)
     }
 
     pub fn to_proto(

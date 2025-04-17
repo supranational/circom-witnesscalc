@@ -6,7 +6,7 @@ use program_structure::error_definition::Report;
 use std::collections::HashMap;
 use std::{env, fmt, fs};
 use std::error::Error;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Instant;
 use anyhow::anyhow;
@@ -428,6 +428,8 @@ fn calc_mapped_signal_idx<T: FieldOps + 'static, NS: NodesStorage + 'static>(
     (map_access, template_def)
 }
 
+type CallStack = Vec<(String, usize)>;
+
 struct BuildCircuitContext<'a, T: FieldOps, NS: NodesStorage> {
     nodes: &'a mut Nodes<T, NS>,
     signal_node_idx: &'a mut Vec<usize>,
@@ -436,7 +438,7 @@ struct BuildCircuitContext<'a, T: FieldOps, NS: NodesStorage> {
     templates: &'a Vec<TemplateCode>,
     functions: &'a Vec<FunctionCode>,
     io_map: &'a TemplateInstanceIOMap,
-    stack: Vec<(String, usize)>,
+    stack: CallStack,
     stack_fmt: String,
 }
 
@@ -2093,7 +2095,7 @@ fn parse_args() -> Args {
         r1cs: r1cs_file,
         optimization_level,
         named_temp,
-        temp_dir: temp_dir.unwrap_or_else(|| env::temp_dir()),
+        temp_dir: temp_dir.unwrap_or_else(env::temp_dir),
     }
 }
 
@@ -2216,7 +2218,7 @@ fn main() {
 
 fn build_graph<T: FieldOps + 'static>(
     prime: T, curve_name: &str, circuit: &Circuit,
-    args: &Args, vcp: &VCP, named_temp: bool, temp_dir: &PathBuf) {
+    args: &Args, vcp: &VCP, named_temp: bool, temp_dir: &Path) {
 
     let nodes_storage = MMapNodes::new(named_temp, temp_dir);
     let mut nodes = Nodes::new(
