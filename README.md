@@ -33,6 +33,8 @@ cargo run --package circom-witnesscalc --bin build-circuit <path_to_circuit.circ
 
 Run `./build-circuit --help` to see the available options.
 
+To build on Ubuntu you need to install `clang-19` and `protobuf-compiler` packages.
+
 ## Calculate witness from circuit graph created on previous step
 
 To generate a witness file from a circuit graph and inputs, run the following command.
