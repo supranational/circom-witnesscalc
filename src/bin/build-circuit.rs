@@ -428,7 +428,43 @@ fn calc_mapped_signal_idx<T: FieldOps + 'static, NS: NodesStorage + 'static>(
     (map_access, template_def)
 }
 
-type CallStack = Vec<(String, usize)>;
+struct CallStack {
+    stack: Vec<(String, usize)>,
+    stack_fmt: String,
+}
+
+
+impl CallStack {
+    fn new() -> Self {
+        CallStack {
+            stack: Vec::new(),
+            stack_fmt: String::new(),
+        }
+    }
+
+    fn update_line(&mut self, line_no: usize) {
+        if let Some((_, ln)) = self.stack.last_mut() {
+            *ln = line_no;
+        }
+        self.update_fmt();
+    }
+
+    fn update_fmt(&mut self) {
+        self.stack_fmt = self.stack.iter()
+            .map(|(name, line_no)| format!("{}:{}", name, line_no))
+            .collect::<Vec<String>>()
+            .join(" -> ");
+    }
+
+    fn push(&mut self, name: String) {
+        self.stack.push((name, 0));
+    }
+
+    fn pop(&mut self) {
+        self.stack.pop();
+        self.update_fmt();
+    }
+}
 
 struct BuildCircuitContext<'a, T: FieldOps, NS: NodesStorage> {
     nodes: &'a mut Nodes<T, NS>,
@@ -439,7 +475,6 @@ struct BuildCircuitContext<'a, T: FieldOps, NS: NodesStorage> {
     functions: &'a Vec<FunctionCode>,
     io_map: &'a TemplateInstanceIOMap,
     stack: CallStack,
-    stack_fmt: String,
 }
 
 impl<T, NS> BuildCircuitContext<'_, T, NS>
@@ -462,8 +497,7 @@ where
             templates,
             functions,
             io_map,
-            stack: Vec::with_capacity(10),
-            stack_fmt: String::new(),
+            stack: CallStack::new(),
         }
     }
     fn new_component(
@@ -484,7 +518,6 @@ where
     }
 
     fn associate_signal_to_node(&mut self, signal_idx: usize, node_idx: usize) {
-
         if self.signal_node_idx[signal_idx] != usize::MAX {
             panic!("signal is already set");
         }
@@ -500,23 +533,22 @@ where
         let msg = format!(
             "nodes: {}; constants: {}\n{}",
             indicatif::HumanCount(nodes_num), indicatif::HumanCount(const_num),
-            self.stack_fmt);
+            self.stack.stack_fmt);
         self.progress_bar.set_message(msg);
     }
 
-    fn push_stack(&mut self, name: String, idx: usize) {
-        self.stack.push((name, idx));
-        self.stack_fmt = self.stack.iter()
-            .map(
-                |(name, line_no)| format!(
-                    "{}:{}", name, line_no))
-            .collect::<Vec<String>>()
-            .join(" -> ");
+    fn push_stack(&mut self, name: String) {
+        self.stack.push(name);
+    }
+
+    fn update_line(&mut self, line_no: usize) {
+        self.stack.update_line(line_no);
         self.update_progress_message();
     }
 
     fn pop_stack(&mut self) {
         self.stack.pop();
+        self.update_progress_message();
     }
 }
 
@@ -524,6 +556,8 @@ fn process_instruction<T: FieldOps + 'static, NS: NodesStorage + 'static>(
     ctx: &mut BuildCircuitContext<T, NS>, inst: &InstructionPointer,
     print_debug: bool, call_stack: &Vec<String>,
     cmp: &mut ComponentInstance<T>) {
+
+    ctx.update_line(inst.get_line());
 
     match **inst {
         Instruction::Value(..) => {
@@ -627,8 +661,7 @@ fn process_instruction<T: FieldOps + 'static, NS: NodesStorage + 'static>(
                     };
 
                     store_subcomponent_signals(
-                        ctx, &node_idxs, print_debug, call_stack, cmp, &dest,
-                        store_bucket.get_line());
+                        ctx, &node_idxs, print_debug, call_stack, cmp, &dest);
                 }
             };
         }
@@ -651,7 +684,7 @@ fn process_instruction<T: FieldOps + 'static, NS: NodesStorage + 'static>(
 
             let r = run_function(
                 ctx, &call_bucket.symbol, &mut fn_vars, print_debug,
-                call_stack, call_bucket.get_line());
+                call_stack);
 
             match call_bucket.return_info {
                 ReturnType::Intermediate{ ..} => { todo!(); }
@@ -662,7 +695,7 @@ fn process_instruction<T: FieldOps + 'static, NS: NodesStorage + 'static>(
                     // assert_eq!(final_data.context.size, r.ln);
                     store_function_return_results(
                         ctx, final_data, &fn_vars, &r, print_debug, call_stack,
-                        cmp, call_bucket.get_line());
+                        cmp);
                 }
             }
         }
@@ -804,9 +837,7 @@ fn process_instruction<T: FieldOps + 'static, NS: NodesStorage + 'static>(
             if !create_component_bucket.has_inputs {
                 for i in sub_cmp_idx..sub_cmp_idx + create_component_bucket.number_of_cmp {
                     let cmp = cmp.subcomponents[i].as_mut().unwrap();
-                    run_template(
-                        ctx, print_debug, call_stack, cmp,
-                        create_component_bucket.get_line())
+                    run_template(ctx, print_debug, call_stack, cmp)
                 }
             }
         }
@@ -860,7 +891,7 @@ where
 fn store_function_return_results_into_subsignal<T, NS>(
     ctx: &mut BuildCircuitContext<T, NS>, final_data: &FinalData,
     src_vars: &[Option<Var<T>>], ret: &FnReturn<T>, print_debug: bool,
-    call_stack: &Vec<String>, cmp: &mut ComponentInstance<T>, line_no: usize)
+    call_stack: &Vec<String>, cmp: &mut ComponentInstance<T>)
 where
     T: FieldOps + 'static,
     NS: NodesStorage + 'static {
@@ -910,13 +941,13 @@ where
     };
 
     store_subcomponent_signals(
-        ctx, &src_node_idxs, print_debug, call_stack, cmp, &dest, line_no);
+        ctx, &src_node_idxs, print_debug, call_stack, cmp, &dest);
 }
 
 fn store_function_return_results<T, NS> (
     ctx: &mut BuildCircuitContext<T, NS>, final_data: &FinalData,
     src_vars: &[Option<Var<T>>], ret: &FnReturn<T>, print_debug: bool,
-    call_stack: &Vec<String>, cmp: &mut ComponentInstance<T>, line_no: usize)
+    call_stack: &Vec<String>, cmp: &mut ComponentInstance<T>)
 where
     T: FieldOps + 'static,
     NS: NodesStorage + 'static {
@@ -930,8 +961,7 @@ where
         }
         AddressType::SubcmpSignal {..} => {
             store_function_return_results_into_subsignal(
-                ctx, final_data, src_vars, ret, print_debug,
-                call_stack, cmp, line_no);
+                ctx, final_data, src_vars, ret, print_debug, call_stack, cmp);
         }
     }
 }
@@ -939,7 +969,7 @@ where
 fn run_function<T: FieldOps + 'static, NS: NodesStorage + 'static>(
     ctx: &mut BuildCircuitContext<T, NS>, fn_name: &str,
     fn_vars: &mut Vec<Option<Var<T>>>, print_debug: bool,
-    call_stack: &[String], line_no: usize) -> FnReturn<T> {
+    call_stack: &[String]) -> FnReturn<T> {
 
     // for i in functions {
     //     println!("Function: {} {}", i.header, i.name);
@@ -957,7 +987,7 @@ fn run_function<T: FieldOps + 'static, NS: NodesStorage + 'static>(
     let mut call_stack = call_stack.to_owned();
     call_stack.push(f.name.clone());
 
-    ctx.push_stack(fn_name.to_string(), line_no);
+    ctx.push_stack(fn_name.to_string());
 
     let mut r: Option<FnReturn<T>> = None;
     for i in &f.body {
@@ -1246,6 +1276,8 @@ where
     T: FieldOps + 'static,
     NS: NodesStorage + 'static {
 
+    ctx.update_line(inst.get_line());
+
     // println!("function instruction: {:?}", inst.to_string());
     match **inst {
         Instruction::Store(ref store_bucket) => {
@@ -1402,7 +1434,7 @@ where
 
             let r = run_function(
                 ctx, &call_bucket.symbol, &mut new_fn_vars, print_debug,
-                call_stack, call_bucket.get_line());
+                call_stack);
 
             match call_bucket.return_info {
                 ReturnType::Intermediate{ ..} => { todo!(); }
@@ -1864,7 +1896,7 @@ fn init_input_signals<T: FieldOps + 'static, NS: NodesStorage + 'static>(
 
 fn run_template<T: FieldOps + 'static, NS: NodesStorage + 'static>(
     ctx: &mut BuildCircuitContext<T, NS>, print_debug: bool, call_stack: &[String],
-    cmp: &mut ComponentInstance<T>, line_no: usize) {
+    cmp: &mut ComponentInstance<T>) {
 
     let tmpl = &ctx.templates[cmp.template_id];
 
@@ -1872,7 +1904,7 @@ fn run_template<T: FieldOps + 'static, NS: NodesStorage + 'static>(
     let mut call_stack = call_stack.to_owned();
     call_stack.push(tmpl_name.clone());
 
-    ctx.push_stack(tmpl_name, line_no);
+    ctx.push_stack(tmpl_name);
     if print_debug {
         println!(
             "Run template {}_{}: body length: {}", tmpl.name, tmpl.id,
@@ -2256,9 +2288,7 @@ fn build_graph<T: FieldOps + 'static>(
     let mut main_component = ctx.new_component(
         main_template_id, main_component_signal_start, 0);
 
-    run_template(
-        &mut ctx, args.print_debug, &[], &mut main_component,
-        0);
+    run_template(&mut ctx, args.print_debug, &[], &mut main_component);
 
     ctx.update_progress_message();
     ctx.progress_bar.finish();
@@ -2307,7 +2337,7 @@ struct SignalDestination<'a> {
 fn store_subcomponent_signals<T, NS>(
     ctx: &mut BuildCircuitContext<T, NS>, src_node_idxs: &[usize],
     print_debug: bool, call_stack: &Vec<String>, cmp: &mut ComponentInstance<T>,
-    dst: &SignalDestination, line_no: usize)
+    dst: &SignalDestination)
 where
     T: FieldOps + 'static,
     NS: NodesStorage + 'static {
@@ -2374,7 +2404,7 @@ where
     };
 
     if run_component {
-        run_template(ctx, print_debug, call_stack, sub_cmp, line_no)
+        run_template(ctx, print_debug, call_stack, sub_cmp)
     }
 }
 
