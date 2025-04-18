@@ -8,7 +8,7 @@ use code_producers::components::{IODef, TemplateInstanceIOMap};
 use prost::Message;
 use ruint::aliases::U256;
 use crate::field::{FieldOps, U254};
-use crate::graph::{Nodes, NodesInterface, Operation, TresOperation, UnoOperation};
+use crate::graph::{Nodes, NodesInterface, NodesStorage, Operation, TresOperation, UnoOperation, VecNodes};
 use crate::InputSignalsInfo;
 use crate::proto::SignalDescription;
 use crate::proto::vm::{IoDef, IoDefs};
@@ -73,9 +73,13 @@ impl From<crate::proto::TresOp> for TresOperation {
     }
 }
 
-pub fn serialize_witnesscalc_graph<W: Write, T: FieldOps + 'static>(
-    mut w: W, nodes: &Nodes<T>, witness_signals: &[usize],
-    input_signals: &InputSignalsInfo) -> std::io::Result<()> {
+pub fn serialize_witnesscalc_graph<W, T, NS>(
+    mut w: W, nodes: &Nodes<T, NS>, witness_signals: &[usize],
+    input_signals: &InputSignalsInfo) -> std::io::Result<()>
+    where
+        W: Write,
+        T: FieldOps + 'static,
+        NS: NodesStorage + 'static {
 
     let mut ptr = 0usize;
     w.write_all(WITNESSCALC_GRAPH_MAGIC).unwrap();
@@ -419,7 +423,9 @@ pub fn deserialize_witnesscalc_graph(
             }
         }
 
-        let mut nodes = Nodes::new(prime, "bn128");
+        let node_storage = VecNodes::new();
+        let mut nodes = Nodes::new(
+            prime, "bn128", node_storage);
         for n in nodes_pb.iter() {
             match &n.node {
                 Some(n) => nodes.push_proto(n),
@@ -565,10 +571,12 @@ mod tests {
         let prime = U254::from_str_radix(
             "21888242871839275222246405745257275088548364400416034343698204186575808495617",
             10).unwrap();
-        let mut nodes = Nodes::new(prime, "bn128");
+        let node_storage = VecNodes::new();
+        let mut nodes = Nodes::new(
+            prime, "bn128", node_storage);
         nodes.push(Node::Input(0));
         let c = (&nodes.ff).parse_str("1").unwrap();
-        nodes.push_constant(c);
+        nodes.const_node_idx_from_value(c);
         nodes.push(Node::UnoOp(UnoOperation::Id, 1));
         nodes.push(Node::Op(Operation::Add, 1, 2));
         nodes.push(Node::TresOp(TresOperation::TernCond, 1, 2, 2));
@@ -621,12 +629,14 @@ mod tests {
     #[test]
     fn test_deserialize_inputs() {
         let prime = <U254 as FieldOps>::from_str("21888242871839275222246405745257275088548364400416034343698204186575808495617").unwrap();
-        let mut nodes = Nodes::new(prime, "bn128");
+        let node_storage = VecNodes::new();
+        let mut nodes = Nodes::new(
+            prime, "bn128", node_storage);
         nodes.push(Node::Input(0));
         let c = (&nodes.ff).parse_str("1").unwrap();
-        nodes.push_constant(c);
+        nodes.const_node_idx_from_value(c);
         let c = (&nodes.ff).parse_str("0").unwrap();
-        nodes.push_constant(c);
+        nodes.const_node_idx_from_value(c);
         nodes.push_noopt(Node::UnoOp(UnoOperation::Id, 0));
         nodes.push_noopt(Node::Op(Operation::Mul, 1, 2));
         nodes.push_noopt(Node::TresOp(TresOperation::TernCond, 1, 2, 3));
@@ -645,7 +655,7 @@ mod tests {
         let (nodes_res, witness_signals_res, input_signals_res) =
             deserialize_witnesscalc_graph(&mut reader).unwrap();
 
-        match nodes_res.as_any().downcast_ref::<Nodes<U254>>() {
+        match nodes_res.as_any().downcast_ref::<Nodes<U254, VecNodes>>() {
             Some(t) => {
                 assert_eq!(&nodes, t);
             },
@@ -656,7 +666,7 @@ mod tests {
 
         let (nodes_res, witness_signals_res, input_signals_res) =
             deserialize_witnesscalc_graph_from_bytes(&tmp).unwrap();
-        match nodes_res.as_any().downcast_ref::<Nodes<U254>>() {
+        match nodes_res.as_any().downcast_ref::<Nodes<U254, VecNodes>>() {
             Some(t) => {
                 assert_eq!(&nodes, t);
             },

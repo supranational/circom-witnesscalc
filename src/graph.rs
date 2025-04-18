@@ -1,10 +1,11 @@
-use std::{collections::HashMap, ops::{BitAnd, Shl, Shr}, thread};
+use std::{collections::HashMap, ops::{BitAnd, Shl, Shr}};
 use std::any::Any;
 use std::collections::hash_map::Entry;
 use std::error::Error;
 use std::fmt::Debug;
+use std::fs::File;
 use std::ops::{BitOr, BitXor, Not};
-use std::sync::{mpsc, Arc};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use crate::field::{Field, FieldOperations, FieldOps, M};
 use rand::{RngCore};
@@ -12,8 +13,11 @@ use ruint::aliases::U256;
 use serde::{Deserialize, Serialize};
 
 use compiler::intermediate_representation::ir_interface::OperatorType;
+use memmap2::MmapMut;
 use rand::prelude::ThreadRng;
 use ruint::uint;
+use tempfile::NamedTempFile;
+use crate::progress_bar;
 
 #[derive(Hash, PartialEq, Eq, Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum Operation {
@@ -142,6 +146,63 @@ impl TryFrom<OperatorType> for Operation {
     }
 }
 
+impl TryFrom<u8> for Operation {
+    type Error = String;
+
+    fn try_from(op: u8) -> Result<Self, Self::Error> {
+        match op {
+            0 => Ok(Operation::Mul),
+            1 => Ok(Operation::Div),
+            2 => Ok(Operation::Add),
+            3 => Ok(Operation::Sub),
+            4 => Ok(Operation::Pow),
+            5 => Ok(Operation::Idiv),
+            6 => Ok(Operation::Mod),
+            7 => Ok(Operation::Eq),
+            8 => Ok(Operation::Neq),
+            9 => Ok(Operation::Lt),
+            10 => Ok(Operation::Gt),
+            11 => Ok(Operation::Leq),
+            12 => Ok(Operation::Geq),
+            13 => Ok(Operation::Land),
+            14 => Ok(Operation::Lor),
+            15 => Ok(Operation::Shl),
+            16 => Ok(Operation::Shr),
+            17 => Ok(Operation::Bor),
+            18 => Ok(Operation::Band),
+            19 => Ok(Operation::Bxor),
+            _ => Err(format!("Invalid operation: {}", op)),
+        }
+    }
+}
+
+impl From<&Operation> for u8 {
+    fn from(val: &Operation) -> Self {
+        match val {
+            Operation::Mul => 0,
+            Operation::Div => 1,
+            Operation::Add => 2,
+            Operation::Sub => 3,
+            Operation::Pow => 4,
+            Operation::Idiv => 5,
+            Operation::Mod => 6,
+            Operation::Eq => 7,
+            Operation::Neq => 8,
+            Operation::Lt => 9,
+            Operation::Gt => 10,
+            Operation::Leq => 11,
+            Operation::Geq => 12,
+            Operation::Land => 13,
+            Operation::Lor => 14,
+            Operation::Shl => 15,
+            Operation::Shr => 16,
+            Operation::Bor => 17,
+            Operation::Band => 18,
+            Operation::Bxor => 19,
+        }
+    }
+}
+
 #[derive(Hash, PartialEq, Eq, Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum UnoOperation {
     Neg,
@@ -217,6 +278,30 @@ impl TryFrom<OperatorType> for UnoOperation {
     }
 }
 
+impl TryFrom<u8> for UnoOperation {
+    type Error = String;
+    fn try_from(op: u8) -> Result<Self, Self::Error> {
+        match op {
+            0 => Ok(UnoOperation::Neg),
+            1 => Ok(UnoOperation::Id),
+            2 => Ok(UnoOperation::Lnot),
+            3 => Ok(UnoOperation::Bnot),
+            _ => Err(format!("Invalid unary operation: {}", op)),
+        }
+    }
+}
+
+impl From<&UnoOperation> for u8 {
+    fn from(val: &UnoOperation) -> Self {
+        match val {
+            UnoOperation::Neg => 0,
+            UnoOperation::Id => 1,
+            UnoOperation::Lnot => 2,
+            UnoOperation::Bnot => 3,
+        }
+    }
+}
+
 
 #[derive(Hash, PartialEq, Eq, Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum TresOperation {
@@ -239,6 +324,24 @@ impl From<&TresOperation> for crate::proto::TresOp {
     }
 }
 
+impl TryFrom<u8> for TresOperation {
+    type Error = String;
+    fn try_from(op: u8) -> Result<Self, Self::Error> {
+        match op {
+            0 => Ok(TresOperation::TernCond),
+            _ => Err(format!("Invalid ternary operation: {}", op)),
+        }
+    }
+}
+
+impl From<&TresOperation> for u8 {
+    fn from(val: &TresOperation) -> Self {
+        match val {
+            TresOperation::TernCond => 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Node {
     #[default]
@@ -250,6 +353,78 @@ pub enum Node {
     TresOp(TresOperation, usize, usize, usize),
 }
 
+impl Node {
+    const SIZE: usize = 3 * size_of::<usize>() + 2;
+
+    fn from_bytes(buf: &[u8]) -> Node {
+        match buf[0] {
+            0 => Node::Unknown,
+            1 => {
+                let i = usize::from_le_bytes(buf[1..1+size_of::<usize>()].try_into().unwrap());
+                Node::Input(i)
+            }
+            2 => {
+                let i = usize::from_le_bytes(buf[1..1+size_of::<usize>()].try_into().unwrap());
+                Node::Constant(i)
+            }
+            3 => {
+                let op = UnoOperation::try_from(buf[1]).unwrap();
+                let a = usize::from_le_bytes(buf[2..2+size_of::<usize>()].try_into().unwrap());
+                Node::UnoOp(op, a)
+            }
+            4 => {
+                let op = Operation::try_from(buf[1]).unwrap();
+                let a = usize::from_le_bytes(buf[2..2+size_of::<usize>()].try_into().unwrap());
+                let b = usize::from_le_bytes(buf[2+size_of::<usize>()..2+2*size_of::<usize>()].try_into().unwrap());
+                Node::Op(op, a, b)
+            }
+            5 => {
+                let op = TresOperation::try_from(buf[1]).unwrap();
+                let a = usize::from_le_bytes(buf[2..2+size_of::<usize>()].try_into().unwrap());
+                let b = usize::from_le_bytes(buf[2+size_of::<usize>()..2+2*size_of::<usize>()].try_into().unwrap());
+                let c = usize::from_le_bytes(buf[2+2*size_of::<usize>()..2+3*size_of::<usize>()].try_into().unwrap());
+                Node::TresOp(op, a, b, c)
+            }
+            _ => panic!("Invalid node type"),
+        }
+    }
+
+    fn write_bytes(&self, to: &mut [u8]) {
+        match self {
+            Node::Unknown => {
+                to[0] = 0;
+            }
+            Node::Input(i) => {
+                to[0] = 1;
+                to[1..1+size_of::<usize>()].copy_from_slice(&i.to_le_bytes());
+            }
+            Node::Constant(i) => {
+                to[0] = 2;
+                to[1..1+size_of::<usize>()].copy_from_slice(&i.to_le_bytes());
+            }
+            Node::UnoOp(op, a) => {
+                to[0] = 3;
+                to[1] = Into::<u8>::into(op);
+                to[2..2+size_of::<usize>()].copy_from_slice(&a.to_le_bytes());
+            }
+            Node::Op(op, a, b) => {
+                to[0] = 4;
+                to[1] = Into::<u8>::into(op);
+                to[2..2+size_of::<usize>()].copy_from_slice(&a.to_le_bytes());
+                to[2+size_of::<usize>()..2+2*size_of::<usize>()].copy_from_slice(&b.to_le_bytes());
+            }
+            Node::TresOp(op, a, b, c) => {
+                to[0] = 5;
+                to[1] = Into::<u8>::into(op);
+                to[2..2+size_of::<usize>()].copy_from_slice(&a.to_le_bytes());
+                to[2+size_of::<usize>()..2+2*size_of::<usize>()].copy_from_slice(&b.to_le_bytes());
+                to[2+2*size_of::<usize>()..2+3*size_of::<usize>()].copy_from_slice(&c.to_le_bytes());
+            }
+        }
+    }
+
+}
+
 pub trait NodesInterface: Any {
     fn push_noopt(&mut self, n: Node) -> NodeIdx;
     fn push(&mut self, n: Node) -> NodeIdx;
@@ -257,22 +432,214 @@ pub trait NodesInterface: Any {
     fn as_any(&self) -> &dyn Any;
 }
 
-pub struct Nodes<T: FieldOps> {
+pub trait NodesStorage {
+    fn len(&self) -> usize;
+    fn get(&self, idx: usize) -> Option<Node>;
+    fn set(&mut self, idx: usize, n: Node);
+    fn push(&mut self, n: Node);
+    fn is_empty(&self) -> bool;
+    fn retain<F>(&mut self, f: F)
+    where
+        F: FnMut() -> bool;
+}
+
+enum TempFile {
+    Named(NamedTempFile),
+    Unnamed(File),
+}
+
+impl TempFile {
+    fn as_file(&self) -> &File {
+        match self {
+            TempFile::Named(file) => file.as_file(),
+            TempFile::Unnamed(file) => file,
+        }
+    }
+}
+
+pub struct MMapNodes {
+    tmp_dir_path: PathBuf,
+    file: TempFile,
+    mm: MmapMut,
+    cap: usize,
+    ln: usize,
+}
+
+impl MMapNodes {
+    const init_size: usize = 1_000_000;
+
+    pub fn new(named: bool, temp_dir: &Path) -> Self {
+        Self::with_capacity(Self::init_size, named, temp_dir)
+    }
+
+    fn with_capacity(cap: usize, named: bool, temp_dir: &Path) -> Self {
+        let cap = cap * Node::SIZE;
+        let file = Self::create_file(temp_dir, named, cap);
+        let mm = unsafe { MmapMut::map_mut(file.as_file()).unwrap() };
+        MMapNodes {
+            tmp_dir_path: temp_dir.to_path_buf(),
+            file,
+            mm,
+            cap,
+            ln: 0,
+        }
+    }
+
+    fn grow(&mut self) {
+        let mut inc = self.cap / 3;
+        if inc < 1000 * Node::SIZE {
+            inc = 1000 * Node::SIZE;
+        }
+        self.cap += inc;
+        let new_size: u64 = self.cap.try_into().unwrap();
+        self.file.as_file().set_len(new_size).unwrap();
+        self.mm = unsafe { MmapMut::map_mut(self.file.as_file()).unwrap() };
+    }
+
+    fn create_file(in_dir: &Path, named: bool, size: usize) -> TempFile {
+        if named {
+            let file = NamedTempFile::new_in(in_dir).unwrap();
+            println!(
+                "Created node storage file: {}", file.path().to_str().unwrap());
+            file.as_file().set_len(size.try_into().unwrap()).unwrap();
+            TempFile::Named(file)
+        } else {
+            let file = tempfile::tempfile_in(in_dir).unwrap();
+            file.set_len(size.try_into().unwrap()).unwrap();
+            TempFile::Unnamed(file)
+        }
+    }
+}
+
+impl NodesStorage for MMapNodes {
+    fn len(&self) -> usize {
+        self.ln / Node::SIZE
+    }
+
+    fn get(&self, idx: usize) -> Option<Node> {
+        if idx * Node::SIZE >= self.ln {
+            return None;
+        }
+        let buf = &self.mm[idx * Node::SIZE..(idx + 1) * Node::SIZE];
+        Some(Node::from_bytes(buf))
+    }
+
+    fn set(&mut self, idx: usize, n: Node) {
+        if idx * Node::SIZE >= self.ln {
+            panic!("Index out of bounds");
+        }
+        n.write_bytes(self.mm[idx * Node::SIZE..(idx + 1) * Node::SIZE].as_mut());
+    }
+
+    fn push(&mut self, n: Node) {
+        if self.ln + Node::SIZE > self.cap {
+            self.grow();
+        }
+        n.write_bytes(self.mm[self.ln..self.ln + Node::SIZE].as_mut());
+        self.ln += Node::SIZE;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.ln == 0
+    }
+
+    fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut() -> bool,
+    {
+        let named = match self.file {
+            TempFile::Named(_) => true,
+            TempFile::Unnamed(_) => false
+        };
+        let cap = self.ln;
+        let file = Self::create_file(
+            self.tmp_dir_path.as_path(), named, self.cap);
+        let mut mm = unsafe { MmapMut::map_mut(file.as_file()).unwrap() };
+
+        let mut dst: usize = 0;
+        for i in 0..self.len() {
+            if f() {
+                mm[dst * Node::SIZE..(dst+1)*Node::SIZE]
+                    .copy_from_slice(
+                        self.mm[i * Node::SIZE..(i+1) * Node::SIZE]
+                            .as_ref());
+                dst += 1;
+            }
+        }
+
+        self.mm = mm;
+        self.file = file;
+        self.cap = cap;
+        self.ln = dst * Node::SIZE;
+    }
+}
+
+pub struct VecNodes {
+    nodes: Vec<Node>,
+}
+
+impl VecNodes {
+    pub fn new() -> Self {
+        VecNodes {
+            nodes: Vec::new(),
+        }
+    }
+}
+
+impl Default for VecNodes {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NodesStorage for VecNodes {
+    fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    fn get(&self, idx: usize) -> Option<Node> {
+        self.nodes.get(idx).copied()
+    }
+
+    fn set(&mut self, index: usize, n: Node) {
+        self.nodes[index] = n;
+    }
+
+    fn push(&mut self, n: Node) {
+        self.nodes.push(n);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
+    fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut() -> bool,
+    {
+        self.nodes.retain(|_| f());
+    }
+}
+
+pub struct Nodes<T: FieldOps, NS: NodesStorage> {
     prime_str: String,
     // TODO maybe remove pub
     pub ff: Field<T>,
     // TODO remove pub
-    pub nodes: Vec<Node>,
+    pub nodes: NS,
     pub constants: Vec<T>,
+    // Mapping from a const value to a node index
     constants_idx: HashMap<T, usize>,
 }
 
-impl<T: FieldOps + 'static> Nodes<T> {
-    pub fn new(prime: T, prime_str: &str) -> Self {
+impl<T: FieldOps + 'static, NS: NodesStorage + 'static> Nodes<T, NS> {
+    pub fn new(prime: T, prime_str: &str, nodes_storage: NS) -> Self {
+
         let ff = Field::new(prime);
         Nodes {
             ff,
-            nodes: Vec::new(),
+            // nodes: NodesStorage::new(named_temp, temp_path),
+            nodes: nodes_storage,
             constants: Vec::new(),
             constants_idx: HashMap::new(),
             prime_str: prime_str.to_string(),
@@ -283,36 +650,46 @@ impl<T: FieldOps + 'static> Nodes<T> {
         let me = self.nodes.get(idx.0).ok_or(NodeConstErr::EmptyNode(idx))?;
         match me {
             Node::Unknown => panic!("Unknown node"),
-            Node::Constant(const_idx) => Ok(self.constants[*const_idx]),
+            Node::Constant(const_idx) => Ok(self.constants[const_idx]),
             Node::UnoOp(op, a) => {
-                Ok((&self.ff).op_uno(*op,
-                    self.to_const_recursive(NodeIdx(*a))?))
+                Ok((&self.ff).op_uno(op,
+                    self.to_const_recursive(NodeIdx(a))?))
             }
             Node::Op(op, a, b) => {
-                Ok((&self.ff).op_duo(*op,
-                    self.to_const_recursive(NodeIdx(*a))?,
-                    self.to_const_recursive(NodeIdx(*b))?))
+                Ok((&self.ff).op_duo(op,
+                    self.to_const_recursive(NodeIdx(a))?,
+                    self.to_const_recursive(NodeIdx(b))?))
             }
             Node::TresOp(op, a, b, c) => {
-                Ok((&self.ff).op_tres(*op,
-                    self.to_const_recursive(NodeIdx(*a))?,
-                    self.to_const_recursive(NodeIdx(*b))?,
-                    self.to_const_recursive(NodeIdx(*c))?))
+                Ok((&self.ff).op_tres(op,
+                    self.to_const_recursive(NodeIdx(a))?,
+                    self.to_const_recursive(NodeIdx(b))?,
+                    self.to_const_recursive(NodeIdx(c))?))
             }
             Node::Input(_) => Err(NodeConstErr::InputSignal),
         }
     }
 
-    fn const_node_from_value(&mut self, v: T) -> Node {
+    pub fn const_node_idx_from_value(&mut self, v: T) -> usize {
         match self.constants_idx.entry(v) {
             Entry::Occupied(e) => {
-                Node::Constant(*e.get())
+                *e.get()
             }
             Entry::Vacant(e) => {
                 self.constants.push(v);
-                let idx = self.constants.len() - 1;
-                e.insert(idx);
-                Node::Constant(idx)
+                self.nodes.push(Node::Constant(self.constants.len()-1));
+                e.insert(self.nodes.len()-1);
+                self.nodes.len()-1
+            }
+        }
+    }
+
+    fn rebuild_constants_index(&mut self) {
+        self.constants_idx.clear();
+        for i in 0..self.nodes.len() {
+            let node = self.nodes.get(i).unwrap();
+            if let Node::Constant(c_idx) = node {
+                self.constants_idx.insert(self.constants[c_idx], i);
             }
         }
     }
@@ -324,39 +701,43 @@ impl<T: FieldOps + 'static> Nodes<T> {
             Node::Unknown => panic!("Unknown node"),
             Node::Constant(c_idx) => Ok(Node::Constant(*c_idx)),
             Node::UnoOp(op, a) => {
-                if let Node::Constant(a_idx) = self.nodes[*a] {
+                if let Some(Node::Constant(a_idx)) = self.nodes.get(*a) {
                     let v = (&self.ff).op_uno(*op, self.constants[a_idx]);
-                    Ok(self.const_node_from_value(v))
+                    let idx = self.const_node_idx_from_value(v);
+                    Ok(self.nodes.get(idx).unwrap())
                 } else {
                     Err(NodeConstErr::NotConst)
                 }
             }
             Node::Op(op, a, b) => {
                 if let (
-                    Node::Constant(a_idx),
-                    Node::Constant(b_idx)) = (
-                    self.nodes[*a],
-                    self.nodes[*b]) {
+                    Some(Node::Constant(a_idx)),
+                    Some(Node::Constant(b_idx))) = (
+                    self.nodes.get(*a),
+                    self.nodes.get(*b)) {
 
                     let v = (&self.ff).op_duo(*op, self.constants[a_idx], self.constants[b_idx]);
-                    Ok(self.const_node_from_value(v))
+                    let idx = self.const_node_idx_from_value(v);
+                    Ok(self.nodes.get(idx).unwrap())
                 } else {
                     Err(NodeConstErr::NotConst)
                 }
             }
             Node::TresOp(op, a, b, c) => {
                 if let (
-                    Node::Constant(a_idx),
-                    Node::Constant(b_idx),
-                    Node::Constant(c_idx)) = (
-                    self.nodes[*a],
-                    self.nodes[*b],
-                    self.nodes[*c]) {
+                    Some(Node::Constant(a_idx)),
+                    Some(Node::Constant(b_idx)),
+                    Some(Node::Constant(c_idx))) = (
+                    self.nodes.get(*a),
+                    self.nodes.get(*b),
+                    self.nodes.get(*c)) {
 
                     let v = (&self.ff).op_tres(
                         *op, self.constants[a_idx], self.constants[b_idx],
                         self.constants[c_idx]);
-                    Ok(self.const_node_from_value(v))
+                    let const_node_idx =
+                        self.const_node_idx_from_value(v);
+                    Ok(self.nodes.get(const_node_idx).unwrap())
                 } else {
                     Err(NodeConstErr::NotConst)
                 }
@@ -365,13 +746,7 @@ impl<T: FieldOps + 'static> Nodes<T> {
         }
     }
 
-    pub fn push_constant(&mut self, v: T) -> NodeIdx {
-        let n = self.const_node_from_value(v);
-        self.nodes.push(n);
-        NodeIdx(self.nodes.len() - 1)
-    }
-
-    pub fn get(&self, idx: NodeIdx) -> Option<&Node> {
+    pub fn get(&self, idx: NodeIdx) -> Option<Node> {
         self.nodes.get(idx.0)
     }
 
@@ -383,11 +758,14 @@ impl<T: FieldOps + 'static> Nodes<T> {
             .ok_or(NodeConstErr::EmptyNode(NodeIdx(idx)))?;
         match n {
             Node::Unknown => panic!("unknown node"),
-            Node::Input(i) => Ok(
-                crate::proto::node::Node::Input (
-                    crate::proto::InputNode { idx: *i as u32 })),
+            Node::Input(i) => {
+                let idx: u32 = i.try_into().unwrap();
+                Ok(
+                    crate::proto::node::Node::Input (
+                        crate::proto::InputNode { idx }))
+            },
             Node::Constant(idx) => {
-                let c = self.constants[*idx];
+                let c = self.constants[idx];
                 let i = crate::proto::BigUInt { value_le: c.to_le_bytes() };
                 Ok(crate::proto::node::Node::Constant(
                     crate::proto::ConstantNode { value: Some(i) }))
@@ -395,22 +773,22 @@ impl<T: FieldOps + 'static> Nodes<T> {
             Node::UnoOp(op, a) => Ok(
                 crate::proto::node::Node::UnoOp(
                     crate::proto::UnoOpNode {
-                        op: crate::proto::UnoOp::from(op) as i32,
-                        a_idx: *a as u32 })
+                        op: crate::proto::UnoOp::from(&op) as i32,
+                        a_idx: a as u32 })
             ),
             Node::Op(op, a, b) => Ok(
                 crate::proto::node::Node::DuoOp(
                     crate::proto::DuoOpNode {
-                        op: crate::proto::DuoOp::from(op) as i32,
-                        a_idx: *a as u32,
-                        b_idx: *b as u32 })),
+                        op: crate::proto::DuoOp::from(&op) as i32,
+                        a_idx: a as u32,
+                        b_idx: b as u32 })),
             Node::TresOp(op, a, b, c) => Ok(
                 crate::proto::node::Node::TresOp(
                     crate::proto::TresOpNode {
-                        op: crate::proto::TresOp::from(op) as i32,
-                        a_idx: *a as u32,
-                        b_idx: *b as u32,
-                        c_idx: *c as u32 })),
+                        op: crate::proto::TresOp::from(&op) as i32,
+                        a_idx: a as u32,
+                        b_idx: b as u32,
+                        c_idx: c as u32 })),
         }
     }
 
@@ -424,7 +802,7 @@ impl<T: FieldOps + 'static> Nodes<T> {
                 let c = (&self.ff)
                     .parse_le_bytes(&n2.value.as_ref().unwrap().value_le)
                     .unwrap();
-                self.push_constant(c);
+                self.const_node_idx_from_value(c);
             },
             crate::proto::node::Node::UnoOp(n2) => {
                 let op = crate::proto::UnoOp::try_from(n2.op).unwrap();
@@ -462,7 +840,7 @@ impl<T: FieldOps + 'static> Nodes<T> {
     }
 }
 
-impl<T: FieldOps + 'static> NodesInterface for Nodes<T> {
+impl<T: FieldOps + 'static, NS: NodesStorage + 'static> NodesInterface for Nodes<T, NS> {
     // push without optimization
     fn push_noopt(&mut self, n: Node) -> NodeIdx {
         self.nodes.push(n);
@@ -477,12 +855,13 @@ impl<T: FieldOps + 'static> NodesInterface for Nodes<T> {
     fn get_inputs_size(&self) -> usize {
         let mut start = false;
         let mut max_index = 0usize;
-        for &node in self.nodes.iter() {
+        for i in 0..self.nodes.len() {
+            let node = self.nodes.get(i).unwrap();
             if let Node::Input(i) = node {
                 if i > max_index {
                     max_index = i;
                 }
-                start = true
+                start = true;
             } else if start {
                 break;
             }
@@ -496,36 +875,44 @@ impl<T: FieldOps + 'static> NodesInterface for Nodes<T> {
 }
 
 #[cfg(test)]
-impl<T: FieldOps> PartialEq for Nodes<T> {
+impl<T: FieldOps, NS: NodesStorage> PartialEq for Nodes<T, NS> {
     fn eq(&self, other: &Self) -> bool {
         if self.nodes.len() != other.nodes.len() {
             return false;
         }
-        self.nodes.iter().zip(other.nodes.iter()).all(|(a, b)| {
-            match (a, b) {
+        for i in 0..self.nodes.len() {
+            let a = self.nodes.get(i).unwrap();
+            let b = other.nodes.get(i).unwrap();
+            let eq = match (a, b) {
                 (Node::Unknown, Node::Unknown) => true,
                 (Node::Input(a), Node::Input(b)) => a == b,
-                (Node::Constant(a), Node::Constant(b)) => self.constants[*a] == self.constants[*b],
+                (Node::Constant(a), Node::Constant(b)) => self.constants[a] == self.constants[b],
                 (Node::UnoOp(a, b), Node::UnoOp(c, d)) => a == c && b == d,
                 (Node::Op(a, b, c), Node::Op(d, e, f)) => a == d && b == e && c == f,
                 (Node::TresOp(a, b, c, d), Node::TresOp(e, f, g, h)) => a == e && b == f && c == g && d == h,
                 _ => false,
+            };
+            if !eq {
+                return false;
             }
-        })
+        }
+
+        true
     }
 }
 
 #[cfg(test)]
-impl<T: FieldOps> Debug for Nodes<T> {
+impl<T: FieldOps, NS: NodesStorage> Debug for Nodes<T, NS> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Nodes {{")?;
-        for (i, n) in self.nodes.iter().enumerate() {
-            if let Node::Constant(c_idx) = *n {
+        for i in 0..self.nodes.len() {
+            let n = self.nodes.get(i).unwrap();
+            if let Node::Constant(c_idx) = n {
                 let bs = self.constants[c_idx].to_le_bytes();
                 let n = U256::from_le_slice(&bs);
-                writeln!(f, "    {}, Constant({})", i, n)?;
+                writeln!(f, "    {}: Constant({})", i, n)?;
             } else {
-                writeln!(f, "    {}, {:?}", i, n)?;
+                writeln!(f, "    {}: {:?}", i, n)?;
             }
         }
         writeln!(f, "}}")?;
@@ -580,8 +967,9 @@ fn compute_shr_uint(a: U256, b: U256) -> U256 {
 }
 
 /// All references must be backwards.
-fn assert_valid(nodes: &[Node]) {
-    for (i, &node) in nodes.iter().enumerate() {
+fn assert_valid<NS: NodesStorage>(nodes: &NS) {
+    for i in 0..nodes.len() {
+        let node = nodes.get(i).unwrap();
         if let Node::Op(_, a, b) = node {
             assert!(a < i);
             assert!(b < i);
@@ -595,16 +983,18 @@ fn assert_valid(nodes: &[Node]) {
     }
 }
 
-pub fn optimize<T: FieldOps + 'static>(nodes: &mut Nodes<T>, outputs: &mut [usize]) {
-    tree_shake(&mut nodes.nodes, outputs);
+pub fn optimize<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    nodes: &mut Nodes<T, NS>, outputs: &mut [usize]) {
+
+    tree_shake(nodes, outputs);
     propagate(nodes);
     value_numbering(nodes, outputs);
-    constants(nodes);
-    tree_shake(&mut nodes.nodes, outputs);
+    find_constants(nodes);
+    tree_shake(nodes, outputs);
 }
 
-pub fn evaluate<T: FieldOps, F: FieldOperations<Type = T>>(
-    ff: F, nodes: &[Node], inputs: &[T], outputs: &[usize],
+pub fn evaluate<T: FieldOps, F: FieldOperations<Type = T>, NS: NodesStorage>(
+    ff: F, nodes: &NS, inputs: &[T], outputs: &[usize],
     constants: &[T]) -> Vec<T>
 where Vec<T>: FromIterator<<F as FieldOperations>::Type>
 {
@@ -613,7 +1003,8 @@ where Vec<T>: FromIterator<<F as FieldOperations>::Type>
     let start = Instant::now();
     // Evaluate the graph.
     let mut values = Vec::with_capacity(nodes.len());
-    for &node in nodes.iter() {
+    for i in 0..nodes.len() {
+        let node = nodes.get(i).unwrap();
         let value = match node {
             Node::Unknown => panic!("Unknown node"),
             Node::Constant(i) => constants[i],
@@ -640,88 +1031,94 @@ where Vec<T>: FromIterator<<F as FieldOperations>::Type>
     r
 }
 
-pub fn evaluate_parallel(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<U256> {
-    let start = Instant::now();
-    let inputs: Arc<[U256]> = Arc::from(inputs);
-    println!("total nodes: {}", nodes.len());
-    let mut nodes_splitted = 0;
-    let sz = outputs.len() / 4;
-
-    let mut outputs2 = Vec::new();
-    let mut subgraphs = Vec::new();
-
-    for (i, chunk) in outputs.chunks(sz).enumerate() {
-        let mut nodes = Vec::from(nodes);
-        let mut chunk = Vec::from(chunk);
-        tree_shake(&mut nodes, &mut chunk);
-        nodes_splitted += nodes.len();
-        println!("chunk #{}: {} nodes", i, nodes.len());
-
-        outputs2.push(chunk);
-        subgraphs.push(nodes);
-    }
-    println!("total nodes splitted: {}", nodes_splitted);
-    println!("graph splitted in {:?}", start.elapsed());
-    // assert_valid(nodes);
-
-    let start = Instant::now();
-
-    let mut handles = Vec::new();
-    let threads_num = subgraphs.len();
-    let (tx, rx) = mpsc::channel();
-    for (i, (nodes, outputs)) in subgraphs.into_iter().zip(outputs2).enumerate() {
-        let inputs = Arc::clone(&inputs);
-        let tx = tx.clone();
-        let handle = thread::spawn(move || {
-            let mut values = Vec::with_capacity(nodes.len());
-            for &node in nodes.iter() {
-                let value = match node {
-                    Node::Unknown => panic!("Unknown node"),
-                    Node::Constant(_) => todo!(),
-                    Node::Input(i) => inputs[i],
-                    Node::Op(op, a, b) => op.eval(values[a], values[b]),
-                    Node::UnoOp(op, a) => op.eval(values[a]),
-                    Node::TresOp(op, a, b, c) => op.eval(values[a], values[b], values[c]),
-                };
-                values.push(value);
-            }
-
-            let witness_signals: Vec<U256> = outputs.iter().map(|&i| values[i]).collect();
-            tx.send((i, witness_signals)).unwrap();
-        });
-        handles.push(handle);
-    }
-
-    let mut final_results = vec![Vec::new(); threads_num];
-
-    for handle in handles {
-        handle.join().unwrap();
-    }
-
-    for _ in 0..threads_num {
-        if let Ok((i, signals)) = rx.recv() {
-            final_results[i] = signals;
-        }
-    }
-
-    let r = final_results.into_iter().flatten().collect();
-    println!("graph calculated in parallel in {:?}", start.elapsed());
-
-    r
-}
+// pub fn evaluate_parallel(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<U256> {
+//     let start = Instant::now();
+//     let inputs: Arc<[U256]> = Arc::from(inputs);
+//     println!("total nodes: {}", nodes.len());
+//     let mut nodes_splitted = 0;
+//     let sz = outputs.len() / 4;
+//
+//     let mut outputs2 = Vec::new();
+//     let mut subgraphs = Vec::new();
+//
+//     for (i, chunk) in outputs.chunks(sz).enumerate() {
+//         let mut nodes = Vec::from(nodes);
+//         let mut chunk = Vec::from(chunk);
+//         tree_shake(&mut nodes, &mut chunk);
+//         nodes_splitted += nodes.len();
+//         println!("chunk #{}: {} nodes", i, nodes.len());
+//
+//         outputs2.push(chunk);
+//         subgraphs.push(nodes);
+//     }
+//     println!("total nodes splitted: {}", nodes_splitted);
+//     println!("graph splitted in {:?}", start.elapsed());
+//     // assert_valid(nodes);
+//
+//     let start = Instant::now();
+//
+//     let mut handles = Vec::new();
+//     let threads_num = subgraphs.len();
+//     let (tx, rx) = mpsc::channel();
+//     for (i, (nodes, outputs)) in subgraphs.into_iter().zip(outputs2).enumerate() {
+//         let inputs = Arc::clone(&inputs);
+//         let tx = tx.clone();
+//         let handle = thread::spawn(move || {
+//             let mut values = Vec::with_capacity(nodes.len());
+//             for &node in nodes.iter() {
+//                 let value = match node {
+//                     Node::Unknown => panic!("Unknown node"),
+//                     Node::Constant(_) => todo!(),
+//                     Node::Input(i) => inputs[i],
+//                     Node::Op(op, a, b) => op.eval(values[a], values[b]),
+//                     Node::UnoOp(op, a) => op.eval(values[a]),
+//                     Node::TresOp(op, a, b, c) => op.eval(values[a], values[b], values[c]),
+//                 };
+//                 values.push(value);
+//             }
+//
+//             let witness_signals: Vec<U256> = outputs.iter().map(|&i| values[i]).collect();
+//             tx.send((i, witness_signals)).unwrap();
+//         });
+//         handles.push(handle);
+//     }
+//
+//     let mut final_results = vec![Vec::new(); threads_num];
+//
+//     for handle in handles {
+//         handle.join().unwrap();
+//     }
+//
+//     for _ in 0..threads_num {
+//         if let Ok((i, signals)) = rx.recv() {
+//             final_results[i] = signals;
+//         }
+//     }
+//
+//     let r = final_results.into_iter().flatten().collect();
+//     println!("graph calculated in parallel in {:?}", start.elapsed());
+//
+//     r
+// }
 
 /// Constant propagation
-pub fn propagate<T: FieldOps + 'static>(nodes: &mut Nodes<T>) {
+pub fn propagate<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    nodes: &mut Nodes<T, NS>) {
+
     assert_valid(&nodes.nodes);
     let mut constants = 0_usize;
     for i in 0..nodes.len() {
-        if let Node::Op(op, a, b) = nodes.nodes[i] {
+        let node = nodes.nodes.get(i).unwrap();
+        if let Node::Op(op, a, b) = node {
             if let (
-                Node::Constant(va),
-                Node::Constant(vb)) = (nodes.nodes[a], nodes.nodes[b]) {
+                Some(Node::Constant(va)),
+                Some(Node::Constant(vb))) = (
+                nodes.nodes.get(a), nodes.nodes.get(b)) {
                 let v = (&nodes.ff).op_duo(
                     op, nodes.constants[va], nodes.constants[vb]);
-                nodes.nodes[i] = nodes.const_node_from_value(v);
+                let node_idx = nodes.const_node_idx_from_value(v);
+                let n = nodes.nodes.get(node_idx).unwrap();
+                nodes.nodes.set(i, n);
                 constants += 1;
             } else if a == b {
                 // Not constant but equal
@@ -732,26 +1129,32 @@ pub fn propagate<T: FieldOps + 'static>(nodes: &mut Nodes<T>) {
                     _ => None,
                 } {
                     let v = T::from_bool(c);
-                    nodes.nodes[i] = nodes.const_node_from_value(v);
+                    let node_idx = nodes.const_node_idx_from_value(v);
+                    let n = nodes.nodes.get(node_idx).unwrap();
+                    nodes.nodes.set(i, n);
                     constants += 1;
                 }
             }
-        } else if let Node::UnoOp(op, a) = nodes.nodes[i] {
-            if let Node::Constant(va) = nodes.nodes[a] {
+        } else if let Node::UnoOp(op, a) = node {
+            if let Some(Node::Constant(va)) = nodes.nodes.get(a) {
                 let v = (&nodes.ff).op_uno(op, nodes.constants[va]);
-                nodes.nodes[i] = nodes.const_node_from_value(v);
+                let node_idx = nodes.const_node_idx_from_value(v);
+                let n = nodes.nodes.get(node_idx).unwrap();
+                nodes.nodes.set(i, n);
                 constants += 1;
             }
-        } else if let Node::TresOp(op, a, b, c) = nodes.nodes[i] {
+        } else if let Node::TresOp(op, a, b, c) = node {
             if let (
-                Node::Constant(va), Node::Constant(vb),
-                Node::Constant(vc)) = (
-                nodes.nodes[a], nodes.nodes[b], nodes.nodes[c]) {
+                Some(Node::Constant(va)), Some(Node::Constant(vb)),
+                Some(Node::Constant(vc))) = (
+                nodes.nodes.get(a), nodes.nodes.get(b), nodes.nodes.get(c)) {
 
                 let v = (&nodes.ff).op_tres(
                     op, nodes.constants[va], nodes.constants[vb],
                     nodes.constants[vc]);
-                nodes.nodes[i] = nodes.const_node_from_value(v);
+                let node_idx = nodes.const_node_idx_from_value(v);
+                let n = nodes.nodes.get(node_idx).unwrap();
+                nodes.nodes.set(i, n);
                 constants += 1;
             }
         }
@@ -761,39 +1164,57 @@ pub fn propagate<T: FieldOps + 'static>(nodes: &mut Nodes<T>) {
 }
 
 /// Remove unused nodes
-pub fn tree_shake(nodes: &mut Vec<Node>, outputs: &mut [usize]) {
-    assert_valid(nodes);
+pub fn tree_shake<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    nodes: &mut Nodes<T, NS>, outputs: &mut [usize]) {
+
+    assert_valid(&nodes.nodes);
+
+    println!("[tree shake start]");
+    println!("  look for unused nodes");
+    let pb_len = outputs.len() + nodes.nodes.len();
+    let pb = progress_bar(pb_len);
 
     // Mark all nodes that are used.
-    let mut used = vec![false; nodes.len()];
+    let mut used = vec![false; nodes.nodes.len()];
     for &i in outputs.iter() {
         used[i] = true;
+        pb.inc(1);
     }
 
     // Work backwards from end as all references are backwards.
-    for i in (0..nodes.len()).rev() {
+    for i in (0..nodes.nodes.len()).rev() {
         if used[i] {
-            if let Node::Op(_, a, b) = nodes[i] {
+            let node = nodes.nodes.get(i).unwrap();
+            if let Node::Op(_, a, b) = node {
                 used[a] = true;
                 used[b] = true;
             }
-            if let Node::UnoOp(_, a) = nodes[i] {
+            if let Node::UnoOp(_, a) = node {
                 used[a] = true;
             }
-            if let Node::TresOp(_, a, b, c) = nodes[i] {
+            if let Node::TresOp(_, a, b, c) = node {
                 used[a] = true;
                 used[b] = true;
                 used[c] = true;
             }
         }
+        pb.inc(1);
     }
 
-    // Remove unused nodes
-    let n = nodes.len();
-    let mut retain = used.iter();
-    nodes.retain(|_| *retain.next().unwrap());
-    let removed = n - nodes.len();
+    pb.finish();
 
+    // Remove unused nodes
+    let n = nodes.nodes.len();
+    let mut retain = used.iter();
+    nodes.nodes.retain(|| *retain.next().unwrap());
+
+    let removed = n - nodes.nodes.len();
+
+    if removed > 0 {
+        nodes.rebuild_constants_index();
+    }
+
+    println!("  renumber nodes");
     // Renumber references.
     let mut renumber = vec![None; n];
     let mut index = 0;
@@ -803,31 +1224,44 @@ pub fn tree_shake(nodes: &mut Vec<Node>, outputs: &mut [usize]) {
             index += 1;
         }
     }
-    assert_eq!(index, nodes.len());
+    assert_eq!(index, nodes.nodes.len());
     for (&used, renumber) in used.iter().zip(renumber.iter()) {
         assert_eq!(used, renumber.is_some());
     }
 
-    // Renumber references.
-    for node in nodes.iter_mut() {
-        if let Node::Op(_, a, b) = node {
-            *a = renumber[*a].unwrap();
-            *b = renumber[*b].unwrap();
+    let pb_len = outputs.len() + nodes.nodes.len();
+    let pb = progress_bar(pb_len);
+
+    for i in 0..nodes.nodes.len() {
+        match nodes.nodes.get(i) {
+            Some(Node::UnoOp(op, a)) => {
+                nodes.nodes.set(i, Node::UnoOp(op, renumber[a].unwrap()));
+            }
+            Some(Node::Op(op, a, b)) => {
+                nodes.nodes.set(
+                    i,
+                    Node::Op(op, renumber[a].unwrap(), renumber[b].unwrap()));
+            }
+            Some(Node::TresOp(op, a, b, c)) => {
+                nodes.nodes.set(
+                    i,
+                    Node::TresOp(
+                        op, renumber[a].unwrap(), renumber[b].unwrap(),
+                        renumber[c].unwrap()));
+            }
+            _ => (),
         }
-        if let Node::UnoOp(_, a) = node {
-            *a = renumber[*a].unwrap();
-        }
-        if let Node::TresOp(_, a, b, c) = node {
-            *a = renumber[*a].unwrap();
-            *b = renumber[*b].unwrap();
-            *c = renumber[*c].unwrap();
-        }
-    }
-    for output in outputs.iter_mut() {
-        *output = renumber[*output].unwrap();
+        pb.inc(1);
     }
 
-    eprintln!("Removed {removed} unused nodes");
+    for output in outputs.iter_mut() {
+        *output = renumber[*output].unwrap();
+        pb.inc(1);
+    }
+
+    pb.finish();
+
+    println!("[tree shake end: removed {removed} unused nodes]");
 }
 
 fn rnd<T: FieldOps>(ff: &Field<T>, rng: &mut ThreadRng) -> T {
@@ -847,38 +1281,41 @@ fn rnd<T: FieldOps>(ff: &Field<T>, rng: &mut ThreadRng) -> T {
 
 
 /// Randomly evaluate the graph
-fn random_eval<T: FieldOps + 'static>(nodes: &mut Nodes<T>) -> Vec<T> {
+fn random_eval<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    nodes: &mut Nodes<T, NS>) -> Vec<T> {
+
     let mut rng = rand::thread_rng();
     let mut values = Vec::with_capacity(nodes.len());
     let mut inputs = HashMap::new();
     let mut prfs = HashMap::new();
     let mut prfs_uno = HashMap::new();
     let mut prfs_tres = HashMap::new();
-    for node in nodes.nodes.iter() {
+    for i in 0..nodes.nodes.len() {
+        let node = nodes.nodes.get(i).unwrap();
         let value = match node {
             Node::Unknown => panic!("Unknown node"),
 
-            Node::Constant(c_idx) => nodes.constants[*c_idx],
+            Node::Constant(c_idx) => nodes.constants[c_idx],
 
             // Algebraic Ops are evaluated directly
             // Since the field is large, by Swartz-Zippel if
             // two values are the same then they are likely algebraically equal.
             Node::Op(op @ (Operation::Add | Operation::Sub | Operation::Mul), a, b) => {
-                (&nodes.ff).op_duo(*op, values[*a], values[*b])
+                (&nodes.ff).op_duo(op, values[a], values[b])
             },
 
             // Input and non-algebraic ops are random functions
             // TODO: https://github.com/recmo/uint/issues/95 and use .gen_range(..M)
-            Node::Input(i) => *inputs.entry(*i)
+            Node::Input(i) => *inputs.entry(i)
                 .or_insert_with(|| rnd(&nodes.ff, &mut rng)),
             Node::Op(op, a, b) => *prfs
-                .entry((*op, values[*a], values[*b]))
+                .entry((op, values[a], values[b]))
                 .or_insert_with(|| rnd(&nodes.ff, &mut rng)),
             Node::UnoOp(op, a) => *prfs_uno
-                .entry((*op, values[*a]))
+                .entry((op, values[a]))
                 .or_insert_with(|| rnd(&nodes.ff, &mut rng)),
             Node::TresOp(op, a, b, c) => *prfs_tres
-                .entry((*op, values[*a], values[*b], values[*c]))
+                .entry((op, values[a], values[b], values[c]))
                 .or_insert_with(|| rnd(&nodes.ff, &mut rng)),
         };
         values.push(value);
@@ -887,8 +1324,8 @@ fn random_eval<T: FieldOps + 'static>(nodes: &mut Nodes<T>) -> Vec<T> {
 }
 
 /// Value numbering
-pub fn value_numbering<T: FieldOps + 'static>(
-    nodes: &mut Nodes<T>, outputs: &mut [usize]) {
+pub fn value_numbering<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    nodes: &mut Nodes<T, NS>, outputs: &mut [usize]) {
 
     assert_valid(&nodes.nodes);
 
@@ -907,21 +1344,22 @@ pub fn value_numbering<T: FieldOps + 'static>(
         renumber.push(value_map[&value][0]);
     }
 
-    // Renumber references.
-    for node in nodes.nodes.iter_mut() {
-        if let Node::Op(_, a, b) = node {
-            *a = renumber[*a];
-            *b = renumber[*b];
-        }
-        if let Node::UnoOp(_, a) = node {
-            *a = renumber[*a];
-        }
-        if let Node::TresOp(_, a, b, c) = node {
-            *a = renumber[*a];
-            *b = renumber[*b];
-            *c = renumber[*c];
+    for i in 0..nodes.nodes.len() {
+        match nodes.nodes.get(i) {
+            Some(Node::UnoOp(op, a)) => {
+                nodes.nodes.set(i, Node::UnoOp(op, renumber[a]));
+            }
+            Some(Node::Op(op, a, b)) => {
+                nodes.nodes.set(i, Node::Op(op, renumber[a], renumber[b]));
+            }
+            Some(Node::TresOp(op, a, b, c)) => {
+                nodes.nodes.set(
+                    i, Node::TresOp(op, renumber[a], renumber[b], renumber[c]));
+            }
+            _ => ()
         }
     }
+
     for output in outputs.iter_mut() {
         *output = renumber[*output];
     }
@@ -930,7 +1368,9 @@ pub fn value_numbering<T: FieldOps + 'static>(
 }
 
 /// Probabilistic constant determination
-pub fn constants<T: FieldOps + 'static>(nodes: &mut Nodes<T>) {
+pub fn find_constants<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    nodes: &mut Nodes<T, NS>) {
+
     assert_valid(&nodes.nodes);
 
     // Evaluate the graph in random field elements.
@@ -940,11 +1380,14 @@ pub fn constants<T: FieldOps + 'static>(nodes: &mut Nodes<T>) {
     // Find all nodes with the same value.
     let mut constants = 0;
     for i in 0..nodes.len() {
-        if let Node::Constant(_) = nodes.nodes[i] {
+        if let Some(Node::Constant(_)) = nodes.nodes.get(i) {
             continue;
         }
         if values_a[i] == values_b[i] {
-            nodes.nodes[i] = nodes.const_node_from_value(values_a[i]);
+            let idx = nodes.const_node_idx_from_value(values_a[i]);
+            let n = nodes.nodes.get(idx).unwrap();
+            assert!(matches!(n, Node::Constant(_)));
+            nodes.nodes.set(i, n);
             constants += 1;
         }
     }
@@ -1130,14 +1573,6 @@ mod tests {
     }
 
     #[test]
-    fn test_2() {
-        let nodes: Vec<Node> = vec![];
-        // let node = nodes[0];
-        let node = nodes.get(0);
-        println!("{:?}", node);
-    }
-
-    #[test]
     fn test_pow() {
         let a = uint!(21888242871839275222246405745257275088548364400416034343698204186575808495615_U256);
         let b = uint!(21888_U256);
@@ -1223,5 +1658,108 @@ mod tests {
         assert_eq!(want, a);
 
         assert_eq!(h, halfM);
+    }
+
+    #[test]
+    fn test_node_serialization() {
+        let mut buf: [u8; 60] = [0xaa; 60];
+        let x = Node::TresOp(TresOperation::TernCond, 1, 2, 3);
+        x.write_bytes(&mut buf);
+
+        let y = Node::from_bytes(&buf);
+        assert_eq!(x, y);
+        println!("{:?}", buf);
+    }
+
+    #[test]
+    fn test_MMapNodes() {
+        let x1 = Node::TresOp(TresOperation::TernCond, 1, 2, 3);
+        let x2 = Node::Input(4);
+        let mut nodes = MMapNodes::new(
+            true, &std::env::temp_dir());
+        nodes.push(x1);
+        nodes.push(x2);
+        let y1 = nodes.get(0).unwrap();
+        assert_eq!(y1, x1);
+        let y2 = nodes.get(1).unwrap();
+        assert_eq!(y2, x2);
+
+        assert!(nodes.get(3).is_none());
+
+        assert_eq!(nodes.len(), 2);
+
+        nodes.set(0, x2);
+        let y2 = nodes.get(0).unwrap();
+        assert_eq!(y2, x2);
+        //
+        // let mut v: Vec<Node> = Vec::new();
+        // v.push(Node::Unknown);
+        // let mut f: u64 = 1000000;
+        // for i in 1..30 {
+        //     f = f / 3 + f;
+        //     println!("{}", indicatif::HumanCount(f))
+        // }
+    }
+
+    #[test]
+    fn test_MMapNodes_grow_named() {
+        let mut nodes = MMapNodes::with_capacity(
+            2, true, &std::env::temp_dir());
+        assert_eq!(nodes.cap, 2 * Node::SIZE);
+        assert_eq!(nodes.ln, 0);
+        nodes.push(Node::TresOp(TresOperation::TernCond, 1, 2, 3));
+        assert_eq!(nodes.cap, 2 * Node::SIZE);
+        assert_eq!(nodes.ln, 1 * Node::SIZE);
+
+        nodes.push(Node::TresOp(TresOperation::TernCond, 1, 2, 3));
+        assert_eq!(nodes.cap, 2 * Node::SIZE);
+        assert_eq!(nodes.ln, 2 * Node::SIZE);
+
+        nodes.push(Node::TresOp(TresOperation::TernCond, 1, 2, 3));
+        assert_eq!(nodes.cap, 1002 * Node::SIZE);
+        assert_eq!(nodes.ln, 3 * Node::SIZE);
+    }
+
+    #[test]
+    fn test_MMapNodes_grow_unnamed() {
+        let mut nodes = MMapNodes::with_capacity(
+            2, false, &std::env::temp_dir());
+        assert_eq!(nodes.cap, 2 * Node::SIZE);
+        assert_eq!(nodes.ln, 0);
+        nodes.push(Node::TresOp(TresOperation::TernCond, 1, 2, 3));
+        assert_eq!(nodes.cap, 2 * Node::SIZE);
+        assert_eq!(nodes.ln, 1 * Node::SIZE);
+
+        nodes.push(Node::TresOp(TresOperation::TernCond, 1, 2, 3));
+        assert_eq!(nodes.cap, 2 * Node::SIZE);
+        assert_eq!(nodes.ln, 2 * Node::SIZE);
+
+        nodes.push(Node::TresOp(TresOperation::TernCond, 1, 2, 3));
+        assert_eq!(nodes.cap, 1002 * Node::SIZE);
+        assert_eq!(nodes.ln, 3 * Node::SIZE);
+    }
+
+    #[test]
+    fn test_MMapNodes_retain() {
+        let mut nodes = MMapNodes::new(
+            true, &std::env::temp_dir());
+        nodes.push(Node::TresOp(TresOperation::TernCond, 1, 2, 3));
+        nodes.push(Node::TresOp(TresOperation::TernCond, 4, 5, 6));
+        nodes.push(Node::TresOp(TresOperation::TernCond, 7, 8, 9));
+        nodes.push(Node::TresOp(TresOperation::TernCond, 10, 11, 12));
+
+        let used: Vec<bool> = vec![true, false, true, false];
+        let mut ui = used.iter();
+        nodes.retain(|| *ui.next().unwrap());
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes.cap, 4 * Node::SIZE);
+        assert_eq!(nodes.ln, 2 * Node::SIZE);
+
+        assert_eq!(
+            nodes.get(0).unwrap(),
+            Node::TresOp(TresOperation::TernCond, 1, 2, 3));
+        assert_eq!(
+            nodes.get(1).unwrap(),
+            Node::TresOp(TresOperation::TernCond, 7, 8, 9));
     }
 }

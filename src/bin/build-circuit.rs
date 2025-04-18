@@ -6,25 +6,25 @@ use program_structure::error_definition::Report;
 use std::collections::HashMap;
 use std::{env, fmt, fs};
 use std::error::Error;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Instant;
 use anyhow::anyhow;
 use code_producers::c_elements::IODef;
 use code_producers::components::TemplateInstanceIOMap;
 use compiler::circuit_design::function::FunctionCode;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::ProgressBar;
 use ruint::aliases::U256;
 use type_analysis::check_types::check_types;
-use circom_witnesscalc::{InputSignalsInfo};
+use circom_witnesscalc::{progress_bar, InputSignalsInfo};
 use circom_witnesscalc::field::{Field, FieldOperations, FieldOps, U254, U64};
-use circom_witnesscalc::graph::{Node, Operation, UnoOperation, TresOperation, Nodes, NodeConstErr, NodeIdx, NodesInterface, optimize};
+use circom_witnesscalc::graph::{Node, Operation, UnoOperation, TresOperation, Nodes, NodeConstErr, NodeIdx, NodesInterface, optimize, MMapNodes, NodesStorage};
 use circom_witnesscalc::storage::serialize_witnesscalc_graph;
 
 // if instruction pointer is a store to the signal, return the signal index
 // and the src instruction to store to the signal
-fn try_signal_store<'a, T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>,
+fn try_signal_store<'a, T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>,
     cmp: &mut ComponentInstance<T>,
     inst: &'a InstructionPointer,
     print_debug: bool,
@@ -56,9 +56,12 @@ fn try_signal_store<'a, T: FieldOps + 'static>(
     }
 }
 
-fn var_from_value_instruction_n<T: FieldOps + 'static>(
-    value_bucket: &ValueBucket, nodes: &Nodes<T>, n: usize,
-    call_stack: &[String]) -> Vec<Var<T>> {
+fn var_from_value_instruction_n<T, NS>(
+    value_bucket: &ValueBucket, nodes: &Nodes<T, NS>, n: usize,
+    call_stack: &[String]) -> Vec<Var<T>>
+where
+    T: FieldOps + 'static,
+    NS: NodesStorage + 'static {
 
     match value_bucket.parse_as {
         ValueType::BigInt => {
@@ -86,14 +89,14 @@ fn var_from_value_instruction_n<T: FieldOps + 'static>(
     }
 }
 
-fn operator_argument_instruction_n<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>,
-    inst: &InstructionPointer,
-    cmp: &mut ComponentInstance<T>,
-    size: usize,
-    print_debug: bool,
-    call_stack: &Vec<String>,
-) -> Vec<usize> {
+fn operator_argument_instruction_n<T, NS>(
+    ctx: &mut BuildCircuitContext<T, NS>, inst: &InstructionPointer,
+    cmp: &mut ComponentInstance<T>, size: usize, print_debug: bool,
+    call_stack: &Vec<String>) -> Vec<usize>
+where
+    T: FieldOps + 'static,
+    NS: NodesStorage + 'static {
+
     assert!(size > 0, "size = {}", size);
 
     if size == 1 {
@@ -207,7 +210,8 @@ fn operator_argument_instruction_n<T: FieldOps + 'static>(
                                 result.push(idx);
                             },
                             Some(Var::Value(ref v)) => {
-                                result.push(ctx.nodes.push_constant(*v).0);
+                                result.push(
+                                    ctx.nodes.const_node_idx_from_value(*v));
                             }
                             None => { panic!("variable is not set: {}, {:?}",
                                              load_bucket.line, call_stack); }
@@ -224,13 +228,14 @@ fn operator_argument_instruction_n<T: FieldOps + 'static>(
 }
 
 
-fn operator_argument_instruction<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>,
-    cmp: &mut ComponentInstance<T>,
-    inst: &InstructionPointer,
-    print_debug: bool,
-    call_stack: &Vec<String>,
-) -> usize {
+fn operator_argument_instruction<T, NS>(
+    ctx: &mut BuildCircuitContext<T, NS>, cmp: &mut ComponentInstance<T>,
+    inst: &InstructionPointer, print_debug: bool,
+    call_stack: &Vec<String>) -> usize
+where
+    T: FieldOps + 'static,
+    NS: NodesStorage + 'static {
+
     match **inst {
         Instruction::Load(ref load_bucket) => {
             match load_bucket.address_type {
@@ -307,7 +312,7 @@ fn operator_argument_instruction<T: FieldOps + 'static>(
                             match cmp.vars[var_idx] {
                                 Some(Var::Node(idx)) => idx,
                                 Some(Var::Value(ref v)) => {
-                                    ctx.nodes.push_constant(*v).0
+                                    ctx.nodes.const_node_idx_from_value(*v)
                                 }
                                 None => { panic!("variable is not set"); }
                             }
@@ -347,8 +352,8 @@ fn operator_argument_instruction<T: FieldOps + 'static>(
     }
 }
 
-fn node_from_compute_bucket<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>,
+fn node_from_compute_bucket<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>,
     cmp: &mut ComponentInstance<T>,
     compute_bucket: &ComputeBucket,
     print_debug: bool,
@@ -371,8 +376,8 @@ fn node_from_compute_bucket<T: FieldOps + 'static>(
     }
 }
 
-fn calc_mapped_signal_idx<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>, cmp: &mut ComponentInstance<T>,
+fn calc_mapped_signal_idx<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>, cmp: &mut ComponentInstance<T>,
     subcomponent_idx: usize, signal_code: usize,
     indexes: &[InstructionPointer], print_debug: bool,
     call_stack: &Vec<String>) -> (usize, String) {
@@ -423,38 +428,76 @@ fn calc_mapped_signal_idx<T: FieldOps + 'static>(
     (map_access, template_def)
 }
 
-struct BuildCircuitContext<'a, T: FieldOps> {
-    nodes: &'a mut Nodes<T>,
+struct CallStack {
+    stack: Vec<(String, usize)>,
+    stack_fmt: String,
+}
+
+
+impl CallStack {
+    fn new() -> Self {
+        CallStack {
+            stack: Vec::new(),
+            stack_fmt: String::new(),
+        }
+    }
+
+    fn update_line(&mut self, line_no: usize) {
+        if let Some((_, ln)) = self.stack.last_mut() {
+            *ln = line_no;
+        }
+        self.update_fmt();
+    }
+
+    fn update_fmt(&mut self) {
+        self.stack_fmt = self.stack.iter()
+            .map(|(name, line_no)| format!("{}:{}", name, line_no))
+            .collect::<Vec<String>>()
+            .join(" -> ");
+    }
+
+    fn push(&mut self, name: String) {
+        self.stack.push((name, 0));
+    }
+
+    fn pop(&mut self) {
+        self.stack.pop();
+        self.update_fmt();
+    }
+}
+
+struct BuildCircuitContext<'a, T: FieldOps, NS: NodesStorage> {
+    nodes: &'a mut Nodes<T, NS>,
     signal_node_idx: &'a mut Vec<usize>,
     signals_set: usize,
     progress_bar: ProgressBar,
     templates: &'a Vec<TemplateCode>,
     functions: &'a Vec<FunctionCode>,
     io_map: &'a TemplateInstanceIOMap,
+    stack: CallStack,
 }
 
-impl<T: FieldOps> BuildCircuitContext<'_, T> {
-    fn new<'a>(
-        nodes: &'a mut Nodes<T>, signal_node_idx: &'a mut Vec<usize>,
-        templates: &'a Vec<TemplateCode>, functions: &'a Vec<FunctionCode>,
-        io_map: &'a TemplateInstanceIOMap) -> BuildCircuitContext<'a, T> {
+impl<T, NS> BuildCircuitContext<'_, T, NS>
+where
+    T: FieldOps + 'static,
+    NS: NodesStorage + 'static {
 
-        let pb = ProgressBar::new(signal_node_idx.len() as u64);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})\n{msg}")
-                .unwrap()
-                .progress_chars("#>-")
-        );
+    fn new<'a>(
+        nodes: &'a mut Nodes<T, NS>, signal_node_idx: &'a mut Vec<usize>,
+        templates: &'a Vec<TemplateCode>, functions: &'a Vec<FunctionCode>,
+        io_map: &'a TemplateInstanceIOMap) -> BuildCircuitContext<'a, T, NS> {
+
+        let signal_nodes_num = signal_node_idx.len();
 
         BuildCircuitContext {
             nodes,
             signal_node_idx,
             signals_set: 0,
-            progress_bar: pb,
+            progress_bar: progress_bar(signal_nodes_num),
             templates,
             functions,
             io_map,
+            stack: CallStack::new(),
         }
     }
     fn new_component(
@@ -474,25 +517,47 @@ impl<T: FieldOps> BuildCircuitContext<'_, T> {
         cmp
     }
 
-    fn associate_signal_to_node(
-        &mut self, signal_idx: usize, node_idx: usize, call_stack: &[String],
-        line_no: usize) {
-
+    fn associate_signal_to_node(&mut self, signal_idx: usize, node_idx: usize) {
         if self.signal_node_idx[signal_idx] != usize::MAX {
             panic!("signal is already set");
         }
         self.signal_node_idx[signal_idx] = node_idx;
         self.signals_set += 1;
-        self.progress_bar.set_message(
-            format!("{}:{}", call_stack.join(" -> ", ), line_no));
+        self.update_progress_message();
         self.progress_bar.inc(1);
+    }
+
+    fn update_progress_message(&mut self) {
+        let nodes_num: u64 = self.nodes.len().try_into().unwrap();
+        let const_num: u64 = self.nodes.constants.len().try_into().unwrap();
+        let msg = format!(
+            "nodes: {}; constants: {}\n{}",
+            indicatif::HumanCount(nodes_num), indicatif::HumanCount(const_num),
+            self.stack.stack_fmt);
+        self.progress_bar.set_message(msg);
+    }
+
+    fn push_stack(&mut self, name: String) {
+        self.stack.push(name);
+    }
+
+    fn update_line(&mut self, line_no: usize) {
+        self.stack.update_line(line_no);
+        self.update_progress_message();
+    }
+
+    fn pop_stack(&mut self) {
+        self.stack.pop();
+        self.update_progress_message();
     }
 }
 
-fn process_instruction<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>, inst: &InstructionPointer,
+fn process_instruction<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>, inst: &InstructionPointer,
     print_debug: bool, call_stack: &Vec<String>,
     cmp: &mut ComponentInstance<T>) {
+
+    ctx.update_line(inst.get_line());
 
     match **inst {
         Instruction::Value(..) => {
@@ -537,8 +602,7 @@ fn process_instruction<T: FieldOps + 'static>(
                                 .enumerate().take(store_bucket.context.size) {
 
                                 ctx.associate_signal_to_node(
-                                    signal_idx + i, *item, call_stack,
-                                    store_bucket.get_line());
+                                    signal_idx + i, *item);
                             }
                         }
                         // LocationRule::Mapped { signal_code, indexes } => {}
@@ -619,8 +683,8 @@ fn process_instruction<T: FieldOps + 'static>(
             }
 
             let r = run_function(
-                &call_bucket.symbol, ctx.functions, &mut fn_vars, ctx.nodes,
-                print_debug, call_stack);
+                ctx, &call_bucket.symbol, &mut fn_vars, print_debug,
+                call_stack);
 
             match call_bucket.return_info {
                 ReturnType::Intermediate{ ..} => { todo!(); }
@@ -689,8 +753,7 @@ fn process_instruction<T: FieldOps + 'static>(
                             let node = Node::TresOp(TresOperation::TernCond, node_idx, node_idx_if, node_idx_else);
                             let node_idx = ctx.nodes.push(node).0;
                             ctx.associate_signal_to_node(
-                                if_signal_idx, node_idx, call_stack,
-                                branch_bucket.get_line());
+                                if_signal_idx, node_idx);
                         }
                         _ => {
                             panic!(
@@ -781,10 +844,13 @@ fn process_instruction<T: FieldOps + 'static>(
     }
 }
 
-fn store_function_return_results_into_variable<T: FieldOps + 'static>(
+fn store_function_return_results_into_variable<T, NS>(
     final_data: &FinalData, src_vars: &[Option<Var<T>>], ret: &FnReturn<T>,
-    dst_vars: &mut Vec<Option<Var<T>>>, nodes: &mut Nodes<T>,
-    call_stack: &Vec<String>) {
+    dst_vars: &mut Vec<Option<Var<T>>>, nodes: &mut Nodes<T, NS>,
+    call_stack: &Vec<String>)
+where
+    T: FieldOps + 'static,
+    NS: NodesStorage + 'static {
 
     assert!(matches!(final_data.dest_address_type, AddressType::Variable));
 
@@ -822,10 +888,13 @@ fn store_function_return_results_into_variable<T: FieldOps + 'static>(
     }
 }
 
-fn store_function_return_results_into_subsignal<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>, final_data: &FinalData,
+fn store_function_return_results_into_subsignal<T, NS>(
+    ctx: &mut BuildCircuitContext<T, NS>, final_data: &FinalData,
     src_vars: &[Option<Var<T>>], ret: &FnReturn<T>, print_debug: bool,
-    call_stack: &Vec<String>, cmp: &mut ComponentInstance<T>) {
+    call_stack: &Vec<String>, cmp: &mut ComponentInstance<T>)
+where
+    T: FieldOps + 'static,
+    NS: NodesStorage + 'static {
 
     let (cmp_address, input_information) = if let AddressType::SubcmpSignal {cmp_address, input_information, ..} = &final_data.dest_address_type {
         (cmp_address, input_information)
@@ -842,7 +911,8 @@ fn store_function_return_results_into_subsignal<T: FieldOps + 'static>(
                         src_node_idxs.push(node_idx);
                     }
                     Some(Var::Value(v)) => {
-                        src_node_idxs.push(ctx.nodes.push_constant(v).0);
+                        src_node_idxs.push(
+                            ctx.nodes.const_node_idx_from_value(v));
                     }
                     None => {
                         panic!("variable at index {} is not set", i);
@@ -858,7 +928,7 @@ fn store_function_return_results_into_subsignal<T: FieldOps + 'static>(
                     src_node_idxs.push(*node_idx);
                 }
                 Var::Value(v) => {
-                    src_node_idxs.push(ctx.nodes.push_constant(*v).0);
+                    src_node_idxs.push(ctx.nodes.const_node_idx_from_value(*v));
                 }
             }
         }
@@ -874,10 +944,13 @@ fn store_function_return_results_into_subsignal<T: FieldOps + 'static>(
         ctx, &src_node_idxs, print_debug, call_stack, cmp, &dest);
 }
 
-fn store_function_return_results<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>, final_data: &FinalData,
+fn store_function_return_results<T, NS> (
+    ctx: &mut BuildCircuitContext<T, NS>, final_data: &FinalData,
     src_vars: &[Option<Var<T>>], ret: &FnReturn<T>, print_debug: bool,
-    call_stack: &Vec<String>, cmp: &mut ComponentInstance<T>) {
+    call_stack: &Vec<String>, cmp: &mut ComponentInstance<T>)
+where
+    T: FieldOps + 'static,
+    NS: NodesStorage + 'static {
 
     match &final_data.dest_address_type {
         AddressType::Signal => todo!("Signal"),
@@ -888,22 +961,21 @@ fn store_function_return_results<T: FieldOps + 'static>(
         }
         AddressType::SubcmpSignal {..} => {
             store_function_return_results_into_subsignal(
-                ctx, final_data, src_vars, ret, print_debug,
-                call_stack, cmp);
+                ctx, final_data, src_vars, ret, print_debug, call_stack, cmp);
         }
     }
 }
 
-fn run_function<T: FieldOps + 'static>(
-    fn_name: &str, functions: &Vec<FunctionCode>,
-    fn_vars: &mut Vec<Option<Var<T>>>, nodes: &mut Nodes<T>,
-    print_debug: bool, call_stack: &[String]) -> FnReturn<T> {
+fn run_function<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>, fn_name: &str,
+    fn_vars: &mut Vec<Option<Var<T>>>, print_debug: bool,
+    call_stack: &[String]) -> FnReturn<T> {
 
     // for i in functions {
     //     println!("Function: {} {}", i.header, i.name);
     // }
 
-    let f = find_function(fn_name, functions);
+    let f = find_function(fn_name, ctx.functions);
     let mut start: Option<Instant> = None;
     if print_debug {
         start = Some(Instant::now());
@@ -915,15 +987,19 @@ fn run_function<T: FieldOps + 'static>(
     let mut call_stack = call_stack.to_owned();
     call_stack.push(f.name.clone());
 
+    ctx.push_stack(fn_name.to_string());
+
     let mut r: Option<FnReturn<T>> = None;
     for i in &f.body {
         r = process_function_instruction(
-            i, fn_vars, nodes, functions, print_debug, &call_stack);
+            ctx, i, fn_vars, print_debug, &call_stack);
         if r.is_some() {
             break;
         }
     }
     // println!("{}", f.to_string());
+
+    ctx.pop_stack();
 
     let r = r.expect("no return found");
     if print_debug {
@@ -931,9 +1007,13 @@ fn run_function<T: FieldOps + 'static>(
     }
     r
 }
-fn calc_function_expression_n<T: FieldOps + 'static>(
+fn calc_function_expression_n<T, NS>(
     inst: &InstructionPointer, fn_vars: &mut Vec<Option<Var<T>>>,
-    nodes: &mut Nodes<T>, n: usize, call_stack: &Vec<String>) -> Vec<Var<T>> {
+    nodes: &mut Nodes<T, NS>, n: usize,
+    call_stack: &Vec<String>) -> Vec<Var<T>>
+where
+    T: FieldOps + 'static,
+    NS: NodesStorage + 'static{
 
     if n == 1 {
         let v = calc_function_expression(inst, fn_vars, nodes, call_stack);
@@ -982,9 +1062,9 @@ fn calc_function_expression_n<T: FieldOps + 'static>(
     }
 }
 
-fn calc_function_expression<T: FieldOps + 'static>(
+fn calc_function_expression<T: FieldOps + 'static, NS: NodesStorage + 'static>(
     inst: &InstructionPointer, fn_vars: &mut Vec<Option<Var<T>>>,
-    nodes: &mut Nodes<T>, call_stack: &Vec<String>) -> Var<T> {
+    nodes: &mut Nodes<T, NS>, call_stack: &Vec<String>) -> Var<T> {
 
     match **inst {
         Instruction::Value(ref value_bucket) => {
@@ -1041,18 +1121,23 @@ fn calc_function_expression<T: FieldOps + 'static>(
     }
 }
 
-fn node_from_var<T: FieldOps + 'static>(v: &Var<T>, nodes: &mut Nodes<T>) -> usize {
+fn node_from_var<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    v: &Var<T>, nodes: &mut Nodes<T, NS>) -> usize {
+
     match v {
         Var::Value(ref v) => {
-            nodes.push_constant(*v).0
+            nodes.const_node_idx_from_value(*v)
         }
         Var::Node(node_idx) => *node_idx,
     }
 }
 
-fn compute_function_expression<T: FieldOps + 'static>(
+fn compute_function_expression<T, NS>(
     compute_bucket: &ComputeBucket, fn_vars: &mut Vec<Option<Var<T>>>,
-    nodes: &mut Nodes<T>, call_stack: &Vec<String>) -> Var<T> {
+    nodes: &mut Nodes<T, NS>, call_stack: &Vec<String>) -> Var<T>
+where
+    T: FieldOps + 'static,
+    NS: NodesStorage + 'static {
 
     if let Ok(op) = TryInto::<Operation>::try_into(compute_bucket.op) {
         assert_eq!(compute_bucket.stack.len(), 2);
@@ -1096,9 +1181,9 @@ enum FnReturn<T: FieldOps> {
     Value(Var<T>),
 }
 
-fn build_return<T: FieldOps + 'static>(
+fn build_return<T: FieldOps + 'static, NS: NodesStorage + 'static>(
     return_bucket: &ReturnBucket, fn_vars: &mut Vec<Option<Var<T>>>,
-    nodes: &mut Nodes<T>, call_stack: &Vec<String>) -> FnReturn<T> {
+    nodes: &mut Nodes<T, NS>, call_stack: &Vec<String>) -> FnReturn<T> {
 
     match *return_bucket.value {
         Instruction::Load(ref load_bucket) => {
@@ -1126,9 +1211,9 @@ fn build_return<T: FieldOps + 'static>(
     }
 }
 
-fn calc_return_load_idx<T: FieldOps + 'static>(
+fn calc_return_load_idx<T: FieldOps + 'static, NS: NodesStorage + 'static>(
     load_bucket: &LoadBucket, fn_vars: &mut Vec<Option<Var<T>>>,
-    nodes: &mut Nodes<T>, call_stack: &Vec<String>) -> usize {
+    nodes: &mut Nodes<T, NS>, call_stack: &Vec<String>) -> usize {
 
     match &load_bucket.address_type {
         AddressType::Variable => {}, // OK
@@ -1146,9 +1231,9 @@ fn calc_return_load_idx<T: FieldOps + 'static>(
 }
 
 // return variable value and it's index
-fn store_function_variable<T: FieldOps + 'static>(
+fn store_function_variable<T: FieldOps + 'static, NS: NodesStorage + 'static>(
     store_bucket: &StoreBucket, fn_vars: &mut Vec<Option<Var<T>>>,
-    nodes: &mut Nodes<T>, call_stack: &Vec<String>) -> (Var<T>, usize) {
+    nodes: &mut Nodes<T, NS>, call_stack: &Vec<String>) -> (Var<T>, usize) {
 
     assert!(matches!(store_bucket.dest_address_type, AddressType::Variable),
             "functions can store only inside variables: dest_address_type: {}",
@@ -1183,10 +1268,15 @@ fn store_function_variable<T: FieldOps + 'static>(
     (v, lvar_idx)
 }
 
-fn process_function_instruction<T: FieldOps + 'static>(
-    inst: &InstructionPointer, fn_vars: &mut Vec<Option<Var<T>>>,
-    nodes: &mut Nodes<T>, functions: &Vec<FunctionCode>,
-    print_debug: bool, call_stack: &Vec<String>) -> Option<FnReturn<T>> {
+fn process_function_instruction<T, NS>(
+    ctx: &mut BuildCircuitContext<T, NS>, inst: &InstructionPointer,
+    fn_vars: &mut Vec<Option<Var<T>>>, print_debug: bool,
+    call_stack: &Vec<String>) -> Option<FnReturn<T>>
+where
+    T: FieldOps + 'static,
+    NS: NodesStorage + 'static {
+
+    ctx.update_line(inst.get_line());
 
     // println!("function instruction: {:?}", inst.to_string());
     match **inst {
@@ -1204,15 +1294,15 @@ fn process_function_instruction<T: FieldOps + 'static>(
                             }
                             let lvar_idx =
                                 calc_function_expression(
-                                    location, fn_vars, nodes, call_stack)
-                                .must_const_usize(nodes, call_stack);
+                                    location, fn_vars, ctx.nodes, call_stack)
+                                .must_const_usize(ctx.nodes, call_stack);
                             if store_bucket.context.size == 1 {
                                 fn_vars[lvar_idx] = Some(calc_function_expression(
-                                    &store_bucket.src, fn_vars, nodes,
+                                    &store_bucket.src, fn_vars, ctx.nodes,
                                     call_stack));
                             } else {
                                 let values = calc_function_expression_n(
-                                    &store_bucket.src, fn_vars, nodes,
+                                    &store_bucket.src, fn_vars, ctx.nodes,
                                     store_bucket.context.size, call_stack);
                                 assert_eq!(values.len(), store_bucket.context.size);
                                 for i in 0..store_bucket.context.size {
@@ -1233,8 +1323,8 @@ fn process_function_instruction<T: FieldOps + 'static>(
             // println!("branch bucket: {}", branch_bucket.to_string());
 
             let cond = calc_function_expression(
-                &branch_bucket.cond, fn_vars, nodes, call_stack);
-            let cond_const = cond.to_const(nodes);
+                &branch_bucket.cond, fn_vars, ctx.nodes, call_stack);
+            let cond_const = cond.to_const(ctx.nodes);
 
             match cond_const {
                 Ok(cond_const) => { // condition expression is static
@@ -1245,7 +1335,7 @@ fn process_function_instruction<T: FieldOps + 'static>(
                     };
                     for i in branch {
                         let r = process_function_instruction(
-                            i, fn_vars, nodes, functions, print_debug, call_stack);
+                            ctx, i, fn_vars, print_debug, call_stack);
                         if r.is_some() {
                             return r;
                         }
@@ -1269,7 +1359,7 @@ fn process_function_instruction<T: FieldOps + 'static>(
                     let (var_if, var_if_idx) = match *branch_bucket.if_branch[0] {
                         Instruction::Store(ref store_bucket) => {
                             store_function_variable(
-                                store_bucket, fn_vars, nodes, call_stack)
+                                store_bucket, fn_vars, ctx.nodes, call_stack)
                         }
                         _ => {
                             panic!(
@@ -1281,7 +1371,7 @@ fn process_function_instruction<T: FieldOps + 'static>(
                     let (var_else, var_else_idx) = match *branch_bucket.else_branch[0] {
                         Instruction::Store(ref store_bucket) => {
                             store_function_variable(
-                                store_bucket, fn_vars, nodes, call_stack)
+                                store_bucket, fn_vars, ctx.nodes, call_stack)
                         }
                         _ => {
                             panic!(
@@ -1293,10 +1383,10 @@ fn process_function_instruction<T: FieldOps + 'static>(
                         var_if_idx, var_else_idx,
                         "in ternary operation if and else branches must store to the same variable");
 
-                    let cond_node_idx = node_from_var(&cond, nodes);
-                    let if_node_idx = node_from_var(&var_if, nodes);
-                    let else_node_idx = node_from_var(&var_else, nodes);
-                    let tern_node_idx = nodes.push(Node::TresOp(
+                    let cond_node_idx = node_from_var(&cond, ctx.nodes);
+                    let if_node_idx = node_from_var(&var_if, ctx.nodes);
+                    let else_node_idx = node_from_var(&var_else, ctx.nodes);
+                    let tern_node_idx = ctx.nodes.push(Node::TresOp(
                         TresOperation::TernCond, cond_node_idx, if_node_idx,
                         else_node_idx));
                     fn_vars[var_if_idx] = Some(Var::Node(tern_node_idx.0));
@@ -1311,18 +1401,19 @@ fn process_function_instruction<T: FieldOps + 'static>(
         }
         Instruction::Return(ref return_bucket) => {
             // println!("return bucket: {}", return_bucket.to_string());
-            Some(build_return(return_bucket, fn_vars, nodes, call_stack))
+            Some(build_return(return_bucket, fn_vars, ctx.nodes, call_stack))
         }
         Instruction::Loop(ref loop_bucket) => {
             // if call_stack.last().unwrap() == "long_div" {
             //     println!("loop: {}", loop_bucket.to_string());
             // }
             while check_continue_condition_function(
-                &loop_bucket.continue_condition, fn_vars, nodes, call_stack) {
+                &loop_bucket.continue_condition, fn_vars, ctx.nodes,
+                call_stack) {
 
                 for i in &loop_bucket.body {
                     process_function_instruction(
-                        i, fn_vars, nodes, functions, print_debug, call_stack);
+                        ctx, i, fn_vars, print_debug, call_stack);
                 }
             };
             None
@@ -1333,8 +1424,8 @@ fn process_function_instruction<T: FieldOps + 'static>(
             let mut count: usize = 0;
             for (idx, inst2) in call_bucket.arguments.iter().enumerate() {
                 let args = calc_function_expression_n(
-                    inst2, fn_vars, nodes, call_bucket.argument_types[idx].size,
-                    call_stack);
+                    inst2, fn_vars, ctx.nodes,
+                    call_bucket.argument_types[idx].size, call_stack);
                 for arg in args {
                     new_fn_vars[count] = Some(arg);
                     count += 1;
@@ -1342,8 +1433,8 @@ fn process_function_instruction<T: FieldOps + 'static>(
             }
 
             let r = run_function(
-                &call_bucket.symbol, functions, &mut new_fn_vars, nodes,
-                print_debug, call_stack);
+                ctx, &call_bucket.symbol, &mut new_fn_vars, print_debug,
+                call_stack);
 
             match call_bucket.return_info {
                 ReturnType::Intermediate{ ..} => { todo!(); }
@@ -1353,7 +1444,7 @@ fn process_function_instruction<T: FieldOps + 'static>(
                     }
                     // assert_eq!(final_data.context.size, r.ln);
                     store_function_return_results_into_variable(
-                        final_data, &new_fn_vars, &r, fn_vars, nodes,
+                        final_data, &new_fn_vars, &r, fn_vars, ctx.nodes,
                         call_stack);
                 }
             };
@@ -1371,9 +1462,12 @@ fn process_function_instruction<T: FieldOps + 'static>(
     }
 }
 
-fn check_continue_condition_function<T: FieldOps + 'static>(
+fn check_continue_condition_function<T, NS>(
     inst: &InstructionPointer, fn_vars: &mut Vec<Option<Var<T>>>,
-    nodes: &mut Nodes<T>, call_stack: &Vec<String>) -> bool {
+    nodes: &mut Nodes<T, NS>, call_stack: &Vec<String>) -> bool
+where
+    T: FieldOps + 'static,
+    NS: NodesStorage + 'static {
 
     let val = calc_function_expression(inst, fn_vars, nodes, call_stack)
         .to_const(nodes)
@@ -1411,8 +1505,8 @@ struct ComponentInstance<T: FieldOps> {
     subcomponents: Vec<Option<ComponentInstance<T>>>,
 }
 
-fn fmt_create_cmp_bucket<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>,
+fn fmt_create_cmp_bucket<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>,
     cmp_bucket: &CreateCmpBucket,
     cmp: &mut ComponentInstance<T>,
     print_debug: bool,
@@ -1475,20 +1569,24 @@ impl<T: FieldOps> fmt::Display for Var<T> {
 
 
 impl<T: FieldOps + 'static> Var<T> {
-    fn to_const(&self, nodes: &Nodes<T>) -> Result<T, NodeConstErr> {
+    fn to_const<NS: NodesStorage + 'static>(
+        &self, nodes: &Nodes<T, NS>) -> Result<T, NodeConstErr> {
+
         match self {
             Var::Value(v) => Ok(*v),
             Var::Node(node_idx) => nodes.to_const_recursive(NodeIdx::from(*node_idx)),
         }
     }
 
-    fn to_const_usize(&self, nodes: &Nodes<T>) -> Result<usize, Box<dyn Error>> {
+    fn to_const_usize<NS: NodesStorage + 'static>(
+        &self, nodes: &Nodes<T, NS>) -> Result<usize, Box<dyn Error>> {
+
         let c = self.to_const(nodes)?;
         bigint_to_usize(c)
     }
 
-    fn must_const_usize(
-        &self, nodes: &Nodes<T>, call_stack: &[String]) -> usize {
+    fn must_const_usize<NS: NodesStorage + 'static>(
+        &self, nodes: &Nodes<T, NS>, call_stack: &[String]) -> usize {
 
         self.to_const_usize(nodes).unwrap_or_else(|e| {
             panic!("{}: {}", e, call_stack.join(" -> "));
@@ -1496,8 +1594,8 @@ impl<T: FieldOps + 'static> Var<T> {
     }
 }
 
-fn load_n<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>, load_bucket: &LoadBucket,
+fn load_n<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>, load_bucket: &LoadBucket,
     cmp: &mut ComponentInstance<T>, size: usize, print_debug: bool,
     call_stack: &Vec<String>) -> Vec<Var<T>> {
 
@@ -1609,8 +1707,8 @@ fn load_n<T: FieldOps + 'static>(
     }
 }
 
-fn build_unary_op_var<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>,
+fn build_unary_op_var<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>,
     cmp: &mut ComponentInstance<T>,
     op: UnoOperation,
     stack: &[InstructionPointer],
@@ -1633,8 +1731,8 @@ fn build_unary_op_var<T: FieldOps + 'static>(
 }
 
 // Create a Var from operation on two arguments a anb b
-fn build_binary_op_var<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>,
+fn build_binary_op_var<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>,
     cmp: &mut ComponentInstance<T>,
     op: Operation,
     stack: &[InstructionPointer],
@@ -1649,7 +1747,7 @@ fn build_binary_op_var<T: FieldOps + 'static>(
 
     let mut node_idx = |v: &Var<T>| match v {
         Var::Value(ref c) => {
-            ctx.nodes.push_constant(*c).0
+            ctx.nodes.const_node_idx_from_value(*c)
         }
         Var::Node(idx) => { *idx }
     };
@@ -1667,8 +1765,8 @@ fn build_binary_op_var<T: FieldOps + 'static>(
 
 // This function should calculate node based only on constant or variable
 // values. Not based on signal values.
-fn calc_expression<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>,
+fn calc_expression<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>,
     inst: &InstructionPointer,
     cmp: &mut ComponentInstance<T>,
     print_debug: bool,
@@ -1718,8 +1816,8 @@ fn calc_expression<T: FieldOps + 'static>(
 
 // This function should calculate node based only on constant or variable
 // values. Not based on signal values.
-fn calc_expression_n<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>,
+fn calc_expression_n<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>,
     inst: &InstructionPointer,
     cmp: &mut ComponentInstance<T>,
     size: usize,
@@ -1744,8 +1842,8 @@ fn calc_expression_n<T: FieldOps + 'static>(
     }
 }
 
-fn check_continue_condition<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>,
+fn check_continue_condition<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>,
     cmp: &mut ComponentInstance<T>,
     inst: &InstructionPointer,
     print_debug: bool,
@@ -1772,9 +1870,9 @@ fn get_constants<T: FieldOps>(
     Ok(constants)
 }
 
-fn init_input_signals<T: FieldOps + 'static>(
+fn init_input_signals<T: FieldOps + 'static, NS: NodesStorage + 'static>(
     circuit: &Circuit,
-    nodes: &mut Nodes<T>,
+    nodes: &mut Nodes<T, NS>,
     signal_node_idx: &mut [usize],
 ) -> InputSignalsInfo {
 
@@ -1796,8 +1894,8 @@ fn init_input_signals<T: FieldOps + 'static>(
     inputs_info
 }
 
-fn run_template<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>, print_debug: bool, call_stack: &[String],
+fn run_template<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>, print_debug: bool, call_stack: &[String],
     cmp: &mut ComponentInstance<T>) {
 
     let tmpl = &ctx.templates[cmp.template_id];
@@ -1806,6 +1904,7 @@ fn run_template<T: FieldOps + 'static>(
     let mut call_stack = call_stack.to_owned();
     call_stack.push(tmpl_name.clone());
 
+    ctx.push_stack(tmpl_name);
     if print_debug {
         println!(
             "Run template {}_{}: body length: {}", tmpl.name, tmpl.id,
@@ -1815,6 +1914,8 @@ fn run_template<T: FieldOps + 'static>(
     for inst in &tmpl.body {
         process_instruction(ctx, inst, print_debug, &call_stack, cmp);
     }
+
+    ctx.pop_stack();
 
     if print_debug {
         println!("Template {}_{} finished", tmpl.name, tmpl.id);
@@ -1869,6 +1970,8 @@ struct Args {
     prime: Prime,
     r1cs: Option<String>,
     optimization_level: Option<OptimizationLevel>,
+    named_temp: bool,
+    temp_dir: PathBuf,
 }
 
 fn parse_args() -> Args {
@@ -1882,15 +1985,44 @@ fn parse_args() -> Args {
     let mut r1cs_file: Option<String> = None;
     let mut prime: Option<Prime> = None;
     let mut optimization_level: Option<OptimizationLevel> = None;
+    let mut named_temp: bool = false;
+    let mut temp_dir: Option<PathBuf> = None;
 
-    let usage = |err_msg: &str| -> String {
-        eprintln!("{}", err_msg);
+    let usage = |err_msg: &str| {
+        if !err_msg.is_empty() {
+            eprintln!("ERROR:");
+            eprintln!("    {}", err_msg);
+            eprintln!();
+        }
+        eprintln!("USAGE:");
+        eprintln!("    {} <circuit_file> <wcd_file> [OPTIONS]", args[0]);
         eprintln!();
-        eprintln!("Usage: {} <circuit_file> <graph_file> [-l <link_library>]* [-i <inputs_file.json>] [-p <prime>] [--r1cs <r1cs_file>] [--O0 | --O1 | --O2] [-v]", args[0]);
+        eprintln!("ARGUMENTS:");
+        eprintln!("    <circuit_file>    Path to the Circom file with main template");
+        eprintln!("    <wcd_file>        File where the witness calculation description will be saved");
         eprintln!();
-        eprintln!("       Valid primes: bn128 (default), goldilocks, grumpkin");
-        eprintln!("       Default optimization level: --O2");
-        std::process::exit(1);
+        eprintln!("OPTIONS:");
+        eprintln!("    -h | --help             Display this help message");
+        eprintln!("    -l <link_libraries>...  Adds directory to library search path.");
+        eprintln!("                            Can be used multiple times.");
+        eprintln!("    -i <inputs_file.json>   Path to the inputs file. If provided, the inputs will be used");
+        eprintln!("                            to generate the witness. Otherwise, inputs will be set to 0");
+        eprintln!("    -p <prime>              The prime field to use. Valid options are 'bn128' (default),");
+        eprintln!("                            'goldilocks', and 'grumpkin'");
+        eprintln!("    --r1cs <r1cs_file>      Path to the R1CS file. If provided, the R1CS file will be");
+        eprintln!("                            saved along with the generated graph");
+        eprintln!("    --O0, --O1, --O2        Optimization level for circom. Default is --O2");
+        eprintln!("    -v                      Verbose mode");
+        eprintln!("    --named-temp            Normally, we create an unnamed temporary file that the OS");
+        eprintln!("                            deletes when the process exits. With this flag enabled, we");
+        eprintln!("                            create a named file so it can be inspected if needed. It is");
+        eprintln!("                            usually removed on exit, but if the process is killed abnormally,");
+        eprintln!("                            the file may remain");
+        eprintln!("    --temp-dir              Directory for creating the temporary file with nodes.");
+        eprintln!("                            Even for unnamed temporary files, this directory can specify");
+        eprintln!("                            the target partition");
+        let ret_code = if err_msg.is_empty() { 0 } else { 1 };
+        std::process::exit(ret_code);
     };
 
     while i < args.len() {
@@ -1900,6 +2032,8 @@ fn parse_args() -> Args {
                 usage("missing argument for -l");
             }
             link_libraries.push(args[i].clone().into());
+        } else if args[i] == "--help" || args[i] == "-h" {
+            usage("");
         } else if args[i].starts_with("-l") {
             link_libraries.push(args[i][2..].to_string().into())
         } else if args[i] == "-i" {
@@ -1960,6 +2094,17 @@ fn parse_args() -> Args {
                     prime = Some(p)
                 }
             }
+        } else if args[i] == "--named-temp" {
+            named_temp = true;
+        } else if args[i] == "--temp-dir" {
+            i += 1;
+            if i >= args.len() {
+                usage("missing argument for --temp-dir");
+            }
+            if temp_dir.is_some() {
+                usage("multiple --temp-dir specified");
+            }
+            temp_dir = Some(args[i].clone().into());
         } else if args[i].starts_with("-") {
             let message = format!("unknown argument: {}", args[i]);
             usage(&message);
@@ -1981,6 +2126,8 @@ fn parse_args() -> Args {
         prime: prime.unwrap_or(Prime::Bn128),
         r1cs: r1cs_file,
         optimization_level,
+        named_temp,
+        temp_dir: temp_dir.unwrap_or_else(env::temp_dir),
     }
 }
 
@@ -2084,14 +2231,14 @@ fn main() {
                 circuit.c_producer.prime.as_str()).unwrap();
             build_graph(
                 prime, circuit.c_producer.prime_str.as_str(), &circuit, &args,
-                &vcp)
+                &vcp, args.named_temp, &args.temp_dir)
         }
         254 => {
             let prime = <U254 as FieldOps>::from_str(
                 circuit.c_producer.prime.as_str()).unwrap();
             build_graph(
                 prime, circuit.c_producer.prime_str.as_str(), &circuit, &args,
-                &vcp)
+                &vcp, args.named_temp, &args.temp_dir)
         }
         _ => {
             panic!(
@@ -2103,13 +2250,18 @@ fn main() {
 
 fn build_graph<T: FieldOps + 'static>(
     prime: T, curve_name: &str, circuit: &Circuit,
-    args: &Args, vcp: &VCP) {
+    args: &Args, vcp: &VCP, named_temp: bool, temp_dir: &Path) {
 
-    let mut nodes = Nodes::new(prime, curve_name);
+    let nodes_storage = MMapNodes::new(named_temp, temp_dir);
+    let mut nodes = Nodes::new(
+        prime, curve_name, nodes_storage);
     let constants = get_constants(&nodes.ff, circuit).unwrap();
-    for c in constants {
-        nodes.push_constant(c);
+    for c in constants.iter() {
+        nodes.const_node_idx_from_value(*c);
     }
+    assert_eq!(
+        nodes.nodes.len(), constants.len(),
+        "duplicate constant found in circuit");
 
     // The node indexes for each signal. For example in
     // signal_node_idx[3] stored the node index for signal 3.
@@ -2138,14 +2290,20 @@ fn build_graph<T: FieldOps + 'static>(
 
     run_template(&mut ctx, args.print_debug, &[], &mut main_component);
 
-    ctx.progress_bar.set_message("");
+    ctx.update_progress_message();
     ctx.progress_bar.finish();
 
-    for (idx, i) in signal_node_idx.iter().enumerate() {
-        if *i == usize::MAX {
-            println!("[warning] signal #{} is not set", idx);
-        }
+    let unset_signals_num = signal_node_idx.iter()
+        .filter(|s| **s == usize::MAX)
+        .count();
+    if unset_signals_num > 0 {
+        println!("[warning] {} signals are not set", unset_signals_num);
     }
+    // for (idx, i) in signal_node_idx.iter().enumerate() {
+    //     if *i == usize::MAX {
+    //         println!("[warning] signal #{} is not set", idx);
+    //     }
+    // }
 
     let witness_list = vcp.get_witness_list().clone();
     let mut witness_node_idxes = witness_list
@@ -2176,10 +2334,13 @@ struct SignalDestination<'a> {
     dest: &'a LocationRule,
 }
 
-fn store_subcomponent_signals<T: FieldOps + 'static>(
-    ctx: &mut BuildCircuitContext<T>, src_node_idxs: &[usize], print_debug: bool,
-    call_stack: &Vec<String>, cmp: &mut ComponentInstance<T>,
-    dst: &SignalDestination) {
+fn store_subcomponent_signals<T, NS>(
+    ctx: &mut BuildCircuitContext<T, NS>, src_node_idxs: &[usize],
+    print_debug: bool, call_stack: &Vec<String>, cmp: &mut ComponentInstance<T>,
+    dst: &SignalDestination)
+where
+    T: FieldOps + 'static,
+    NS: NodesStorage + 'static {
 
     let input_status: &StatusInput;
     if let InputInformation::Input { ref status } = dst.input_information {
@@ -2226,9 +2387,7 @@ fn store_subcomponent_signals<T: FieldOps + 'static>(
 
     let signal_idx = signal_offset + signal_idx;
     for (i, v) in src_node_idxs.iter().enumerate() {
-        ctx.associate_signal_to_node(
-            signal_idx + i, *v, call_stack,
-            dst.cmp_address.get_line());
+        ctx.associate_signal_to_node(signal_idx + i, *v);
     }
     sub_cmp.number_of_inputs -= src_node_idxs.len();
 
