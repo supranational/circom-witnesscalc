@@ -232,7 +232,6 @@ fn main() {
         main_component, &cs.templates, &cs.functions, &cs.constants,
         &mut signals, &cs.io_map, None);
     println!("VM execution done in {:?}.", start.elapsed());
-    //
 
     let start = Instant::now();
 

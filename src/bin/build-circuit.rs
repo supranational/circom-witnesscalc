@@ -2440,5 +2440,3 @@ mod tests {
         assert!(r.is_err());
     }
 }
-
-// TODO remove nodes.0 from this file

@@ -2389,7 +2389,6 @@ STORE(
         assert_eq!(2, i32::from_le_bytes(code[jump_offset..jump_offset+4].try_into().unwrap()));
     }
 
-    // TODO: useless test for printing purposes. Maybe remove it.
     #[test]
     fn test_set_variable() {
         let code = vec![
