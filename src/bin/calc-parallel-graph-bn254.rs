@@ -1,5 +1,4 @@
 use std::env;
-use std::fs::File;
 use circom_witnesscalc::ffi::ParallelGraph;
 
 struct Args {

@@ -56,3 +56,5 @@ crate-type = ["lib", "staticlib", "cdylib"]
 [build-dependencies]
 bindgen = "0.70.1"
 prost-build = "0.13.3"
+
+[workspace]

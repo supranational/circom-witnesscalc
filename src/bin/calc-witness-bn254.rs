@@ -1,5 +1,6 @@
 use std::env;
 use std::io::Write;
+use std::fs::File;
 use wtns_file::FieldElement;
 use circom_witnesscalc::field::U254;
 use circom_witnesscalc::{ffi::ParallelGraph, wtns_from_witness2};
