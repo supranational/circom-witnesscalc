@@ -93,6 +93,64 @@ pub fn deserialize_witnesscalc_graph_from_bytes(
     Ok((outer_nodes, witness_signals, input_signals))
 }
 
+// specialized version of above fn which directly returns Nodes<U254, VecNodes>
+pub fn deserialize_witnesscalc_graph_from_bytes_bn254(
+    bytes: &[u8]
+) -> std::io::Result<(Nodes<U254, VecNodes>, Vec<usize>, InputSignalsInfo)> {
+
+    if bytes.len() < WITNESSCALC_GRAPH_MAGIC.len() {
+        return Err(Error::new(ErrorKind::Other, "Invalid magic"));
+    }
+    if !bytes[..WITNESSCALC_GRAPH_MAGIC.len()].eq(WITNESSCALC_GRAPH_MAGIC) {
+        return Err(Error::new(ErrorKind::Other, "Invalid magic"));
+    }
+
+    let mut idx: usize = WITNESSCALC_GRAPH_MAGIC.len();
+    let nodes_num = u64::from_le_bytes(bytes[idx..idx+8].try_into().unwrap());
+    idx += 8;
+
+    let vm_ptr = u64::from_le_bytes(bytes[bytes.len() - 8..bytes.len()]
+        .try_into().unwrap());
+    let r = Cursor::new(&bytes[vm_ptr as usize..]);
+    let mut br = WriteBackReader::new(r);
+    let md: crate::proto::GraphMetadata = read_message(&mut br)?;
+
+    if md.prime.is_some() {
+        assert!(md.prime_str.as_str() == "bn128")
+    };
+
+    let prime = U254::from_str(
+        "21888242871839275222246405745257275088548364400416034343698204186575808495617")
+        .unwrap();
+    let curve_name = "bn128";
+
+    let nodes = {
+        let node_storage = VecNodes::new();
+        let mut nodes = Nodes::new(
+            prime, curve_name, node_storage);
+        for _ in 0..nodes_num {
+            let (msg_len, int_len) = decode_varint_u32(&bytes[idx..])?;
+            idx += int_len;
+            decode_node(&bytes[idx..idx+msg_len as usize], &mut nodes)?;
+            idx += msg_len as usize;
+        }
+        nodes
+    };
+
+    let witness_signals = md.witness_signals
+        .iter()
+        .map(|x| *x as usize)
+        .collect::<Vec<usize>>();
+
+    let input_signals = md.inputs.iter()
+        .map(|(k, v)| {
+            (k.clone(), (v.offset as usize, v.len as usize))
+        })
+        .collect::<InputSignalsInfo>();
+
+    Ok((nodes, witness_signals, input_signals))
+}
+
 #[repr(u8)]
 #[derive(Debug)]
 enum WireType {

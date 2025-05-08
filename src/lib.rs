@@ -6,6 +6,7 @@ pub mod field;
 pub mod graph;
 pub mod storage;
 pub mod vm;
+pub mod ffi;
 
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CStr};
@@ -47,7 +48,7 @@ fn prepare_status(status: *mut gw_status_t, code: GW_ERROR_CODE, error_msg: &str
 }
 
 /// # Safety
-/// 
+///
 /// This function is unsafe because it dereferences raw pointers and can cause
 /// undefined behavior if misused.
 #[no_mangle]
@@ -135,7 +136,7 @@ fn wtns_from_witness(witness: Vec<FieldElement<32>>) -> Vec<u8> {
     buf
 }
 
-fn wtns_from_witness2<const FS: usize, T: FieldOps>(
+pub fn wtns_from_witness2<const FS: usize, T: FieldOps>(
     witness: Vec<FieldElement<FS>>, prime: T) -> Vec<u8> {
 
     let mut buf = Vec::new();

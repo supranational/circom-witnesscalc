@@ -369,6 +369,7 @@ pub trait FieldOperations {
     fn neg(&self, lhs: Self::Type) -> Self::Type;
 }
 
+#[derive(Clone)]
 pub struct Field<T> where T: FieldOps {
     pub prime: T,
     halfPrime: T,
@@ -659,6 +660,7 @@ impl<T: FieldOps> FieldOperations for &Field<T> {
             T::zero()
         }
     }
+
     fn op_uno(&self, op: UnoOperation, a: T) -> T {
         match op {
             UnoOperation::Neg => self.neg(a),

@@ -4,13 +4,14 @@ use std::collections::hash_map::Entry;
 use std::error::Error;
 use std::fmt::Debug;
 use std::fs::File;
-use std::ops::{BitOr, BitXor, Not};
+use std::ops::{BitOr, BitXor};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use crate::field::{Field, FieldOperations, FieldOps, M};
 use rand::{RngCore};
 use ruint::aliases::U256;
 use serde::{Deserialize, Serialize};
+use bincode::{Decode, Encode};
 
 use compiler::intermediate_representation::ir_interface::OperatorType;
 use memmap2::MmapMut;
@@ -19,7 +20,7 @@ use ruint::uint;
 use tempfile::NamedTempFile;
 use crate::progress_bar;
 
-#[derive(Hash, PartialEq, Eq, Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Hash, PartialEq, Eq, Debug, Clone, Copy, Serialize, Deserialize, Decode, Encode)]
 pub enum Operation {
     Mul,
     Div,
@@ -203,7 +204,7 @@ impl From<&Operation> for u8 {
     }
 }
 
-#[derive(Hash, PartialEq, Eq, Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Hash, PartialEq, Eq, Debug, Clone, Copy, Serialize, Deserialize, Decode, Encode)]
 pub enum UnoOperation {
     Neg,
     Id, // identity - just return self
@@ -303,7 +304,7 @@ impl From<&UnoOperation> for u8 {
 }
 
 
-#[derive(Hash, PartialEq, Eq, Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Hash, PartialEq, Eq, Debug, Clone, Copy, Serialize, Deserialize, Decode, Encode)]
 pub enum TresOperation {
     TernCond,
 }
@@ -342,7 +343,7 @@ impl From<&TresOperation> for u8 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, Decode, Encode)]
 pub enum Node {
     #[default]
     Unknown,
@@ -574,8 +575,9 @@ impl NodesStorage for MMapNodes {
     }
 }
 
+#[derive(Clone)]
 pub struct VecNodes {
-    nodes: Vec<Node>,
+    pub nodes: Vec<Node>,
 }
 
 impl VecNodes {
@@ -621,6 +623,7 @@ impl NodesStorage for VecNodes {
     }
 }
 
+#[derive(Clone)]
 pub struct Nodes<T: FieldOps, NS: NodesStorage> {
     prime_str: String,
     // TODO maybe remove pub
